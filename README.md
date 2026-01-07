@@ -20,13 +20,29 @@
 
 ### Prerequisites
 
-- Python 3.8+
+doc-audit skill require uv package manager setup environment for helper script to run
+
+- **[uv](https://github.com/astral-sh/uv)** - Fast Python package installer and resolver
+- Python 3.10+
 - Google Gemini API key OR OpenAI API key
 - Word documents created in Microsoft Word 2013+ (requires `w14:paraId` attributes)
 
 ### Setup
 
-1. **Set up environment variables**:
+1. **Install uv** (if not already installed):
+
+```bash
+# macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or with Homebrew (macOS)
+brew install uv
+
+# Or with pip
+pip install uv
+```
+
+2. **Set up environment variables**:
 
 ```bash
 # For Google Gemini (recommended)
@@ -36,7 +52,7 @@ export GOOGLE_API_KEY="your_api_key_here"
 export OPENAI_API_KEY="your_api_key_here"
 ```
 
-2. **Initialize the audit environment** (first time only):
+3. **Initialize the audit environment** (first time only):
 
 ```bash
 bash skills/doc-audit/scripts/setup_project_env.sh

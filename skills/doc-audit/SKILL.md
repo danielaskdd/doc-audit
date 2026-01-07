@@ -448,18 +448,18 @@ Older models are **NOT supported** and will cause API errors. If you encounter e
 
 **Model Configuration:**
 The default models for all scripts are centralized in `.claude-work/doc-audit/env.sh`:
-- **Gemini**: `gemini-3-flash` (changeable via `DOC_AUDIT_GEMINI_MODEL`)
+- **Gemini**: `gemini-3-flash-preview` (changeable via `DOC_AUDIT_GEMINI_MODEL`)
 - **OpenAI**: `gpt-5.2` (changeable via `DOC_AUDIT_OPENAI_MODEL`)
 
 ```bash
 # Example: Use a different model across all scripts
-export DOC_AUDIT_GEMINI_MODEL="gemini-2.0-flash-exp"
+export DOC_AUDIT_GEMINI_MODEL="gemini-2.5-flash"
 export DOC_AUDIT_OPENAI_MODEL="gpt-4o"  # or gpt-5.2, gpt-4o-mini, etc.
 ```
 
 ### Failure handling
 
-If a required package or API key is missing, do not proceed with the workflow. Provide the exact `pip install ...` command(s) and the `export ...` command(s) needed to prepare the environment.
+If a required package or API key is missing, do not proceed with the workflow. Provide the exact `uv pip install ...` command(s) and the `export ...` command(s) needed to prepare the environment.
 
 **Missing paraId Error:**
 

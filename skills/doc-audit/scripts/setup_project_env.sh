@@ -31,8 +31,8 @@ echo
 
 # 2. Create Python virtual environment
 if [ ! -d "$VENV_DIR" ]; then
-    echo "2. Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    echo "2. Creating Python virtual environment with uv..."
+    uv venv "$VENV_DIR"
     echo "   ✓ Virtual environment created: $VENV_DIR/"
 else
     echo "2. Python virtual environment already exists"
@@ -40,11 +40,10 @@ fi
 echo
 
 # 3. Install dependencies
-echo "3. Installing Python dependencies..."
+echo "3. Installing Python dependencies with uv..."
 source "$VENV_DIR/bin/activate"
 
-pip install --quiet --upgrade pip
-pip install --quiet python-docx lxml defusedxml jinja2 google-genai openai
+uv pip install python-docx lxml defusedxml jinja2 google-genai openai
 
 echo "   ✓ Installed packages:"
 
@@ -331,11 +330,11 @@ All scripts (`parse_rules.py` and `run_audit.py`) will automatically use the con
 The audit process requires an LLM API. Supported providers:
 
 1. **Google Gemini** (recommended)
-   - Install: `pip install google-genai`
+   - Install: `uv pip install google-genai`
    - Set: `export GOOGLE_API_KEY=...`
 
 2. **OpenAI**
-   - Install: `pip install openai`
+   - Install: `uv pip install openai`
    - Set: `export OPENAI_API_KEY=...`
    - **Model Requirement:** Must use `gpt-4o-2024-08-06` or later, `gpt-4o-mini`, `gpt-4o`, or `gpt-5.x`
    - Older models (gpt-4-turbo, gpt-4, gpt-3.5-turbo) do NOT support the required `json_schema` format
@@ -368,9 +367,9 @@ source .claude-work/doc-audit/env.sh
 
 **Error: Package not installed**
 ```bash
-# Reinstall dependencies
+# Reinstall dependencies with uv
 source .claude-work/venv/bin/activate
-pip install aspose-words jinja2 google-genai openai
+uv pip install python-docx lxml defusedxml jinja2 google-genai openai
 ```
 
 **Resume interrupted audit**
