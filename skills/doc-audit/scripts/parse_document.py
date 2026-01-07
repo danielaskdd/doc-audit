@@ -523,26 +523,26 @@ def extract_audit_blocks(file_path: str) -> list:
                 })
         
         elif tag == 'tbl':  # Table
-            # Find corresponding table object and append to current content
-            table_idx = sum(1 for e in list(body)[:list(body).index(element)] if e.tag.endswith('tbl'))
-            if table_idx < len(doc.tables):
-                table = doc.tables[table_idx]
-                table_data = TableExtractor.extract(table, numbering_resolver=resolver)
-                
-                # Convert table to JSON
-                table_json = json.dumps(table_data, ensure_ascii=False)
-                
-                # Validate table length
-                validate_table_length(table_json, current_heading)
-                
-                # Store table as a paragraph with special marker
-                # Generate a pseudo para_id for the table (use a hash of table content)
-                table_para_id = hashlib.md5(table_json.encode('utf-8')).hexdigest()[:8]
-                current_paragraphs.append({
-                    'text': f"<table>{table_json}</table>",
-                    'para_id': table_para_id,
-                    'is_table': True
-                })
+            # Directly create Table object from XML element to avoid index mismatch
+            # (doc.tables may have different order due to nested tables)
+            from docx.table import Table
+            table = Table(element, doc)
+            table_data = TableExtractor.extract(table, numbering_resolver=resolver)
+            
+            # Convert table to JSON
+            table_json = json.dumps(table_data, ensure_ascii=False)
+            
+            # Validate table length
+            validate_table_length(table_json, current_heading)
+            
+            # Store table as a paragraph with special marker
+            # Generate a pseudo para_id for the table (use a hash of table content)
+            table_para_id = hashlib.md5(table_json.encode('utf-8')).hexdigest()[:8]
+            current_paragraphs.append({
+                'text': f"<table>{table_json}</table>",
+                'para_id': table_para_id,
+                'is_table': True
+            })
     
     # Save final block with splitting if needed
     if current_paragraphs:
