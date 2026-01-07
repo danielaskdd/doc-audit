@@ -1,0 +1,13 @@
+# Requirements for doc-audit skill
+# Install with: pip install -r requirements.txt
+
+# Core dependencies (required)
+python-docx>=0.8.11
+lxml>=4.9.0
+defusedxml>=0.7.1
+jinja2>=3.1.0
+
+# LLM dependencies (optional - at least one required for audit execution)
+# Uncomment the one(s) you want to use:
+# google-genai>=0.2.0
+# openai>=1.0.0

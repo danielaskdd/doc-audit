@@ -239,6 +239,55 @@ doc-audit/
 - 🔑 Aspose.Words: Requires license for production (trial has evaluation watermark)
 - 🎯 Audit quality: Depends on LLM model and rule clarity
 
+## Development Setup
+
+For developers who want to debug or modify the skill scripts independently:
+
+### Manual Dependency Installation
+
+While the environment setup script (`setup_project_env.sh`) automatically installs all dependencies, you can also install them manually for development purposes:
+
+```bash
+# 1. Setup Virtual Environment
+uv venv --python 3.12 --seed
+source .venv/bin/activate
+
+# 2: Install dependencies from requirements.txt
+uv pip install -r skills/doc-audit/requirements.txt
+
+# Option: Install packages individually
+uv pip install python-docx>=0.8.11
+uv pip install lxml>=4.9.0
+uv pip install defusedxml>=0.7.1
+uv pip install jinja2>=3.1.0
+uv pip install google-genai>=0.2.0  # For Gemini
+uv pip install openai>=1.0.0         # For OpenAI
+```
+
+**Development Workflow:**
+
+```bash
+# 1. Create isolated virtual environment (optional but recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 2. Install dependencies
+pip install -r skills/doc-audit/requirements.txt
+
+# 3. Set API keys
+export GOOGLE_API_KEY="your_key"
+# or
+export OPENAI_API_KEY="your_key"
+
+# 4. Run individual scripts for debugging
+python skills/doc-audit/scripts/parse_document.py test.docx --preview
+python skills/doc-audit/scripts/run_audit.py --dry-run --document blocks.jsonl --rules rules.json
+```
+
+**Note:** The `requirements.txt` file lists LLM packages as commented-out by default. Uncomment the one(s) you need for development.
+
+---
+
 ## Advanced Usage
 
 ### Manual Workflow Control
