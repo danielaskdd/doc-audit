@@ -27,7 +27,8 @@ except ImportError:
 
 # Constants for content validation
 MAX_HEADING_LENGTH = 200      # Maximum heading length in characters
-MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters
+IDEAL_BLOCK_CONTENT_LENGTH = 5000  # Ideal target size for balanced splitting
+MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters (hard limit)
 MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs
 
 
@@ -105,11 +106,12 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     """
     Split a long text block into smaller blocks using anchor paragraphs.
     
-    Strategy:
-    1. Find all paragraphs <= MAX_ANCHOR_CANDIDATE_LENGTH as candidate anchors
-    2. Select the anchor closest to the middle position
-    3. Split the block at that anchor (anchor becomes the new heading)
-    4. Recursively check if split blocks still exceed the limit
+    Strategy (improved for balanced splitting):
+    1. Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_LENGTH
+    2. Ensure minimum blocks needed to stay under MAX_BLOCK_CONTENT_LENGTH
+    3. Find all candidate anchor paragraphs (<= MAX_ANCHOR_CANDIDATE_LENGTH)
+    4. Select anchors closest to ideal split positions for balanced distribution
+    5. Create blocks using selected anchors as new headings
     
     Args:
         block_heading: Original heading text
@@ -122,10 +124,13 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     Exits:
         sys.exit(1) if no suitable anchor found and content exceeds limit
     """
+    import math
+    
     # Calculate total content length
     total_content = "\n".join(p['text'] for p in paragraphs)
+    total_length = len(total_content)
     
-    if len(total_content) <= MAX_BLOCK_CONTENT_LENGTH:
+    if total_length <= MAX_BLOCK_CONTENT_LENGTH:
         # Within limit, return as single block
         # Use first paragraph's para_id as UUID (assuming it's the heading's para_id)
         return [{
@@ -137,6 +142,16 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         }]
     
     # Content exceeds limit, need to split
+    # Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_LENGTH
+    target_blocks = math.ceil(total_length / IDEAL_BLOCK_CONTENT_LENGTH)
+    
+    # Ensure we have enough blocks to stay under MAX_BLOCK_CONTENT_LENGTH
+    min_blocks_needed = math.ceil(total_length / MAX_BLOCK_CONTENT_LENGTH)
+    target_blocks = max(target_blocks, min_blocks_needed)
+    
+    # Calculate ideal size per block
+    target_size = total_length / target_blocks
+    
     # Find candidate anchors (short paragraphs, excluding tables and empty placeholders)
     candidates = []
     cumulative_length = 0
@@ -155,11 +170,12 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         preview = block_heading[:80] + "..." if len(block_heading) > 80 else block_heading
         print_error(
             f"Cannot split long block (no suitable anchor paragraphs found)",
-            f"A text block is too long ({len(total_content)} characters, max {MAX_BLOCK_CONTENT_LENGTH})\n"
+            f"A text block is too long ({total_length} characters, max {MAX_BLOCK_CONTENT_LENGTH})\n"
             f"but no paragraphs <= {MAX_ANCHOR_CANDIDATE_LENGTH} characters were found to use as split points.\n\n"
             f"Location: Under heading \"{preview}\"\n"
-            f"Block size: {len(total_content)} characters\n"
-            f"Number of paragraphs: {len(paragraphs)}",
+            f"Block size: {total_length} characters\n"
+            f"Number of paragraphs: {len(paragraphs)}\n"
+            f"Calculated target blocks: {target_blocks}",
             "  1. Open the document in Microsoft Word\n"
             f"  2. Locate the section under heading \"{preview}\"\n"
             f"  3. Add short headings or paragraph breaks (≤{MAX_ANCHOR_CANDIDATE_LENGTH} chars) to divide the content\n"
@@ -168,52 +184,115 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         )
         sys.exit(1)
     
-    # Select anchor closest to middle position
-    middle_pos = len(total_content) // 2
-    best_anchor = min(candidates, key=lambda c: abs(c['position'] - middle_pos))
-    split_idx = best_anchor['index']
+    # Select anchors for splitting (target_blocks - 1 split points needed)
+    selected_anchors = []
+    remaining_candidates = candidates.copy()
     
-    # Split paragraphs into two parts
-    # First part: paragraphs before anchor (keeps original heading's para_id via first_part[0])
-    first_part = paragraphs[:split_idx]
-    # Second part: anchor paragraph onwards (anchor becomes the new heading)
-    second_part = paragraphs[split_idx + 1:]  # Skip the anchor itself as it becomes the heading
+    for i in range(1, target_blocks):
+        if not remaining_candidates:
+            break
+        
+        # Calculate ideal position for this split
+        ideal_position = i * target_size
+        
+        # Find candidate closest to ideal position
+        best_candidate = min(remaining_candidates, key=lambda c: abs(c['position'] - ideal_position))
+        selected_anchors.append(best_candidate)
+        remaining_candidates.remove(best_candidate)
     
-    # Get UUID for second part (use anchor's para_id)
-    second_uuid = best_anchor['para_id']
+    # Sort selected anchors by index to maintain document order
+    selected_anchors.sort(key=lambda a: a['index'])
     
-    # New heading for second part is the anchor text
-    second_heading = best_anchor['text']
-    
-    # Validate second heading length
-    validate_heading_length(second_heading, second_uuid)
-    
-    # Create blocks (may need further splitting)
+    # Create blocks using selected split points
     result_blocks = []
+    prev_idx = 0
+    current_parent_headings = parent_headings
+    current_block_heading = block_heading
+    current_uuid = paragraphs[0]['para_id'] if paragraphs else None
     
-    # Process first part
-    if first_part:
-        first_blocks = split_long_block(block_heading, first_part, parent_headings)
-        result_blocks.extend(first_blocks)
+    for anchor in selected_anchors:
+        split_idx = anchor['index']
+        
+        # Create block from prev_idx to split_idx (exclusive)
+        block_paragraphs = paragraphs[prev_idx:split_idx]
+        if block_paragraphs:
+            block_content = "\n".join(p['text'] for p in block_paragraphs)
+            result_blocks.append({
+                "uuid": current_uuid,
+                "heading": current_block_heading,
+                "content": block_content,
+                "type": "text",
+                "parent_headings": current_parent_headings,
+                "_paragraphs": block_paragraphs  # Keep original paragraphs for potential re-splitting
+            })
+        
+        # Validate anchor as new heading
+        validate_heading_length(anchor['text'], anchor['para_id'])
+        
+        # Update for next block
+        current_block_heading = anchor['text']
+        current_uuid = anchor['para_id']
+        # Update parent headings: add previous heading only if not "Preface/Uncategorized"
+        if block_heading != "Preface/Uncategorized":
+            current_parent_headings = parent_headings + [block_heading]
+        
+        prev_idx = split_idx + 1  # Skip the anchor itself as it becomes the heading
     
-    # Process second part
-    if second_part:
-        # Update parent headings for second part
-        new_parent_headings = parent_headings + [block_heading] if block_heading != "Preface/Uncategorized" else parent_headings
-        second_blocks = split_long_block(second_heading, second_part, new_parent_headings)
-        result_blocks.extend(second_blocks)
-    elif not first_part:
-        # Edge case: only the anchor paragraph exists
-        # This shouldn't normally happen but handle it gracefully
+    # Create final block with remaining paragraphs
+    final_paragraphs = paragraphs[prev_idx:]
+    if final_paragraphs:
+        final_content = "\n".join(p['text'] for p in final_paragraphs)
         result_blocks.append({
-            "uuid": second_uuid,
-            "heading": second_heading,
-            "content": "",
+            "uuid": current_uuid,
+            "heading": current_block_heading,
+            "content": final_content,
             "type": "text",
-            "parent_headings": parent_headings
+            "parent_headings": current_parent_headings,
+            "_paragraphs": final_paragraphs  # Keep original paragraphs for potential re-splitting
         })
     
-    return result_blocks
+    # Post-split validation: Check if any block still exceeds MAX_BLOCK_CONTENT_LENGTH
+    # If so, recursively split that block (handles sparse anchor scenarios)
+    validated_blocks = []
+    for block in result_blocks:
+        if len(block['content']) > MAX_BLOCK_CONTENT_LENGTH:
+            # This block is still too large - need to recursively split it
+            # Use the preserved paragraph structure
+            block_paragraphs = block.get('_paragraphs', [])
+            
+            if not block_paragraphs:
+                # Fallback: shouldn't happen, but handle gracefully
+                preview = block['heading'][:80] + "..." if len(block['heading']) > 80 else block['heading']
+                print_error(
+                    f"Cannot re-split oversized block (internal error)",
+                    f"A block exceeded MAX_BLOCK_CONTENT_LENGTH but paragraph metadata was lost.\n\n"
+                    f"Location: Under heading \"{preview}\"\n"
+                    f"Block size: {len(block['content'])} characters",
+                    "This is an internal error. Please report this issue."
+                )
+                sys.exit(1)
+            
+            # Add UUID placeholder at the beginning
+            block_paragraphs_with_uuid = [{
+                'text': '',
+                'para_id': block['uuid'],
+                'is_table': False
+            }] + block_paragraphs
+            
+            # Recursively split this oversized block
+            # The recursive call will either find more anchors or raise an error
+            sub_blocks = split_long_block(
+                block['heading'],
+                block_paragraphs_with_uuid,
+                block['parent_headings']
+            )
+            validated_blocks.extend(sub_blocks)
+        else:
+            # Remove internal _paragraphs field before adding to final output
+            block.pop('_paragraphs', None)
+            validated_blocks.append(block)
+    
+    return validated_blocks
 
 
 def extract_para_id(para_element) -> str:
