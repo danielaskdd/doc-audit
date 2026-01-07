@@ -124,7 +124,9 @@ source ./.claude-work/doc-audit/env.sh
 - `.claude-work/doc-audit/report_template.html` - Report template (copied from assets)
 
 **Installed packages:**
-- `aspose-words` - DOCX parsing
+- `python-docx` - DOCX parsing
+- `lxml` - XML parsing
+- `defusedxml` - Defused XML parsing
 - `jinja2` - HTML templating
 - `google-genai` - Google Gemini LLM
 - `openai` - OpenAI LLM

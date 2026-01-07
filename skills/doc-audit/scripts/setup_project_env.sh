@@ -44,11 +44,9 @@ echo "3. Installing Python dependencies..."
 source "$VENV_DIR/bin/activate"
 
 pip install --quiet --upgrade pip
-pip install --quiet aspose-words jinja2 google-genai openai
+pip install --quiet python-docx lxml defusedxml jinja2 google-genai openai
 
 echo "   ✓ Installed packages:"
-pip list | grep -E "aspose-words|jinja2|google-genai|openai" | sed 's/^/     - /'
-echo
 
 # 4. Create environment setup script
 echo "4. Creating environment configuration..."
