@@ -1,0 +1,87 @@
+{
+  "version": "1.0",
+  "description": "Default audit rules for document verification",
+  "total_rules": 10,
+  "rules": [
+    {
+      "id": "R001",
+      "description": "检查原文是否存在错别字、标点符号误用或严重的语法错误，忽略空格和换行等排版错误。因为word是自动编号的，如果发现编号错误不要试图修复它，而是标记为人工修复， 并把`violation_text`设置为出现编号错误的正文。",
+      "severity": "medium",
+      "category": "grammar",
+      "examples": {
+        "violation": "内部协调和作机制",
+        "correction": "内部协调合作机制"
+      }
+    },
+    {
+      "id": "R002",
+      "description": "检查原文是否存在中英文对照内容，需要检查翻译是否准确，检查中文含义与英文表述是否存在语义冲突。",
+      "severity": "medium",
+      "category": "grammar",
+      "examples": {
+        "violation": "自动化控制系统具有极强的强壮性（Robustness）",
+        "correction": "自动化控制系统具有极强的鲁棒性（Robustness）"
+      }
+    },
+    {
+      "id": "R003",
+      "description": "检查原文是否存在指代关系模糊和歧义；例如包含多个不同名词或短语，导致代词的指代对象不唯一；又如同一概念用不同的指代名词来表示。",
+      "severity": "high",
+      "category": "clarity",
+      "examples": {
+        "violation": "甲方通知乙方其应支付费用，我方须在30天内完成，否则它将失效。",
+        "correction": "甲方通知乙方，乙方应支付费用；乙方须在30天内完成支付，否则本通知将失效。"
+      }
+    },
+    {
+      "id": "R004",
+      "description": "检查是否存在导致责任主体定义模糊的被动语态。",
+      "severity": "low",
+      "category": "clarity",
+      "examples": {
+        "violation": "必须在项目截止日期前一个月被提交验收报告。",
+        "correction": "乙方必须在项目截止日期前一个月被提交验收报告。"
+      }
+    },
+    {
+      "id": "R005",
+      "description": "检查是否存在时间或日期是的含糊表述。",
+      "severity": "medium",
+      "category": "clarity",
+      "examples": {
+        "violation": "交付物应在签署协议后立即提供。",
+        "correction": "交付物应在协议签署之日起15个工作日内提供。"
+      }
+    },
+    {
+      "id": "R006",
+      "description": "检查金额数值中是否缺失具体的货币单位或币种规范。",
+      "severity": "high",
+      "category": "semantic",
+      "examples": {
+        "violation": "违约金总额为5万元。",
+        "correction": "违约金总额为人民币5万元。"
+      }
+    },
+    {
+      "id": "R007",
+      "description": "检查是否存在数值计算错误；例如计算结果与实际情况不符，或计算过程中存在错误的操作顺序。",
+      "severity": "high",
+      "category": "logic",
+      "examples": {
+        "violation": "一年12月，每月25天，每天10小时，年工作时长为3600小时。",
+        "correction": "一年12月，每月25天，每天10小时，年工作时长为3000小时。"
+      }
+    },
+    {
+      "id": "R008",
+      "description": "检查是否存在内部的逻辑错误；例如前提和结论不一致，或陈述的事实无法推导出结论，或陈述之间相互矛盾。",
+      "severity": "high",
+      "category": "logic",
+      "examples": {
+        "violation": "技术要求：内容容量256MB；投标相应：内容容量512MB；偏离结论：无偏离",
+        "correction": "偏离结论：正偏离."
+      }
+    }
+  ]
+}

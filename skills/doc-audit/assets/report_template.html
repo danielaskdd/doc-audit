@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档审核结果 ({{ violation_count }}个问题)</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-light: #3b82f6;
+            --danger: #dc2626;
+            --danger-light: #ef4444;
+            --warning: #d97706;
+            --warning-light: #f59e0b;
+            --success: #16a34a;
+            --success-light: #22c55e;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-400: #9ca3af;
+            --gray-500: #6b7280;
+            --gray-600: #4b5563;
+            --gray-700: #374151;
+            --gray-800: #1f2937;
+            --gray-900: #111827;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--gray-800);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding-top: 140px;
+            padding-bottom: 2rem;
+        }
+
+        /* Fixed Header */
+        .fixed-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+            z-index: 100;
+            padding: 1rem 2rem;
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header-row-1 {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            gap: 1rem;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex: 1;
+        }
+
+        .header-title h1 {
+            font-size: 1.5rem;
+            color: var(--gray-900);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            white-space: nowrap;
+        }
+
+        .issue-stats {
+            font-size: 0.875rem;
+            padding: 0.25rem 0.75rem;
+            background: var(--gray-100);
+            border-radius: 999px;
+            color: var(--gray-700);
+            font-weight: 600;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .header-row-2 {
+            display: flex;
+            align-items: center;
+        }
+
+        .file-info {
+            font-size: 0.75rem;
+            color: var(--gray-600);
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .filter-label {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            font-weight: 500;
+        }
+
+        select {
+            padding: 0.5rem 2rem 0.5rem 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 8px;
+            background: white;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        select:hover {
+            border-color: var(--primary);
+        }
+
+        .status-filter {
+            display: flex;
+            gap: 0.25rem;
+            background: var(--gray-100);
+            padding: 0.25rem;
+            border-radius: 8px;
+        }
+
+        .status-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: transparent;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--gray-700);
+            transition: all 0.2s;
+        }
+
+        .status-btn:hover {
+            background: var(--gray-200);
+        }
+
+        .status-btn.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        .export-btn {
+            padding: 0.5rem 1.5rem;
+            background: var(--success);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s;
+            margin-left: auto;
+        }
+
+        .export-btn:hover {
+            background: var(--success-light);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+
+        /* Issue Styles */
+        .issues-container {
+            background: white;
+            padding: 2rem;
+            border-radius: 16px;
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+
+        .issue {
+            border: 1px solid var(--gray-200);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            transition: all 0.2s;
+            border-left: 4px solid var(--primary);
+        }
+
+        .issue.blocked {
+            opacity: 0.5;
+            background: var(--gray-50);
+            border-left-color: var(--gray-400);
+        }
+
+        .issue.blocked .issue-title {
+            text-decoration: line-through;
+        }
+
+        .issue:hover:not(.blocked) {
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+
+        .issue-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+
+        .issue-title-row {
+            display: flex;
+            align-items: center;
+        }
+
+        .issue-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 28px;
+            height: 28px;
+            padding: 0 0.5rem;
+            background: var(--primary);
+            color: white;
+            border-radius: 14px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-right: 0.75rem;
+        }
+
+        .issue.blocked .issue-number {
+            background: var(--gray-400);
+        }
+
+        .issue-title {
+            font-weight: 600;
+            color: var(--gray-800);
+            font-size: 1rem;
+        }
+
+        .issue-badges {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .badge.category { background: var(--gray-100); color: var(--gray-600); }
+        .badge.rule { 
+            background: #dbeafe; 
+            color: var(--primary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .badge.rule:hover {
+            background: var(--primary);
+            color: white;
+            transform: scale(1.05);
+        }
+
+        .issue-content {
+            margin-bottom: 1rem;
+        }
+
+        .issue-content label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--gray-500);
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+
+        .source-text {
+            background: var(--gray-50);
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+            font-size: 0.875rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            border: 1px solid var(--gray-200);
+            max-height: 4.8em;
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .source-text.expanded {
+            max-height: none;
+        }
+
+        .source-text::after {
+            content: '... 点击展开▼';
+            position: absolute;
+            bottom: 0.5rem;
+            right: 0.5rem;
+            background: var(--gray-100);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            color: var(--primary);
+        }
+
+        .source-text.expanded::after {
+            content: '收起▲';
+        }
+
+        .source-text:hover {
+            background: var(--gray-100);
+            border-color: var(--primary);
+        }
+
+        .violation-text {
+            background: #fef2f2;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+            font-size: 0.875rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            border: 1px solid #fecaca;
+            border-left: 3px solid var(--danger);
+            color: var(--gray-700);
+        }
+
+        .revised-text {
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid #a7f3d0;
+            color: #065f46;
+            font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+            font-size: 0.875rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin-top: 0.5rem;
+        }
+
+        .suggestion {
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid #a7f3d0;
+            color: #065f46;
+        }
+
+        .suggestion::before {
+            content: '💡 ';
+        }
+
+        .reason-text {
+            color: var(--gray-700);
+            padding: 0.75rem;
+            background: var(--gray-50);
+            border-radius: 8px;
+            border-left: 3px solid var(--primary);
+        }
+
+        .fix-action-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .fix-action-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 600;
+        }
+
+        .fix-action-badge.delete {
+            background: #fef2f2;
+            color: #dc2626;
+            border: 1px solid #fecaca;
+        }
+
+        .fix-action-badge.replace {
+            background: #ecfdf5;
+            color: #16a34a;
+            border: 1px solid #a7f3d0;
+        }
+
+        .fix-action-badge.manual {
+            background: #fef3c7;
+            color: #d97706;
+            border: 1px solid #fcd34d;
+        }
+
+        .block-toggle {
+            display: flex;
+            align-items: center;
+            flex-direction: row-reverse;
+            gap: 0.5rem;
+            cursor: pointer;
+            user-select: none;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .block-toggle:hover {
+            background: var(--gray-50);
+        }
+
+        .block-checkbox {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .block-toggle span {
+            font-size: 0.9rem;
+            color: var(--warning);
+            font-weight: 700;
+        }
+
+        .no-issues {
+            text-align: center;
+            padding: 3rem;
+            color: var(--success);
+        }
+
+        .no-issues .icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+
+        .no-issues h3 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1);
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+            animation: modalSlideIn 0.3s ease-out;
+        }
+
+        @keyframes modalSlideIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .modal-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--gray-200);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-title {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .modal-rule-id {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .severity-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: white;
+        }
+
+        .severity-high { background: var(--danger); }
+        .severity-medium { background: var(--warning); }
+        .severity-low { background: var(--gray-400); }
+
+        .modal-close {
+            width: 32px;
+            height: 32px;
+            border: none;
+            background: var(--gray-100);
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.5rem;
+            line-height: 1;
+            color: var(--gray-600);
+            transition: all 0.2s;
+        }
+
+        .modal-close:hover {
+            background: var(--gray-200);
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+        }
+
+        .modal-section-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--gray-500);
+            margin-bottom: 0.5rem;
+        }
+
+        .modal-section-content {
+            color: var(--gray-700);
+            line-height: 1.6;
+        }
+
+        footer {
+            text-align: center;
+            color: white;
+            font-size: 0.875rem;
+            padding: 2rem;
+            opacity: 0.8;
+        }
+
+        @media (max-width: 768px) {
+            body { padding-top: 180px; }
+            .header-row-2 { flex-direction: column; align-items: stretch; }
+            .export-btn { margin-left: 0; width: 100%; justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Fixed Header -->
+    <div class="fixed-header">
+        <div class="header-content">
+            <div class="header-row-1">
+                <div class="header-left">
+                    <h1>
+                        📋 文档审核报告
+                        <span class="issue-stats" id="issueStats">
+                            有效: <span id="validCount">{{ violation_count }}</span> | 
+                            屏蔽: <span id="blockedCount">0</span>
+                            <span id="filteredStats" style="display: none;"> | 
+                                当前显示: <span id="filteredCount">0</span>
+                            </span>
+                        </span>
+                    </h1>
+                </div>
+                <div class="header-controls">
+                    <div class="filter-group">
+                        <span class="filter-label">类型:</span>
+                        <select id="categoryFilter" onchange="applyFilters()">
+                            <option value="all">全部类型</option>
+                            {% for category in category_counts.keys() %}
+                            <option value="{{ category }}">{{ category }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <span class="filter-label">状态:</span>
+                        <div class="status-filter">
+                            <button class="status-btn active" data-status="all" onclick="filterByStatus('all')">全部</button>
+                            <button class="status-btn" data-status="valid" onclick="filterByStatus('valid')">有效</button>
+                            <button class="status-btn" data-status="blocked" onclick="filterByStatus('blocked')">屏蔽</button>
+                        </div>
+                    </div>
+                    <button class="export-btn" onclick="exportResults()">
+                        <span>💾</span>
+                        <span>导出结果</span>
+                    </button>
+                </div>
+            </div>
+            <div class="header-row-2">
+                <div class="file-info">
+                    📄 <span id="filePathDisplay"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="issues-container">
+            {% if violations %}
+                {% for v in violations %}
+                <div class="issue" data-category="{{ v.category }}" data-index="{{ loop.index }}">
+                    <div class="issue-header">
+                        <div class="issue-title-row">
+                            <span class="issue-number">{{ loop.index }}</span>
+                            <span class="issue-title">{{ v.heading }}</span>
+                        </div>
+                        <div class="issue-badges">
+                            <span class="badge rule" onclick="showRuleModal('{{ v.rule_id }}')">{{ v.rule_id }}</span>
+                            <span class="badge category">{{ v.category }}</span>
+                        </div>
+                    </div>
+
+                    <div class="issue-content">
+                        <label>原文内容</label>
+                        <div class="source-text" onclick="toggleExpand(this)">{{ v.content }}</div>
+                    </div>
+
+                    {% if v.violation_text %}
+                    <div class="issue-content">
+                        <label>违规文本/修改内容</label>
+                        <div class="violation-text">{{ v.violation_text }}</div>
+                        {% if v.revised_text %}
+                        <div class="{% if v.fix_action == 'manual' %}suggestion{% else %}revised-text{% endif %}">{{ v.revised_text }}</div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    <div class="issue-content">
+                        <label>违规原因</label>
+                        <div class="reason-text">{{ v.violation_reason }}</div>
+                    </div>
+
+                    {% if v.fix_action %}
+                    <div class="issue-content">
+                        <label>修正动作</label>
+                        <div class="fix-action-row">
+                            <div class="fix-action-badge {{ v.fix_action }}">
+                                {% if v.fix_action == 'delete' %}🗑️ 删除
+                                {% elif v.fix_action == 'replace' %}✏️ 替换
+                                {% else %}👤 人工审核
+                                {% endif %}
+                            </div>
+                            <label class="block-toggle">
+                                <span>屏蔽本条</span>
+                                <input type="checkbox" class="block-checkbox" onchange="toggleBlock(this, {{ loop.index }})">
+                            </label>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="no-issues">
+                    <div class="icon">✅</div>
+                    <h3>恭喜！未发现问题</h3>
+                    <p>文档已通过所有审核规则检查</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <footer>
+        <p>Generated by Document Audit Skill v1.0.0</p>
+        <p>Source: {{ source_file }}</p>
+    </footer>
+
+    <!-- Rule Details Modal -->
+    <div class="modal-overlay" id="ruleModal" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <span class="modal-rule-id" id="modal-rule-id"></span>
+                    <span class="badge category" id="modal-category"></span>
+                    <span class="severity-badge" id="modal-severity"></span>
+                </div>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-section-title">Rule Description</div>
+                <div class="modal-section-content" id="modal-description"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Data from Python
+        const RULES = {{ rules | tojson }};
+        const SOURCE_FILE = {{ source_file | tojson }};
+        const SOURCE_HASH = {{ source_hash | tojson }};
+        const VIOLATIONS = {{ violations | tojson }};
+        
+        let currentCategoryFilter = 'all';
+        let currentStatusFilter = 'all';
+
+        function toggleExpand(element) {
+            element.classList.toggle('expanded');
+        }
+
+        function toggleBlock(checkbox, index) {
+            const issue = document.querySelector(`.issue[data-index="${index}"]`);
+            if (checkbox.checked) {
+                issue.classList.add('blocked');
+                issue.setAttribute('data-blocked', 'true');
+            } else {
+                issue.classList.remove('blocked');
+                issue.removeAttribute('data-blocked');
+            }
+            updateStats();
+            applyFilters();
+        }
+
+        function filterByStatus(status) {
+            currentStatusFilter = status;
+            document.querySelectorAll('.status-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.status === status);
+            });
+            applyFilters();
+        }
+
+        function applyFilters() {
+            const categoryFilter = document.getElementById('categoryFilter').value;
+            currentCategoryFilter = categoryFilter;
+
+            let visibleCount = 0;
+            document.querySelectorAll('.issue').forEach(issue => {
+                const category = issue.getAttribute('data-category');
+                const isBlocked = issue.hasAttribute('data-blocked');
+                
+                let showByCategory = (categoryFilter === 'all' || category === categoryFilter);
+                let showByStatus = (currentStatusFilter === 'all') ||
+                                 (currentStatusFilter === 'blocked' && isBlocked) ||
+                                 (currentStatusFilter === 'valid' && !isBlocked);
+                
+                const shouldShow = showByCategory && showByStatus;
+                issue.style.display = shouldShow ? 'block' : 'none';
+                
+                if (shouldShow) {
+                    visibleCount++;
+                }
+            });
+            
+            // Update filtered stats display
+            const hasActiveFilter = (categoryFilter !== 'all' || currentStatusFilter !== 'all');
+            const filteredStatsElement = document.getElementById('filteredStats');
+            const filteredCountElement = document.getElementById('filteredCount');
+            
+            if (hasActiveFilter) {
+                filteredCountElement.textContent = visibleCount;
+                filteredStatsElement.style.display = 'inline';
+            } else {
+                filteredStatsElement.style.display = 'none';
+            }
+        }
+
+        function updateStats() {
+            const allIssues = document.querySelectorAll('.issue');
+            const blockedIssues = document.querySelectorAll('.issue[data-blocked="true"]');
+            
+            const validCount = allIssues.length - blockedIssues.length;
+            const blockedCount = blockedIssues.length;
+            
+            document.getElementById('validCount').textContent = validCount;
+            document.getElementById('blockedCount').textContent = blockedCount;
+        }
+
+        async function exportResults() {
+            // Prepare export data
+            const exportData = [];
+            
+            // Add metadata as first line
+            const metadata = {
+                type: 'meta',
+                source_file: SOURCE_FILE,
+                source_hash: SOURCE_HASH,
+                exported_at: new Date().toISOString()
+            };
+            exportData.push(JSON.stringify(metadata));
+            
+            // Add non-blocked violations
+            VIOLATIONS.forEach((v, index) => {
+                const issue = document.querySelector(`.issue[data-index="${index + 1}"]`);
+                if (!issue || issue.hasAttribute('data-blocked')) {
+                    return; // Skip blocked items
+                }
+                // Export with specified field order
+                const orderedViolation = {
+                    category: v.category,
+                    fix_action: v.fix_action,
+                    violation_reason: v.violation_reason,
+                    violation_text: v.violation_text,
+                    revised_text: v.revised_text,
+                    rule_id: v.rule_id,
+                    uuid: v.uuid,
+                    heading: v.heading,
+                    content: v.content
+                };
+                exportData.push(JSON.stringify(orderedViolation));
+            });
+            
+            const content = exportData.join('\n');
+            // Extract filename without path and extension
+            const sourceFileName = SOURCE_FILE.split('/').pop().replace(/\.[^/.]+$/, '');
+            const filename = sourceFileName + '_audit_export.jsonl';
+            
+            // Try File System Access API first
+            if ('showSaveFilePicker' in window) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: filename,
+                        startIn: 'downloads',
+                        types: [{
+                            description: 'JSONL Files',
+                            accept: { 'application/jsonl': ['.jsonl'] }
+                        }]
+                    });
+                    
+                    const writable = await handle.createWritable();
+                    await writable.write(content);
+                    await writable.close();
+                    
+                    alert('审核结果已成功导出！');
+                    return;
+                } catch (err) {
+                    if (err.name !== 'AbortError') {
+                        console.error('File System Access API error:', err);
+                    }
+                    // Fall through to blob download
+                }
+            }
+            
+            // Fallback: Traditional blob download
+            const blob = new Blob([content], { type: 'application/jsonl' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            alert('审核结果已下载到浏览器默认下载文件夹！');
+        }
+
+        function showRuleModal(ruleId) {
+            const rule = RULES[ruleId];
+            if (!rule) {
+                console.error('Rule not found:', ruleId);
+                return;
+            }
+
+            document.getElementById('modal-rule-id').textContent = rule.id;
+            document.getElementById('modal-category').textContent = rule.category;
+            document.getElementById('modal-description').textContent = rule.description || 'No description available';
+
+            const severityBadge = document.getElementById('modal-severity');
+            severityBadge.textContent = rule.severity;
+            severityBadge.className = 'severity-badge severity-' + rule.severity;
+
+            document.getElementById('ruleModal').classList.add('active');
+        }
+
+        function closeModal(event) {
+            if (!event || event.target.id === 'ruleModal' || event.target.classList.contains('modal-close')) {
+                document.getElementById('ruleModal').classList.remove('active');
+            }
+        }
+
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        // Initialize
+        updateStats();
+        
+        // Display full file path
+        document.getElementById('filePathDisplay').textContent = SOURCE_FILE;
+    </script>
+</body>
+</html>
