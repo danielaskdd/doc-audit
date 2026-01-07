@@ -31,8 +31,8 @@ echo
 
 # 2. Create Python virtual environment
 if [ ! -d "$VENV_DIR" ]; then
-    echo "2. Creating Python virtual environment with uv..."
-    uv venv "$VENV_DIR"
+    echo "2. Creating Python virtual environment with uv (Python 3.12)..."
+    uv venv "$VENV_DIR" --python 3.12 --seed
     echo "   ✓ Virtual environment created: $VENV_DIR/"
 else
     echo "2. Python virtual environment already exists"

@@ -23,7 +23,7 @@
 doc-audit skill require uv package manager setup environment for helper script to run
 
 - **[uv](https://github.com/astral-sh/uv)** - Fast Python package installer and resolver
-- Python 3.10+
+- Python 3.12+
 - Google Gemini API key OR OpenAI API key
 - Word documents created in Microsoft Word 2013+ (requires `w14:paraId` attributes)
 
