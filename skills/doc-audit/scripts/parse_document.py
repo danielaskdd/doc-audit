@@ -25,6 +25,197 @@ except ImportError:
     sys.exit(1)
 
 
+# Constants for content validation
+MAX_HEADING_LENGTH = 200      # Maximum heading length in characters
+MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters
+MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs
+
+
+def print_error(title: str, details: str, solution: str):
+    """
+    Print a friendly, formatted error message.
+    
+    Args:
+        title: Error title
+        details: Detailed error information
+        solution: Suggested solution steps
+    """
+    print("\n" + "=" * 80, file=sys.stderr)
+    print(f"ERROR: {title}", file=sys.stderr)
+    print("=" * 80, file=sys.stderr)
+    print(f"\n{details}", file=sys.stderr)
+    print(f"\nSOLUTION:", file=sys.stderr)
+    print(solution, file=sys.stderr)
+    print("\n" + "=" * 80 + "\n", file=sys.stderr)
+
+
+def validate_heading_length(heading_text: str, para_id: str):
+    """
+    Validate that heading length does not exceed MAX_HEADING_LENGTH.
+    
+    Args:
+        heading_text: The heading text to validate
+        para_id: The paragraph ID for error reporting
+        
+    Exits:
+        sys.exit(1) if heading exceeds maximum length
+    """
+    if len(heading_text) > MAX_HEADING_LENGTH:
+        preview = heading_text[:100] + "..." if len(heading_text) > 100 else heading_text
+        print_error(
+            f"Heading too long ({len(heading_text)} characters, max {MAX_HEADING_LENGTH})",
+            f"The following heading exceeds the maximum allowed length:\n\n  \"{preview}\"\n\n"
+            f"Location: Paragraph ID {para_id}\n"
+            f"Actual length: {len(heading_text)} characters",
+            "  1. Open the document in Microsoft Word\n"
+            f"  2. Shorten this heading to {MAX_HEADING_LENGTH} characters or less\n"
+            "  3. Re-run the audit workflow"
+        )
+        sys.exit(1)
+
+
+def validate_table_length(table_json: str, block_heading: str):
+    """
+    Validate that table JSON does not exceed MAX_BLOCK_CONTENT_LENGTH.
+    
+    Args:
+        table_json: The JSON representation of the table
+        block_heading: The heading of the block containing this table
+        
+    Exits:
+        sys.exit(1) if table exceeds maximum length
+    """
+    if len(table_json) > MAX_BLOCK_CONTENT_LENGTH:
+        print_error(
+            f"Table too large ({len(table_json)} characters, max {MAX_BLOCK_CONTENT_LENGTH})",
+            f"A table in the document is too large for LLM processing.\n\n"
+            f"Location: Under heading \"{block_heading}\"\n"
+            f"Table size: {len(table_json)} characters\n\n"
+            "Large tables can cause issues with automated auditing.",
+            "  1. Open the document in Microsoft Word\n"
+            f"  2. Locate the table under heading \"{block_heading}\"\n"
+            "  3. Split the table into smaller tables, or\n"
+            "  4. Simplify the table content\n"
+            "  5. Re-run the audit workflow"
+        )
+        sys.exit(1)
+
+
+def split_long_block(block_heading: str, paragraphs: list, parent_headings: list) -> list:
+    """
+    Split a long text block into smaller blocks using anchor paragraphs.
+    
+    Strategy:
+    1. Find all paragraphs <= MAX_ANCHOR_CANDIDATE_LENGTH as candidate anchors
+    2. Select the anchor closest to the middle position
+    3. Split the block at that anchor (anchor becomes the new heading)
+    4. Recursively check if split blocks still exceed the limit
+    
+    Args:
+        block_heading: Original heading text
+        paragraphs: List of dicts with 'text', 'para_id', and 'is_table' keys
+        parent_headings: Parent heading stack
+        
+    Returns:
+        List of block dictionaries (may be split into multiple blocks)
+        
+    Exits:
+        sys.exit(1) if no suitable anchor found and content exceeds limit
+    """
+    # Calculate total content length
+    total_content = "\n".join(p['text'] for p in paragraphs)
+    
+    if len(total_content) <= MAX_BLOCK_CONTENT_LENGTH:
+        # Within limit, return as single block
+        # Use first paragraph's para_id as UUID (assuming it's the heading's para_id)
+        return [{
+            "uuid": paragraphs[0]['para_id'] if paragraphs else None,
+            "heading": block_heading,
+            "content": total_content,
+            "type": "text",
+            "parent_headings": parent_headings
+        }]
+    
+    # Content exceeds limit, need to split
+    # Find candidate anchors (short paragraphs, excluding tables and empty placeholders)
+    candidates = []
+    cumulative_length = 0
+    for idx, para in enumerate(paragraphs):
+        if not para.get('is_table', False) and 0 < len(para['text']) <= MAX_ANCHOR_CANDIDATE_LENGTH:
+            candidates.append({
+                'index': idx,
+                'text': para['text'],
+                'para_id': para['para_id'],
+                'position': cumulative_length
+            })
+        cumulative_length += len(para['text']) + 1  # +1 for newline
+    
+    if not candidates:
+        # No suitable anchor found
+        preview = block_heading[:80] + "..." if len(block_heading) > 80 else block_heading
+        print_error(
+            f"Cannot split long block (no suitable anchor paragraphs found)",
+            f"A text block is too long ({len(total_content)} characters, max {MAX_BLOCK_CONTENT_LENGTH})\n"
+            f"but no paragraphs <= {MAX_ANCHOR_CANDIDATE_LENGTH} characters were found to use as split points.\n\n"
+            f"Location: Under heading \"{preview}\"\n"
+            f"Block size: {len(total_content)} characters\n"
+            f"Number of paragraphs: {len(paragraphs)}",
+            "  1. Open the document in Microsoft Word\n"
+            f"  2. Locate the section under heading \"{preview}\"\n"
+            f"  3. Add short headings or paragraph breaks (≤{MAX_ANCHOR_CANDIDATE_LENGTH} chars) to divide the content\n"
+            "  4. Re-run the audit workflow\n\n"
+            f"Tip: Short headings like '概述', '背景', '详细说明' can serve as natural split points."
+        )
+        sys.exit(1)
+    
+    # Select anchor closest to middle position
+    middle_pos = len(total_content) // 2
+    best_anchor = min(candidates, key=lambda c: abs(c['position'] - middle_pos))
+    split_idx = best_anchor['index']
+    
+    # Split paragraphs into two parts
+    # First part: paragraphs before anchor (keeps original heading's para_id via first_part[0])
+    first_part = paragraphs[:split_idx]
+    # Second part: anchor paragraph onwards (anchor becomes the new heading)
+    second_part = paragraphs[split_idx + 1:]  # Skip the anchor itself as it becomes the heading
+    
+    # Get UUID for second part (use anchor's para_id)
+    second_uuid = best_anchor['para_id']
+    
+    # New heading for second part is the anchor text
+    second_heading = best_anchor['text']
+    
+    # Validate second heading length
+    validate_heading_length(second_heading, second_uuid)
+    
+    # Create blocks (may need further splitting)
+    result_blocks = []
+    
+    # Process first part
+    if first_part:
+        first_blocks = split_long_block(block_heading, first_part, parent_headings)
+        result_blocks.extend(first_blocks)
+    
+    # Process second part
+    if second_part:
+        # Update parent headings for second part
+        new_parent_headings = parent_headings + [block_heading] if block_heading != "Preface/Uncategorized" else parent_headings
+        second_blocks = split_long_block(second_heading, second_part, new_parent_headings)
+        result_blocks.extend(second_blocks)
+    elif not first_part:
+        # Edge case: only the anchor paragraph exists
+        # This shouldn't normally happen but handle it gracefully
+        result_blocks.append({
+            "uuid": second_uuid,
+            "heading": second_heading,
+            "content": "",
+            "type": "text",
+            "parent_headings": parent_headings
+        })
+    
+    return result_blocks
+
+
 def extract_para_id(para_element) -> str:
     """
     Extract w14:paraId attribute from paragraph element.
@@ -154,6 +345,8 @@ def extract_audit_blocks(file_path: str) -> list:
     1. Capture automatic numbering (list labels)
     2. Split document by headings
     3. Convert tables to JSON (2D array)
+    4. Validate heading lengths and table sizes
+    5. Split long blocks using anchor paragraphs
     
     Args:
         file_path: Path to the DOCX file
@@ -169,7 +362,7 @@ def extract_audit_blocks(file_path: str) -> list:
     current_heading = "Preface/Uncategorized"
     current_heading_para_id = None  # paraId of current heading paragraph
     current_heading_stack = []
-    current_content = []
+    current_paragraphs = []  # Track paragraphs with metadata for splitting
     current_first_content_para_id = None  # For Preface blocks without heading
     
     # Iterate through document body elements (paragraphs and tables)
@@ -202,24 +395,29 @@ def extract_audit_blocks(file_path: str) -> list:
                 # Extract paraId for this heading
                 heading_para_id = extract_para_id(element)
                 
-                # Save previous block
-                if current_content:
-                    content_text = "\n".join(current_content)
-                    # Use heading's paraId as block UUID, or first content paraId for Preface
-                    block_uuid = current_heading_para_id if current_heading_para_id else current_first_content_para_id
-                    if not block_uuid:
-                        raise ValueError(
-                            "Cannot generate block UUID: no heading paraId and no content paraId found. "
-                            "This should not happen in a valid document."
-                        )
-                    blocks.append({
-                        "uuid": block_uuid,
-                        "heading": current_heading,
-                        "content": content_text,
-                        "type": "text",
-                        "parent_headings": current_heading_stack[:-1] if current_heading_stack else []
-                    })
-                    current_content = []
+                # Validate heading length
+                validate_heading_length(full_text, heading_para_id)
+                
+                # Save previous block with splitting if needed
+                if current_paragraphs:
+                    parent_headings_for_block = current_heading_stack[:-1] if current_heading_stack else []
+                    
+                    # Add heading's para_id at the beginning for UUID tracking
+                    if current_heading_para_id:
+                        current_paragraphs.insert(0, {
+                            'text': '',  # Empty text for heading UUID placeholder
+                            'para_id': current_heading_para_id,
+                            'is_table': False
+                        })
+                    elif current_first_content_para_id:
+                        # For Preface blocks, use first content para_id
+                        current_paragraphs[0]['para_id'] = current_first_content_para_id
+                    
+                    # Split long blocks if needed
+                    split_blocks = split_long_block(current_heading, current_paragraphs, parent_headings_for_block)
+                    blocks.extend(split_blocks)
+                    
+                    current_paragraphs = []
                     current_first_content_para_id = None  # Reset for next block
                 
                 # Convert 0-based to 1-based level
@@ -232,13 +430,18 @@ def extract_audit_blocks(file_path: str) -> list:
                 current_heading_para_id = heading_para_id
             else:
                 # Regular paragraph content
-                # Extract paraId and track first content paragraph for Preface blocks
+                # Extract paraId and track for Preface blocks
                 para_id = extract_para_id(element)
                 if not current_first_content_para_id and not current_heading_para_id:
                     # This is the first content paragraph under Preface
                     current_first_content_para_id = para_id
                 
-                current_content.append(full_text)
+                # Store paragraph with metadata for potential splitting
+                current_paragraphs.append({
+                    'text': full_text,
+                    'para_id': para_id,
+                    'is_table': False
+                })
         
         elif tag == 'tbl':  # Table
             # Find corresponding table object and append to current content
@@ -247,27 +450,39 @@ def extract_audit_blocks(file_path: str) -> list:
                 table = doc.tables[table_idx]
                 table_data = TableExtractor.extract(table, numbering_resolver=resolver)
                 
-                # Convert table to JSON and append as <table>JSON</table>
+                # Convert table to JSON
                 table_json = json.dumps(table_data, ensure_ascii=False)
-                current_content.append(f"<table>{table_json}</table>")
+                
+                # Validate table length
+                validate_table_length(table_json, current_heading)
+                
+                # Store table as a paragraph with special marker
+                # Generate a pseudo para_id for the table (use a hash of table content)
+                table_para_id = hashlib.md5(table_json.encode('utf-8')).hexdigest()[:8]
+                current_paragraphs.append({
+                    'text': f"<table>{table_json}</table>",
+                    'para_id': table_para_id,
+                    'is_table': True
+                })
     
-    # Save final block
-    if current_content:
-        content_text = "\n".join(current_content)
-        # Use heading's paraId as block UUID, or first content paraId for Preface
-        block_uuid = current_heading_para_id if current_heading_para_id else current_first_content_para_id
-        if not block_uuid:
-            raise ValueError(
-                "Cannot generate block UUID: no heading paraId and no content paraId found. "
-                "This should not happen in a valid document."
-            )
-        blocks.append({
-            "uuid": block_uuid,
-            "heading": current_heading,
-            "content": content_text,
-            "type": "text",
-            "parent_headings": current_heading_stack[:-1] if current_heading_stack else []
-        })
+    # Save final block with splitting if needed
+    if current_paragraphs:
+        parent_headings_for_block = current_heading_stack[:-1] if current_heading_stack else []
+        
+        # Add heading's para_id at the beginning for UUID tracking
+        if current_heading_para_id:
+            current_paragraphs.insert(0, {
+                'text': '',  # Empty text for heading UUID placeholder
+                'para_id': current_heading_para_id,
+                'is_table': False
+            })
+        elif current_first_content_para_id:
+            # For Preface blocks, use first content para_id
+            current_paragraphs[0]['para_id'] = current_first_content_para_id
+        
+        # Split long blocks if needed
+        split_blocks = split_long_block(current_heading, current_paragraphs, parent_headings_for_block)
+        blocks.extend(split_blocks)
     
     return blocks
 
