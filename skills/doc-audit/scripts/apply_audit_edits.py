@@ -104,7 +104,13 @@ class AuditEditApplier:
     # ==================== JSONL & Hash ====================
     
     def _load_jsonl(self) -> Tuple[Dict, List[EditItem]]:
-        """Load JSONL export file"""
+        """
+        Load JSONL export file.
+        
+        Supports two formats:
+        1. Flat format (from html report export): Each line is a single violation with all fields
+        2. Nested format (from run_audit.py outpu): Each line contains multiple violations per paragraph
+        """
         meta = {}
         items = []
         
@@ -114,9 +120,37 @@ class AuditEditApplier:
                 if not line:
                     continue
                 data = json.loads(line)
+                
                 if data.get('type') == 'meta':
                     meta = data
+                elif 'violations' in data:
+                    # Nested format from run_audit.py
+                    # Each paragraph has multiple violations or empty array
+                    violations = data.get('violations', [])
+                    if not violations:
+                        # Skip paragraphs with no violations
+                        continue
+                    
+                    # Extract common fields for this paragraph
+                    uuid = data.get('uuid', '')
+                    heading = data.get('p_heading', '')  # Map from p_heading
+                    content = data.get('p_content', '')  # Map from p_content
+                    
+                    # Flatten violations array into separate EditItems
+                    for v in violations:
+                        items.append(EditItem(
+                            uuid=uuid,
+                            violation_text=v.get('violation_text', ''),
+                            violation_reason=v.get('violation_reason', ''),
+                            fix_action=v.get('fix_action', 'manual'),
+                            revised_text=v.get('revised_text', ''),
+                            category=v.get('category', ''),
+                            rule_id=v.get('rule_id', ''),
+                            heading=heading,
+                            content=content
+                        ))
                 else:
+                    # Flat format (existing format for backward compatibility)
                     items.append(EditItem(
                         uuid=data.get('uuid', ''),
                         violation_text=data.get('violation_text', ''),
