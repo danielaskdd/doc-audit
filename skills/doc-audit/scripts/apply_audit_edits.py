@@ -446,6 +446,33 @@ class AuditEditApplier:
     
     # ==================== Manual (Comment) Operation ====================
     
+    def _apply_error_comment(self, para_elem, item: EditItem) -> bool:
+        """
+        Insert an unselected comment at the end of paragraph for failed items.
+        
+        Comment format: {WHY}<violation_reason>  {WHERE}<violation_text>{SUGGEST}<revised_text>
+        Author: AI-Error
+        """
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        
+        # Insert only commentReference at the end of paragraph (no range selection)
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+        
+        # Record comment content with custom format and author
+        comment_text = f"{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        self.comments.append({
+            'id': comment_id,
+            'text': comment_text,
+            'author': 'AI-Error'
+        })
+        
+        return True
+    
     def _apply_manual(self, para_elem, violation_text: str,
                      violation_reason: str, revised_text: str) -> bool:
         """Apply manual operation by adding a Word comment"""
@@ -545,9 +572,13 @@ class AuditEditApplier:
                 comments_xml, f'{{{NS["w"]}}}comment'
             )
             comment_elem.set(f'{{{NS["w"]}}}id', str(comment['id']))
-            comment_elem.set(f'{{{NS["w"]}}}author', self.author)
+            # Support independent author for each comment (e.g., AI-Error for failed items)
+            comment_author = comment.get('author', self.author)
+            comment_elem.set(f'{{{NS["w"]}}}author', comment_author)
             comment_elem.set(f'{{{NS["w"]}}}date', timestamp)
-            comment_elem.set(f'{{{NS["w"]}}}initials', self.initials)
+            # Use author initials or default
+            comment_initials = comment_author[:2] if len(comment_author) >= 2 else comment_author
+            comment_elem.set(f'{{{NS["w"]}}}initials', comment_initials)
 
             # Add paragraph with text
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
@@ -577,6 +608,7 @@ class AuditEditApplier:
     
     def _process_item(self, item: EditItem) -> EditResult:
         """Process a single edit item"""
+        anchor_para = None
         try:
             # 1. Find anchor paragraph by ID
             anchor_para = self._find_para_node_by_id(item.uuid)
@@ -595,6 +627,8 @@ class AuditEditApplier:
                     break
             
             if target_para is None:
+                # Insert error comment immediately on failure
+                self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item,
                     f"Text not found after anchor: {item.violation_text[:30]}...")
             
@@ -611,14 +645,21 @@ class AuditEditApplier:
                     item.violation_reason, item.revised_text
                 )
             else:
+                # Insert error comment for unknown action type
+                self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, f"Unknown action type: {item.fix_action}")
             
             if success:
                 return EditResult(True, item)
             else:
+                # Insert error comment when operation fails
+                self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, "Operation failed")
                 
         except Exception as e:
+            # Insert error comment on exception if anchor paragraph exists
+            if anchor_para is not None:
+                self._apply_error_comment(anchor_para, item)
             return EditResult(False, item, str(e))
     
     def apply(self) -> List[EditResult]:
