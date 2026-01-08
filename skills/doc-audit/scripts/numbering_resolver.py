@@ -47,6 +47,7 @@ class NumberingResolver:
         # Smart numbering merge state (Word's rendering behavior)
         self.last_numId: str = None  # Previous paragraph's numId
         self.last_abstract_id: str = None  # Previous paragraph's abstractNumId
+        self.last_style_id: str = None  # Previous paragraph's style ID
         self._parse_numbering_xml(docx_path)
         self._parse_styles_xml(docx_path)
     
@@ -85,12 +86,22 @@ class NumberingResolver:
                     
                     self.abstract_nums[abstract_id] = levels
                 
-                # Parse num -> abstractNum mapping
+                # Parse num -> abstractNum mapping and startOverride
                 for num in root.findall('.//w:num', NSMAP):
                     num_id = num.get(f'{{{NSMAP["w"]}}}numId')
                     abstract_ref = num.find('w:abstractNumId', NSMAP)
                     if abstract_ref is not None:
                         self.num_to_abstract[num_id] = abstract_ref.get(f'{{{NSMAP["w"]}}}val')
+                    
+                    # Parse lvlOverride/startOverride for this num
+                    for lvl_override in num.findall('w:lvlOverride', NSMAP):
+                        ilvl = int(lvl_override.get(f'{{{NSMAP["w"]}}}ilvl'))
+                        start_override = lvl_override.find('w:startOverride', NSMAP)
+                        if start_override is not None:
+                            start_val = int(start_override.get(f'{{{NSMAP["w"]}}}val'))
+                            if num_id not in self.start_overrides:
+                                self.start_overrides[num_id] = {}
+                            self.start_overrides[num_id][ilvl] = start_val
         except Exception:
             # Silently ignore parsing errors - document may not have numbering
             pass
@@ -164,6 +175,22 @@ class NumberingResolver:
         
         return None
     
+    def reset_tracking_state(self):
+        """
+        Reset numbering tracking state.
+        
+        Call this when encountering structural breaks that should
+        interrupt numbering continuity:
+        - Section breaks (sectPr)
+        - Table boundaries (before and after tables)
+        
+        This prevents incorrect numbering continuation across
+        document structure boundaries.
+        """
+        self.last_numId = None
+        self.last_abstract_id = None
+        self.last_style_id = None
+    
     def get_label(self, para_element) -> str:
         """
         Get rendered numbering label for a paragraph.
@@ -225,9 +252,7 @@ class NumberingResolver:
             
             # If still no numbering found, clear state and return empty
             if num_id is None:
-                # Non-numbered paragraph - clear tracking state
-                self.last_numId = None
-                self.last_abstract_id = None
+                # We should use list structure breaking logic to reset last_numId, last_abstract_id and last_style_id
                 return ""
             
             # Get abstract definition
@@ -245,14 +270,17 @@ class NumberingResolver:
                 self.last_abstract_id = None
                 return ""
             
-            # Smart numbering merge: Word's rendering behavior
-            # If previous paragraph had different numId but same abstractNumId,
-            # AND current numId has been used before (not new), copy counter to continue numbering
+            # Smart numbering merge: (Word's rendering behavior)
+            #    - IF last_numID had different numId but same abstractNumId
+            #    - AND current numId has been used before (not new)
+            #    - AND style matches
+
             if (self.last_numId is not None and 
                 self.last_numId != num_id and 
                 self.last_abstract_id == abstract_id and
                 self.last_numId in self.counters and
-                num_id in self.counters):  # Only merge if current numId already exists
+                num_id in self.counters and
+                self.last_style_id == style_id):
                 # Merge: copy previous numId's counter to current numId
                 self.counters[num_id] = self.counters[self.last_numId].copy()
             
@@ -263,7 +291,11 @@ class NumberingResolver:
             # Initialize all parent levels if not present (for deep nested numbering)
             for i in range(ilvl):
                 if i not in self.counters[num_id] and i in levels:
-                    self.counters[num_id][i] = levels[i]['start']
+                    # Use startOverride if exists, otherwise use abstractNum's start value
+                    if num_id in self.start_overrides and i in self.start_overrides[num_id]:
+                        self.counters[num_id][i] = self.start_overrides[num_id][i]
+                    else:
+                        self.counters[num_id][i] = levels[i]['start']
             
             # Reset lower levels when higher level increments
             for i in range(ilvl + 1, 10):
@@ -272,7 +304,11 @@ class NumberingResolver:
             
             # Initialize current level if needed
             if ilvl not in self.counters[num_id]:
-                self.counters[num_id][ilvl] = levels[ilvl]['start']
+                # Use startOverride if exists, otherwise use abstractNum's start value
+                if num_id in self.start_overrides and ilvl in self.start_overrides[num_id]:
+                    self.counters[num_id][ilvl] = self.start_overrides[num_id][ilvl]
+                else:
+                    self.counters[num_id][ilvl] = levels[ilvl]['start']
             else:
                 self.counters[num_id][ilvl] += 1
             
@@ -282,6 +318,7 @@ class NumberingResolver:
             # Update tracking state for next paragraph
             self.last_numId = num_id
             self.last_abstract_id = abstract_id
+            self.last_style_id = style_id
             
             return label
         except Exception:

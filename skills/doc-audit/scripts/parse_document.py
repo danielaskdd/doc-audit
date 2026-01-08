@@ -450,6 +450,10 @@ def extract_audit_blocks(file_path: str) -> list:
     for element in body:
         tag = element.tag.split('}')[-1]  # Remove namespace
         
+        if tag == 'sectPr':  # Document-level section break
+            resolver.reset_tracking_state()
+            continue
+        
         if tag == 'p':  # Paragraph
             # Get paragraph text
             para_text = ''
@@ -521,8 +525,20 @@ def extract_audit_blocks(file_path: str) -> list:
                     'para_id': para_id,
                     'is_table': False
                 })
+            
+            # Check for paragraph-level section break (after processing paragraph)
+            # sectPr in pPr means this paragraph ends a section
+            pPr = element.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
+            if pPr is not None:
+                sectPr = pPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sectPr')
+                if sectPr is not None:
+                    # Section break after this paragraph - reset tracking
+                    resolver.reset_tracking_state()
         
         elif tag == 'tbl':  # Table
+            # Reset numbering tracking before table (table start boundary)
+            resolver.reset_tracking_state()
+            
             # Directly create Table object from XML element to avoid index mismatch
             # (doc.tables may have different order due to nested tables)
             from docx.table import Table
@@ -543,6 +559,9 @@ def extract_audit_blocks(file_path: str) -> list:
                 'para_id': table_para_id,
                 'is_table': True
             })
+            
+            # Reset numbering tracking after table (table end boundary)
+            resolver.reset_tracking_state()
     
     # Save final block with splitting if needed
     if current_paragraphs:
