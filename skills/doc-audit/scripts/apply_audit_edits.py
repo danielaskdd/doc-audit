@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import sys
+import re
 import difflib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,6 +33,18 @@ NS = {
 COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 
+# Auto-numbering pattern for detecting and stripping list prefixes
+# Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", etc.
+AUTO_NUMBERING_PATTERN = re.compile(
+    r'^(?:'
+    r'\d+(?:[\.\d)）]+)\s+'  # Numeric: 1. 1.1 1) 1）
+    r'|'
+    r'[a-zA-Z][.)）]\s+'     # Alphabetic: a. A) b）
+    r'|'
+    r'•\s*'                   # Bullet: • (optional space)
+    r')'
+)
+
 # ============================================================
 # Data Classes
 # ============================================================
@@ -55,6 +68,28 @@ class EditResult:
     success: bool
     item: EditItem
     error_message: Optional[str] = None
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def strip_auto_numbering(text: str) -> Tuple[str, bool]:
+    """
+    Strip auto-numbering prefix from text.
+    
+    Examples:
+        "1. Introduction" -> ("Introduction", True)
+        "a) First item" -> ("First item", True)
+        "• Important note" -> ("Important note", True)
+        "Normal text" -> ("Normal text", False)
+    
+    Returns:
+        (stripped_text, was_stripped)
+    """
+    match = AUTO_NUMBERING_PATTERN.match(text)
+    if match:
+        return text[match.end():], True
+    return text, False
 
 # ============================================================
 # Main Class: AuditEditApplier
@@ -652,6 +687,11 @@ class AuditEditApplier:
             
             # 2. Search for text from anchor paragraph
             target_para = None
+            violation_text_to_use = item.violation_text
+            revised_text_to_use = item.revised_text
+            numbering_stripped = False
+            
+            # Try original text first
             for para in self._iter_paragraphs_following(anchor_para):
                 runs_info = self._collect_runs_info(para)
                 combined = self._get_combined_text(runs_info)
@@ -659,6 +699,40 @@ class AuditEditApplier:
                 if item.violation_text in combined:
                     target_para = para
                     break
+            
+            # Fallback: Try stripping auto-numbering if original match failed
+            if target_para is None:
+                stripped_violation, was_stripped = strip_auto_numbering(item.violation_text)
+                
+                if was_stripped:
+                    if self.verbose:
+                        print(f"  [Fallback] Trying without numbering: {stripped_violation[:30]}...")
+                    
+                    for para in self._iter_paragraphs_following(anchor_para):
+                        runs_info = self._collect_runs_info(para)
+                        combined = self._get_combined_text(runs_info)
+                        
+                        if stripped_violation in combined:
+                            target_para = para
+                            numbering_stripped = True
+                            violation_text_to_use = stripped_violation
+                            
+                            # Handle revised_text for replace operation
+                            if item.fix_action == 'replace':
+                                stripped_revised, revised_has_numbering = strip_auto_numbering(item.revised_text)
+                                
+                                if revised_has_numbering:
+                                    # Both have numbering: strip both
+                                    revised_text_to_use = stripped_revised
+                                    if self.verbose:
+                                        print(f"  [Fallback] Stripped numbering from both texts")
+                                else:
+                                    # Only violation_text has numbering: use original revised_text
+                                    revised_text_to_use = item.revised_text
+                                    if self.verbose:
+                                        print(f"  [Fallback] Only violation_text had numbering")
+                            
+                            break
             
             if target_para is None:
                 # Insert error comment immediately on failure
@@ -668,15 +742,15 @@ class AuditEditApplier:
             
             # 3. Apply operation based on fix_action
             if item.fix_action == 'delete':
-                success = self._apply_delete(target_para, item.violation_text)
+                success = self._apply_delete(target_para, violation_text_to_use)
             elif item.fix_action == 'replace':
                 success = self._apply_replace(
-                    target_para, item.violation_text, item.revised_text
+                    target_para, violation_text_to_use, revised_text_to_use
                 )
             elif item.fix_action == 'manual':
                 success = self._apply_manual(
-                    target_para, item.violation_text,
-                    item.violation_reason, item.revised_text
+                    target_para, violation_text_to_use,
+                    item.violation_reason, revised_text_to_use
                 )
             else:
                 # Insert error comment for unknown action type
@@ -684,6 +758,8 @@ class AuditEditApplier:
                 return EditResult(False, item, f"Unknown action type: {item.fix_action}")
             
             if success:
+                if numbering_stripped and self.verbose:
+                    print(f"  [Success] Matched after stripping auto-numbering")
                 return EditResult(True, item)
             else:
                 # Insert error comment when operation fails
