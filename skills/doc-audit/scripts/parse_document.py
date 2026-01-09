@@ -32,6 +32,11 @@ MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters (h
 MIN_BLOCK_CONTENT_LENGTH = 500  # Minimum block content length (triggers merging)
 MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs
 
+# Constants for table splitting
+TABLE_IDEAL_LENGTH = 3000  # Ideal target size for table chunks
+TABLE_MAX_LENGTH = 5000    # Maximum table size before splitting (triggers table splitting)
+TABLE_MIN_LAST_CHUNK_LENGTH = 1000  # Minimum last chunk size (merge with previous if smaller)
+
 
 def print_error(title: str, details: str, solution: str):
     """
@@ -124,6 +129,169 @@ def validate_table_length(table_json: str, block_heading: str):
             "  5. Re-run the audit workflow"
         )
         sys.exit(1)
+
+
+def find_first_valid_para_id(para_ids: list) -> str:
+    """
+    Find the first valid paraId in a 2D array of paraIds.
+    
+    Args:
+        para_ids: 2D list of paraIds from table cells
+        
+    Returns:
+        str: First non-None paraId found
+        
+    Exits:
+        sys.exit(1) if no valid paraId found
+    """
+    for row in para_ids:
+        for para_id in row:
+            if para_id:
+                return para_id
+    
+    # No valid paraId found
+    print_error(
+        "Cannot find valid paraId in table",
+        "A table was encountered but no cells contain valid paragraph IDs.\n"
+        "This may indicate the table was created by incompatible software.",
+        "  1. Open the document in Microsoft Word 2013 or later\n"
+        "  2. Save the file (Ctrl+S)\n"
+        "  3. Re-run the audit workflow"
+    )
+    sys.exit(1)
+
+
+def split_table(table_rows: list, para_ids: list, header_indices: list, debug: bool = False) -> list:
+    """
+    Split large table into chunks at row boundaries.
+    
+    Splitting Strategy:
+    1. Only split if table JSON exceeds TABLE_MAX_LENGTH (5000 chars)
+    2. Calculate target chunks based on TABLE_IDEAL_LENGTH (3000 chars)
+    3. Split at row boundaries to achieve balanced chunk sizes
+    4. Avoid very small last chunk: if last chunk < 1000 chars, merge with previous
+    5. Extract first valid paraId for each chunk as UUID
+    
+    Output Strategy:
+    - First chunk: Merges with preceding content, uses original heading
+    - Middle chunks: Standalone blocks with heading suffix [1], [2], etc.
+    - Last chunk: Merges with following content, includes table_header if present
+    - Non-first chunks include table_header field (extracted from w:tblHeader attribute)
+    
+    Args:
+        table_rows: 2D array of table content
+        para_ids: 2D array of paraIds (parallel structure to table_rows)
+        header_indices: List of row indices that are table headers
+        debug: If True, output debug information
+        
+    Returns:
+        List of chunk dicts: [{
+            'rows': 2D array subset,
+            'para_ids': 2D array subset,
+            'uuid': first valid paraId in chunk,
+            'is_first': True if first chunk,
+            'is_last': True if last chunk
+        }, ...]
+    """
+    import math
+    
+    # Calculate total JSON length
+    total_json = json.dumps(table_rows, ensure_ascii=False)
+    total_length = len(total_json)
+    
+    if total_length <= TABLE_MAX_LENGTH:
+        # No splitting needed
+        uuid = find_first_valid_para_id(para_ids)
+        return [{
+            'rows': table_rows,
+            'para_ids': para_ids,
+            'uuid': uuid,
+            'is_first': True,
+            'is_last': True
+        }]
+    
+    # Need to split - calculate target number of chunks
+    target_chunks = math.ceil(total_length / TABLE_IDEAL_LENGTH)
+    min_chunks_needed = math.ceil(total_length / TABLE_MAX_LENGTH)
+    target_chunks = max(target_chunks, min_chunks_needed)
+    
+    # Split at row boundaries
+    chunks = []
+    num_rows = len(table_rows)
+    target_rows_per_chunk = num_rows / target_chunks
+    
+    start_row = 0
+    for i in range(target_chunks):
+        # Calculate end row for this chunk
+        if i == target_chunks - 1:
+            # Last chunk gets all remaining rows
+            end_row = num_rows
+        else:
+            # Target end row (rounded)
+            end_row = min(int((i + 1) * target_rows_per_chunk), num_rows)
+            
+            # Adjust to avoid very small last chunk
+            rows_remaining = num_rows - end_row
+            if rows_remaining > 0 and rows_remaining < target_rows_per_chunk * 0.3:
+                # Last chunk would be too small, expand this chunk
+                end_row = num_rows
+        
+        # Extract chunk
+        chunk_rows = table_rows[start_row:end_row]
+        chunk_para_ids = para_ids[start_row:end_row]
+        
+        if chunk_rows:
+            chunk_uuid = find_first_valid_para_id(chunk_para_ids)
+            chunks.append({
+                'rows': chunk_rows,
+                'para_ids': chunk_para_ids,
+                'uuid': chunk_uuid,
+                'is_first': (i == 0),
+                'is_last': (end_row >= num_rows)
+            })
+        
+        start_row = end_row
+        if start_row >= num_rows:
+            break
+    
+    # Post-processing: Merge very small last chunk with previous chunk if possible
+    if len(chunks) >= 2:
+        last_chunk = chunks[-1]
+        last_chunk_json = json.dumps(last_chunk['rows'], ensure_ascii=False)
+        
+        if len(last_chunk_json) < TABLE_MIN_LAST_CHUNK_LENGTH:
+            # Try to merge with previous chunk
+            prev_chunk = chunks[-2]
+            
+            # Calculate combined size
+            combined_rows = prev_chunk['rows'] + last_chunk['rows']
+            combined_json = json.dumps(combined_rows, ensure_ascii=False)
+            
+            # Only merge if combined size doesn't exceed max limit
+            if len(combined_json) <= TABLE_MAX_LENGTH:
+                # Merge the chunks
+                merged_para_ids = prev_chunk['para_ids'] + last_chunk['para_ids']
+                chunks[-2] = {
+                    'rows': combined_rows,
+                    'para_ids': merged_para_ids,
+                    'uuid': prev_chunk['uuid'],  # Keep UUID of first chunk
+                    'is_first': prev_chunk['is_first'],
+                    'is_last': True  # This becomes the last chunk
+                }
+                chunks.pop()  # Remove the last chunk
+                
+                if debug:
+                    print(f"[DEBUG] Merged small last chunk ({len(last_chunk_json)} chars) with previous chunk", file=sys.stderr)
+                    print(f"  Combined size: {len(combined_json)} chars", file=sys.stderr)
+    
+    # Debug output
+    if debug and len(chunks) > 1:
+        print(f"\n[DEBUG] Table split into {len(chunks)} chunks (final)", file=sys.stderr)
+        for i, chunk in enumerate(chunks):
+            chunk_json = json.dumps(chunk['rows'], ensure_ascii=False)
+            print(f"  Chunk {i+1}: {len(chunk['rows'])} rows, {len(chunk_json)} chars", file=sys.stderr)
+    
+    return chunks
 
 
 def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
@@ -242,6 +410,15 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     """
     import math
     
+    # Check if this block starts with a split table chunk (has _chunk_heading metadata)
+    # If so, use that heading instead of block_heading
+    effective_heading = block_heading
+    table_header = None
+    
+    if paragraphs and paragraphs[0].get('_chunk_heading'):
+        effective_heading = paragraphs[0]['_chunk_heading']
+        table_header = paragraphs[0].get('_table_header')
+    
     # Calculate total content length
     total_content = "\n".join(p['text'] for p in paragraphs)
     total_length = len(total_content)
@@ -249,13 +426,19 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     if total_length <= MAX_BLOCK_CONTENT_LENGTH:
         # Within limit, return as single block
         # Use first paragraph's para_id as UUID
-        return [{
+        block = {
             "uuid": paragraphs[0]['para_id'] if paragraphs else None,
-            "heading": block_heading,
+            "heading": effective_heading,
             "content": total_content,
             "type": "text",
             "parent_headings": parent_headings
-        }]
+        }
+        
+        # Add table_header if present
+        if table_header:
+            block["table_header"] = table_header
+        
+        return [block]
     
     # Content exceeds limit, need to split
     # Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_LENGTH
@@ -666,25 +849,86 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             # (doc.tables may have different order due to nested tables)
             from docx.table import Table
             table = Table(element, doc)
-            table_data = TableExtractor.extract(table, numbering_resolver=resolver)
+            table_metadata = TableExtractor.extract_with_metadata(table, numbering_resolver=resolver)
             
-            # Convert table to JSON
-            table_json = json.dumps(table_data, ensure_ascii=False)
+            table_rows = table_metadata['rows']
+            para_ids = table_metadata['para_ids']
+            header_indices = table_metadata['header_indices']
             
-            # Validate table length
-            validate_table_length(table_json, current_heading)
+            # Convert table to JSON to check length
+            table_json = json.dumps(table_rows, ensure_ascii=False)
             
-            # Store table as a paragraph with special marker
-            # Generate a pseudo para_id for the table (use a hash of table content)
-            table_para_id = hashlib.md5(table_json.encode('utf-8')).hexdigest()[:8]
-            current_paragraphs.append({
-                'text': f"<table>{table_json}</table>",
-                'para_id': table_para_id,
-                'is_table': True
-            })
-            
-            # Mark that we have body content
-            has_body_content = True
+            # Check if table needs splitting
+            if len(table_json) > TABLE_MAX_LENGTH:
+                # Table exceeds limit - split it
+                table_chunks = split_table(table_rows, para_ids, header_indices, debug)
+                
+                # Extract header rows if any
+                header_rows = []
+                if header_indices:
+                    header_rows = [table_rows[idx] for idx in header_indices if idx < len(table_rows)]
+                
+                for chunk_idx, chunk in enumerate(table_chunks):
+                    chunk_json = json.dumps(chunk['rows'], ensure_ascii=False)
+                    
+                    if chunk['is_first']:
+                        # First chunk: add to current_paragraphs (will merge with preceding content)
+                        current_paragraphs.append({
+                            'text': f"<table>{chunk_json}</table>",
+                            'para_id': chunk['uuid'],
+                            'is_table': True
+                        })
+                        has_body_content = True
+                    else:
+                        # Middle or last chunk: save current block first
+                        if current_paragraphs:
+                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
+                            blocks.extend(split_blocks)
+                            current_paragraphs = []
+                            has_body_content = False
+                        
+                        # Create new heading with suffix [1], [2], etc.
+                        chunk_heading = f"{current_heading} [{chunk_idx}]"
+                        
+                        # Build block for this table chunk
+                        chunk_block = {
+                            "uuid": chunk['uuid'],
+                            "heading": chunk_heading,
+                            "content": f"<table>{chunk_json}</table>",
+                            "type": "text",
+                            "parent_headings": current_parent_headings
+                        }
+                        
+                        # Add table_header field if headers exist and this isn't the first chunk
+                        if header_rows:
+                            chunk_block["table_header"] = header_rows
+                        
+                        if chunk['is_last']:
+                            # Last chunk: add to current_paragraphs for merging with following content
+                            current_paragraphs.append({
+                                'text': f"<table>{chunk_json}</table>",
+                                'para_id': chunk['uuid'],
+                                'is_table': True,
+                                '_chunk_heading': chunk_heading,
+                                '_table_header': header_rows if header_rows else None
+                            })
+                            has_body_content = True
+                        else:
+                            # Middle chunk: output immediately as standalone block
+                            blocks.append(chunk_block)
+            else:
+                # Table is within size limit - no splitting needed
+                # Store table as a paragraph with special marker
+                # Use first valid paraId from table
+                table_para_id = find_first_valid_para_id(para_ids)
+                current_paragraphs.append({
+                    'text': f"<table>{table_json}</table>",
+                    'para_id': table_para_id,
+                    'is_table': True
+                })
+                
+                # Mark that we have body content
+                has_body_content = True
             
             # Reset numbering tracking after table (table end boundary)
             resolver.reset_tracking_state()

@@ -34,6 +34,24 @@ class TableExtractor:
         Returns:
             List of rows, each row is list of cell text strings
         """
+        result = TableExtractor.extract_with_metadata(table, numbering_resolver)
+        return result['rows']
+    
+    @staticmethod
+    def extract_with_metadata(table: Table, numbering_resolver=None) -> dict:
+        """
+        Extract table to 2D string array with metadata (paraIds, header info).
+        
+        Args:
+            table: python-docx Table object
+            numbering_resolver: Optional NumberingResolver for extracting numbering
+            
+        Returns:
+            Dict with:
+            - rows: 2D list of cell text strings
+            - para_ids: 2D list of paraIds (first paraId in each cell, or None)
+            - header_indices: List of row indices marked as table headers
+        """
         tbl = table._tbl
         
         # Get number of columns from tblGrid
@@ -43,13 +61,24 @@ class TableExtractor:
             num_cols = len(tbl_grid.findall(qn('w:gridCol')))
         
         if num_cols == 0:
-            return []
+            return {'rows': [], 'para_ids': [], 'header_indices': []}
+        
+        # Detect header rows using w:tblHeader attribute
+        header_indices = []
+        for idx, tr in enumerate(tbl.findall(qn('w:tr'))):
+            trPr = tr.find(qn('w:trPr'))
+            if trPr is not None:
+                tbl_header = trPr.find(qn('w:tblHeader'))
+                if tbl_header is not None:
+                    header_indices.append(idx)
         
         # Process each row by directly iterating <w:tr> elements
         grid = []
+        para_ids_grid = []
         
         for tr in tbl.findall(qn('w:tr')):
             row_data = [''] * num_cols  # Pre-fill with empty strings
+            row_para_ids = [None] * num_cols  # Pre-fill with None
             grid_col = 0
             
             # Iterate actual <w:tc> elements (each physical cell appears once)
@@ -72,12 +101,19 @@ class TableExtractor:
                 
                 # Only extract text if NOT a vMerge continuation
                 cell_text = ''
+                cell_para_id = None
                 if vmerge_val != 'continue' and not (vmerge_val is None and tcPr is not None and tcPr.find(qn('w:vMerge')) is not None):
                     # Get cell text with numbering support
                     if numbering_resolver is not None:
                         # Extract text with numbering labels
                         cell_paragraphs = []
                         for para_elem in tc.findall(qn('w:p')):
+                            # Capture first paraId in this cell
+                            if cell_para_id is None:
+                                para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                                if para_id_attr:
+                                    cell_para_id = para_id_attr
+                            
                             # Get text content
                             para_text = ''
                             for t_elem in para_elem.findall('.//'+qn('w:t')):
@@ -102,6 +138,12 @@ class TableExtractor:
                         # Cannot use cell.text here, must extract from XML
                         para_texts = []
                         for para_elem in tc.findall(qn('w:p')):
+                            # Capture first paraId in this cell
+                            if cell_para_id is None:
+                                para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                                if para_id_attr:
+                                    cell_para_id = para_id_attr
+                            
                             para_text = ''
                             for t_elem in para_elem.findall('.//'+qn('w:t')):
                                 if t_elem.text:
@@ -113,10 +155,16 @@ class TableExtractor:
                 # Place content at starting grid position only
                 if grid_col < num_cols:
                     row_data[grid_col] = cell_text
+                    row_para_ids[grid_col] = cell_para_id
                 
                 # Move grid position by gridSpan
                 grid_col += grid_span
             
             grid.append(row_data)
+            para_ids_grid.append(row_para_ids)
         
-        return grid
+        return {
+            'rows': grid,
+            'para_ids': para_ids_grid,
+            'header_indices': header_indices
+        }
