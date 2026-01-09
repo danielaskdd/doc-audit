@@ -29,6 +29,7 @@ except ImportError:
 MAX_HEADING_LENGTH = 200      # Maximum heading length in characters
 IDEAL_BLOCK_CONTENT_LENGTH = 5000  # Ideal target size for balanced splitting
 MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters (hard limit)
+MIN_BLOCK_CONTENT_LENGTH = 500  # Minimum block content length (triggers merging)
 MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs
 
 
@@ -123,6 +124,97 @@ def validate_table_length(table_json: str, block_heading: str):
             "  5. Re-run the audit workflow"
         )
         sys.exit(1)
+
+
+def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
+    """
+    Merge blocks that are smaller than MIN_BLOCK_CONTENT_LENGTH with adjacent blocks.
+    
+    Strategy:
+    1. Identify blocks smaller than MIN_BLOCK_CONTENT_LENGTH
+    2. Try to merge with next block (small block's heading becomes next block's heading)
+    3. If merging with next block would exceed MAX_BLOCK_CONTENT_LENGTH, try previous block
+    4. Only keep small block separate if both merge directions exceed limit
+    
+    Args:
+        blocks: List of block dictionaries
+        debug: If True, return merge count for debug reporting
+        
+    Returns:
+        Tuple of (merged_blocks, merge_count)
+    """
+    if len(blocks) <= 1:
+        return blocks, 0
+    
+    merged_blocks = []
+    i = 0
+    merged_count = 0
+    
+    while i < len(blocks):
+        current_block = blocks[i]
+        current_length = len(current_block['content'])
+        
+        # Check if current block is too small and needs merging
+        if current_length < MIN_BLOCK_CONTENT_LENGTH and current_length > 0:
+            merged = False
+            
+            # Try merging with next block first
+            if i + 1 < len(blocks):
+                next_block = blocks[i + 1]
+                next_length = len(next_block['content'])
+                combined_length = current_length + next_length + 1  # +1 for newline
+                
+                if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
+                    # Merge current into next block
+                    # Current block's heading becomes the new heading
+                    merged_content = current_block['content'] + "\n" + next_block['content']
+                    merged_block = {
+                        "uuid": current_block['uuid'],  # Use current block's UUID
+                        "heading": current_block['heading'],  # Use current block's heading
+                        "content": merged_content,
+                        "type": "text",
+                        "parent_headings": current_block['parent_headings']
+                    }
+                    merged_blocks.append(merged_block)
+                    
+                    merged = True
+                    merged_count += 1
+                    i += 2  # Skip both current and next block
+                    continue
+            
+            # If can't merge with next, try merging with previous
+            if not merged and len(merged_blocks) > 0:
+                prev_block = merged_blocks[-1]
+                prev_length = len(prev_block['content'])
+                combined_length = prev_length + current_length + 1  # +1 for newline
+                
+                if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
+                    # Merge current into previous block
+                    # Previous block remains the heading
+                    merged_content = prev_block['content'] + "\n" + current_block['content']
+                    merged_blocks[-1] = {
+                        "uuid": prev_block['uuid'],  # Keep previous UUID
+                        "heading": prev_block['heading'],  # Keep previous heading
+                        "content": merged_content,
+                        "type": "text",
+                        "parent_headings": prev_block['parent_headings']
+                    }
+                    
+                    merged = True
+                    merged_count += 1
+                    i += 1
+                    continue
+            
+            # If neither merge direction works, keep the small block as-is
+            if not merged:
+                merged_blocks.append(current_block)
+                i += 1
+        else:
+            # Block is within acceptable size range, keep as-is
+            merged_blocks.append(current_block)
+            i += 1
+    
+    return merged_blocks, merged_count
 
 
 def split_long_block(block_heading: str, paragraphs: list, parent_headings: list, debug: bool = False) -> list:
@@ -308,14 +400,19 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
             block.pop('_paragraphs', None)
             validated_blocks.append(block)
     
-    # Output debug information if enabled and split occurred
-    if debug and len(validated_blocks) > 1:
+    # Merge small blocks with adjacent blocks to avoid fragmentation
+    final_blocks, merge_count = merge_small_blocks(validated_blocks, debug)
+    
+    # Output debug information if enabled and split occurred (after merging)
+    if debug and len(final_blocks) > 1:
         print(f"\n[DEBUG] Block split: \"{block_heading}\"", file=sys.stderr)
         print(f"  Original length: {total_length} characters", file=sys.stderr)
-        block_lengths = [len(block['content']) for block in validated_blocks]
-        print(f"  Split into {len(validated_blocks)} blocks: {block_lengths} characters", file=sys.stderr)
+        final_block_lengths = [len(block['content']) for block in final_blocks]
+        print(f"  Final result: {len(final_blocks)} blocks: {final_block_lengths} characters", file=sys.stderr)
+        if merge_count > 0:
+            print(f"  ({merge_count} small block(s) merged)", file=sys.stderr)
     
-    return validated_blocks
+    return final_blocks
 
 
 def extract_para_id(para_element) -> str:
