@@ -50,6 +50,29 @@ def print_error(title: str, details: str, solution: str):
     print("\n" + "=" * 80 + "\n", file=sys.stderr)
 
 
+def truncate_heading(heading_text: str, para_id: str = None) -> str:
+    """
+    Truncate heading if it exceeds MAX_HEADING_LENGTH.
+    
+    Args:
+        heading_text: The heading text to check
+        para_id: Optional paragraph ID for warning message
+        
+    Returns:
+        str: Original heading if within limit, truncated heading with "..." if too long
+    """
+    if len(heading_text) > MAX_HEADING_LENGTH:
+        truncated = heading_text[:MAX_HEADING_LENGTH - 3] + "..."
+        location = f" (para_id: {para_id})" if para_id else ""
+        print(
+            f"Warning: Heading truncated (length {len(heading_text)} > max {MAX_HEADING_LENGTH}){location}: "
+            f"\"{truncated}\"",
+            file=sys.stderr
+        )
+        return truncated
+    return heading_text
+
+
 def validate_heading_length(heading_text: str, para_id: str):
     """
     Validate that heading length does not exceed MAX_HEADING_LENGTH.
@@ -495,9 +518,12 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 # Convert 0-based to 1-based level
                 level = outline_level + 1
                 
+                # Truncate heading if needed before storing
+                truncated_text = truncate_heading(full_text, heading_para_id)
+                
                 # Add heading to current_paragraphs
                 current_paragraphs.append({
-                    'text': full_text,
+                    'text': truncated_text,
                     'para_id': heading_para_id,
                     'is_table': False
                 })
@@ -505,13 +531,13 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 # Update current_heading and parent_headings for the FIRST heading in a block
                 # (when current_paragraphs just had this heading added as its first element)
                 if len(current_paragraphs) == 1:
-                    current_heading = full_text
+                    current_heading = truncated_text
                     # Parent headings = all headings in stack before this heading (at higher levels)
                     current_parent_headings = current_heading_stack[:max(level - 1, 0)]
                 
                 # Update heading stack
                 current_heading_stack = current_heading_stack[:max(level - 1, 0)]
-                current_heading_stack.append(full_text)
+                current_heading_stack.append(truncated_text)
             else:
                 # Regular paragraph content
                 para_id = extract_para_id(element)
