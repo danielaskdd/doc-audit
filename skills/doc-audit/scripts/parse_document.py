@@ -284,12 +284,47 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
                     print(f"[DEBUG] Merged small last chunk ({len(last_chunk_json)} chars) with previous chunk", file=sys.stderr)
                     print(f"  Combined size: {len(combined_json)} chars", file=sys.stderr)
     
-    # Debug output
+    return chunks
+
+
+def split_table_with_heading(table_rows: list, para_ids: list, header_indices: list, current_heading: str, start_suffix: int = 0, debug: bool = False) -> list:
+    """
+    Wrapper for split_table that includes heading information in debug output.
+    Supports sequential numbering when multiple tables are split in the same block.
+    
+    Args:
+        table_rows: 2D array of table content
+        para_ids: 2D array of paraIds
+        header_indices: List of row indices that are table headers
+        current_heading: Current block heading (for generating chunk headings)
+        start_suffix: Starting suffix number for non-first chunks (default: 0)
+                     When multiple tables in the same block are split, this ensures
+                     sequential numbering (e.g., [1], [2] for first table, [3], [4] for second)
+        debug: If True, output debug information with headings
+        
+    Returns:
+        Same as split_table(), with each chunk having suffix calculated from start_suffix
+    """
+    chunks = split_table(table_rows, para_ids, header_indices, debug=False)
+    
+    # Add suffix_number to each chunk for later use
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            chunk['suffix_number'] = None  # First chunk has no suffix
+        else:
+            chunk['suffix_number'] = start_suffix + i
+    
+    # Debug output with headings
     if debug and len(chunks) > 1:
         print(f"\n[DEBUG] Table split into {len(chunks)} chunks (final)", file=sys.stderr)
         for i, chunk in enumerate(chunks):
             chunk_json = json.dumps(chunk['rows'], ensure_ascii=False)
-            print(f"  Chunk {i+1}: {len(chunk['rows'])} rows, {len(chunk_json)} chars", file=sys.stderr)
+            # Generate heading for this chunk
+            if chunk['suffix_number'] is None:
+                chunk_heading = current_heading
+            else:
+                chunk_heading = f"{current_heading} [{chunk['suffix_number']}]"
+            print(f"  Chunk {i+1}: heading=\"{chunk_heading}\", {len(chunk['rows'])} rows, {len(chunk_json)} chars", file=sys.stderr)
     
     return chunks
 
@@ -747,6 +782,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     current_parent_headings = []  # Parent headings for current block
     current_paragraphs = []  # Track paragraphs with metadata for splitting
     has_body_content = False  # Track if current block has body content (non-heading paragraphs/tables)
+    table_split_counter = 0  # Track cumulative table split suffix numbers within current block
     
     # Iterate through document body elements (paragraphs and tables)
     body = doc._element.body
@@ -794,6 +830,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                     # Reset for new block
                     current_paragraphs = []
                     has_body_content = False
+                    table_split_counter = 0  # Reset table split counter for new heading
                 
                 # Convert 0-based to 1-based level
                 level = outline_level + 1
@@ -861,7 +898,8 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             # Check if table needs splitting
             if len(table_json) > TABLE_MAX_LENGTH:
                 # Table exceeds limit - split it
-                table_chunks = split_table(table_rows, para_ids, header_indices, debug)
+                # Pass table_split_counter to ensure sequential numbering across multiple tables
+                table_chunks = split_table_with_heading(table_rows, para_ids, header_indices, current_heading, table_split_counter, debug)
                 
                 # Extract header rows if any
                 header_rows = []
@@ -887,8 +925,11 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                             current_paragraphs = []
                             has_body_content = False
                         
-                        # Create new heading with suffix [1], [2], etc.
-                        chunk_heading = f"{current_heading} [{chunk_idx}]"
+                        # Generate heading using suffix_number from chunk
+                        if chunk['suffix_number'] is not None:
+                            chunk_heading = f"{current_heading} [{chunk['suffix_number']}]"
+                        else:
+                            chunk_heading = current_heading
                         
                         # Build block for this table chunk
                         chunk_block = {
@@ -916,6 +957,10 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                         else:
                             # Middle chunk: output immediately as standalone block
                             blocks.append(chunk_block)
+                
+                # Update table_split_counter: add number of non-first chunks
+                # (first chunk doesn't get a suffix, so we count from second chunk onwards)
+                table_split_counter += len(table_chunks) - 1
             else:
                 # Table is within size limit - no splitting needed
                 # Store table as a paragraph with special marker
