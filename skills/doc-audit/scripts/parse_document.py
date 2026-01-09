@@ -102,7 +102,7 @@ def validate_table_length(table_json: str, block_heading: str):
         sys.exit(1)
 
 
-def split_long_block(block_heading: str, paragraphs: list, parent_headings: list) -> list:
+def split_long_block(block_heading: str, paragraphs: list, parent_headings: list, debug: bool = False) -> list:
     """
     Split a long text block into smaller blocks using anchor paragraphs.
     
@@ -117,6 +117,7 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         block_heading: Original heading text
         paragraphs: List of dicts with 'text', 'para_id', and 'is_table' keys
         parent_headings: Parent heading stack
+        debug: If True, output debug information when splitting occurs
         
     Returns:
         List of block dictionaries (may be split into multiple blocks)
@@ -275,13 +276,21 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
             sub_blocks = split_long_block(
                 block['heading'],
                 block_paragraphs,
-                block['parent_headings']
+                block['parent_headings'],
+                debug
             )
             validated_blocks.extend(sub_blocks)
         else:
             # Remove internal _paragraphs field before adding to final output
             block.pop('_paragraphs', None)
             validated_blocks.append(block)
+    
+    # Output debug information if enabled and split occurred
+    if debug and len(validated_blocks) > 1:
+        print(f"\n[DEBUG] Block split: \"{block_heading}\"", file=sys.stderr)
+        print(f"  Original length: {total_length} characters", file=sys.stderr)
+        block_lengths = [len(block['content']) for block in validated_blocks]
+        print(f"  Split into {len(validated_blocks)} blocks: {block_lengths} characters", file=sys.stderr)
     
     return validated_blocks
 
@@ -407,7 +416,7 @@ def get_heading_level(para_element, styles_outline_map: dict) -> int:
     return None
 
 
-def extract_audit_blocks(file_path: str) -> list:
+def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     """
     Extract text blocks (chunks) from a DOCX file for auditing.
     
@@ -420,6 +429,7 @@ def extract_audit_blocks(file_path: str) -> list:
     
     Args:
         file_path: Path to the DOCX file
+        debug: If True, output debug information when splitting blocks
         
     Returns:
         List of block dictionaries with heading, content, type, and metadata
@@ -475,7 +485,7 @@ def extract_audit_blocks(file_path: str) -> list:
                 # Only save previous block if it has body content
                 if has_body_content and current_paragraphs:
                     # Split long blocks if needed
-                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings)
+                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
                     blocks.extend(split_blocks)
                     
                     # Reset for new block
@@ -559,7 +569,7 @@ def extract_audit_blocks(file_path: str) -> list:
     # Save final block with splitting if needed
     if current_paragraphs:
         # Split long blocks if needed
-        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings)
+        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
         blocks.extend(split_blocks)
     
     return blocks
@@ -720,6 +730,11 @@ def main():
         action="store_true",
         help="Print statistics about the document"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output for block splitting operations"
+    )
 
     args = parser.parse_args()
 
@@ -734,7 +749,7 @@ def main():
 
     # Extract blocks
     print(f"Parsing document: {args.document}")
-    blocks = extract_audit_blocks(args.document)
+    blocks = extract_audit_blocks(args.document, debug=args.debug)
     print(f"Extracted {len(blocks)} text blocks")
 
     # Print statistics
