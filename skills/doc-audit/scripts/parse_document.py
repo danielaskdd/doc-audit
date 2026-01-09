@@ -132,7 +132,7 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     
     if total_length <= MAX_BLOCK_CONTENT_LENGTH:
         # Within limit, return as single block
-        # Use first paragraph's para_id as UUID (assuming it's the heading's para_id)
+        # Use first paragraph's para_id as UUID
         return [{
             "uuid": paragraphs[0]['para_id'] if paragraphs else None,
             "heading": block_heading,
@@ -208,7 +208,6 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     prev_idx = 0
     current_parent_headings = parent_headings
     current_block_heading = block_heading
-    current_uuid = paragraphs[0]['para_id'] if paragraphs else None
     
     for anchor in selected_anchors:
         split_idx = anchor['index']
@@ -218,7 +217,7 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         if block_paragraphs:
             block_content = "\n".join(p['text'] for p in block_paragraphs)
             result_blocks.append({
-                "uuid": current_uuid,
+                "uuid": block_paragraphs[0]['para_id'],  # UUID from first paragraph in content
                 "heading": current_block_heading,
                 "content": block_content,
                 "type": "text",
@@ -231,19 +230,18 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         
         # Update for next block
         current_block_heading = anchor['text']
-        current_uuid = anchor['para_id']
         # Update parent headings: add previous heading only if not "Preface/Uncategorized"
         if block_heading != "Preface/Uncategorized":
             current_parent_headings = parent_headings + [block_heading]
         
-        prev_idx = split_idx + 1  # Skip the anchor itself as it becomes the heading
+        prev_idx = split_idx  # Don't skip anchor - it becomes first paragraph of next block
     
     # Create final block with remaining paragraphs
     final_paragraphs = paragraphs[prev_idx:]
     if final_paragraphs:
         final_content = "\n".join(p['text'] for p in final_paragraphs)
         result_blocks.append({
-            "uuid": current_uuid,
+            "uuid": final_paragraphs[0]['para_id'],  # UUID from first paragraph in content
             "heading": current_block_heading,
             "content": final_content,
             "type": "text",
@@ -272,18 +270,11 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
                 )
                 sys.exit(1)
             
-            # Add UUID placeholder at the beginning
-            block_paragraphs_with_uuid = [{
-                'text': '',
-                'para_id': block['uuid'],
-                'is_table': False
-            }] + block_paragraphs
-            
             # Recursively split this oversized block
             # The recursive call will either find more anchors or raise an error
             sub_blocks = split_long_block(
                 block['heading'],
-                block_paragraphs_with_uuid,
+                block_paragraphs,
                 block['parent_headings']
             )
             validated_blocks.extend(sub_blocks)
@@ -418,7 +409,7 @@ def get_heading_level(para_element, styles_outline_map: dict) -> int:
 
 def extract_audit_blocks(file_path: str) -> list:
     """
-    Extract text blocks from a DOCX file for auditing.
+    Extract text blocks (chunks) from a DOCX file for auditing.
     
     Uses python-docx with custom numbering resolver to:
     1. Capture automatic numbering (list labels)
@@ -439,10 +430,10 @@ def extract_audit_blocks(file_path: str) -> list:
     
     blocks = []
     current_heading = "Preface/Uncategorized"
-    current_heading_para_id = None  # paraId of current heading paragraph
     current_heading_stack = []
+    current_parent_headings = []  # Parent headings for current block
     current_paragraphs = []  # Track paragraphs with metadata for splitting
-    current_first_content_para_id = None  # For Preface blocks without heading
+    has_body_content = False  # Track if current block has body content (non-heading paragraphs/tables)
     
     # Iterate through document body elements (paragraphs and tables)
     body = doc._element.body
@@ -481,43 +472,39 @@ def extract_audit_blocks(file_path: str) -> list:
                 # Validate heading length
                 validate_heading_length(full_text, heading_para_id)
                 
-                # Save previous block with splitting if needed
-                if current_paragraphs:
-                    parent_headings_for_block = current_heading_stack[:-1] if current_heading_stack else []
-                    
-                    # Add heading's para_id at the beginning for UUID tracking
-                    if current_heading_para_id:
-                        current_paragraphs.insert(0, {
-                            'text': '',  # Empty text for heading UUID placeholder
-                            'para_id': current_heading_para_id,
-                            'is_table': False
-                        })
-                    elif current_first_content_para_id:
-                        # For Preface blocks, use first content para_id
-                        current_paragraphs[0]['para_id'] = current_first_content_para_id
-                    
+                # Only save previous block if it has body content
+                if has_body_content and current_paragraphs:
                     # Split long blocks if needed
-                    split_blocks = split_long_block(current_heading, current_paragraphs, parent_headings_for_block)
+                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings)
                     blocks.extend(split_blocks)
                     
+                    # Reset for new block
                     current_paragraphs = []
-                    current_first_content_para_id = None  # Reset for next block
+                    has_body_content = False
                 
                 # Convert 0-based to 1-based level
                 level = outline_level + 1
                 
-                # Update heading stack and current heading paraId
+                # Add heading to current_paragraphs
+                current_paragraphs.append({
+                    'text': full_text,
+                    'para_id': heading_para_id,
+                    'is_table': False
+                })
+                
+                # Update current_heading and parent_headings for the FIRST heading in a block
+                # (when current_paragraphs just had this heading added as its first element)
+                if len(current_paragraphs) == 1:
+                    current_heading = full_text
+                    # Parent headings = all headings in stack before this heading (at higher levels)
+                    current_parent_headings = current_heading_stack[:max(level - 1, 0)]
+                
+                # Update heading stack
                 current_heading_stack = current_heading_stack[:max(level - 1, 0)]
                 current_heading_stack.append(full_text)
-                current_heading = full_text
-                current_heading_para_id = heading_para_id
             else:
                 # Regular paragraph content
-                # Extract paraId and track for Preface blocks
                 para_id = extract_para_id(element)
-                if not current_first_content_para_id and not current_heading_para_id:
-                    # This is the first content paragraph under Preface
-                    current_first_content_para_id = para_id
                 
                 # Store paragraph with metadata for potential splitting
                 current_paragraphs.append({
@@ -525,6 +512,9 @@ def extract_audit_blocks(file_path: str) -> list:
                     'para_id': para_id,
                     'is_table': False
                 })
+                
+                # Mark that we have body content
+                has_body_content = True
             
             # Check for paragraph-level section break (after processing paragraph)
             # sectPr in pPr means this paragraph ends a section
@@ -560,26 +550,16 @@ def extract_audit_blocks(file_path: str) -> list:
                 'is_table': True
             })
             
+            # Mark that we have body content
+            has_body_content = True
+            
             # Reset numbering tracking after table (table end boundary)
             resolver.reset_tracking_state()
     
     # Save final block with splitting if needed
     if current_paragraphs:
-        parent_headings_for_block = current_heading_stack[:-1] if current_heading_stack else []
-        
-        # Add heading's para_id at the beginning for UUID tracking
-        if current_heading_para_id:
-            current_paragraphs.insert(0, {
-                'text': '',  # Empty text for heading UUID placeholder
-                'para_id': current_heading_para_id,
-                'is_table': False
-            })
-        elif current_first_content_para_id:
-            # For Preface blocks, use first content para_id
-            current_paragraphs[0]['para_id'] = current_first_content_para_id
-        
         # Split long blocks if needed
-        split_blocks = split_long_block(current_heading, current_paragraphs, parent_headings_for_block)
+        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings)
         blocks.extend(split_blocks)
     
     return blocks
