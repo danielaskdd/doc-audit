@@ -277,6 +277,103 @@ class AuditEditApplier:
         
         return runs_info
     
+    def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
+        """
+        Collect run info representing ORIGINAL text (before track changes).
+        This is used for searching violation text in documents that have been edited.
+        
+        Logic:
+        - Include: <w:delText> in <w:del> elements (deleted text was part of original)
+        - Include: Normal <w:t>, <w:tab>, <w:br> NOT inside <w:ins> or <w:del> elements
+        - Exclude: <w:t> inside <w:ins> elements (inserted text didn't exist in original)
+        
+        Returns:
+            Tuple of (runs_info, combined_text)
+            runs_info: [{'text': str, 'start': int, 'end': int}, ...]
+            combined_text: Full text string
+        """
+        runs_info = []
+        pos = 0
+        
+        # Process direct children to handle track changes correctly
+        for child in para_elem:
+            if child.tag == f'{{{NS["w"]}}}del':
+                # Deleted text = part of original document
+                for run in child.findall('.//w:r', NS):
+                    rPr = run.find('w:rPr', NS)
+                    # Look for w:delText, w:tab, w:br elements
+                    for elem in run:
+                        if elem.tag == f'{{{NS["w"]}}}delText':
+                            text = elem.text or ''
+                            if text:
+                                runs_info.append({
+                                    'text': text,
+                                    'start': pos,
+                                    'end': pos + len(text),
+                                    'elem': run,
+                                    'rPr': rPr
+                                })
+                                pos += len(text)
+                        elif elem.tag == f'{{{NS["w"]}}}tab':
+                            runs_info.append({
+                                'text': '\t',
+                                'start': pos,
+                                'end': pos + 1,
+                                'elem': run,
+                                'rPr': rPr
+                            })
+                            pos += 1
+                        elif elem.tag == f'{{{NS["w"]}}}br':
+                            runs_info.append({
+                                'text': '\n',
+                                'start': pos,
+                                'end': pos + 1,
+                                'elem': run,
+                                'rPr': rPr
+                            })
+                            pos += 1
+                            
+            elif child.tag == f'{{{NS["w"]}}}ins':
+                # Inserted text = NOT part of original, skip completely
+                pass
+                
+            elif child.tag == f'{{{NS["w"]}}}r':
+                # Normal run (not in revision markup)
+                rPr = child.find('w:rPr', NS)
+                for elem in child:
+                    if elem.tag == f'{{{NS["w"]}}}t':
+                        text = elem.text or ''
+                        if text:
+                            runs_info.append({
+                                'text': text,
+                                'start': pos,
+                                'end': pos + len(text),
+                                'elem': child,
+                                'rPr': rPr
+                            })
+                            pos += len(text)
+                    elif elem.tag == f'{{{NS["w"]}}}tab':
+                        runs_info.append({
+                            'text': '\t',
+                            'start': pos,
+                            'end': pos + 1,
+                            'elem': child,
+                            'rPr': rPr
+                        })
+                        pos += 1
+                    elif elem.tag == f'{{{NS["w"]}}}br':
+                        runs_info.append({
+                            'text': '\n',
+                            'start': pos,
+                            'end': pos + 1,
+                            'elem': child,
+                            'rPr': rPr
+                        })
+                        pos += 1
+        
+        combined_text = ''.join(r['text'] for r in runs_info)
+        return runs_info, combined_text
+    
     def _get_combined_text(self, runs_info: List[Dict]) -> str:
         """Get combined text from runs"""
         return ''.join(r['text'] for r in runs_info)
@@ -407,22 +504,58 @@ class AuditEditApplier:
         for i, elem in enumerate(new_elements):
             parent.insert(insert_idx + i, elem)
     
-    # ==================== Delete Operation ====================
+    def _check_overlap_with_revisions(self, affected_runs: List[Dict]) -> bool:
+        """
+        Check if any affected run is inside revision markup (w:del or w:ins).
+        
+        This indicates the text has been modified by a previous rule,
+        and we should fallback to comment annotation.
+        
+        Returns:
+            True if overlap detected (should fallback), False otherwise
+        """
+        for info in affected_runs:
+            elem = info.get('elem')
+            if elem is None:
+                continue
+            parent = elem.getparent()
+            if parent is not None and parent.tag in (
+                f'{{{NS["w"]}}}del',
+                f'{{{NS["w"]}}}ins'
+            ):
+                return True
+        return False
     
-    def _apply_delete(self, para_elem, violation_text: str) -> bool:
-        """Apply delete operation with track changes"""
-        runs_info = self._collect_runs_info(para_elem)
-        combined = self._get_combined_text(runs_info)
+    # ==================== Delete Operation ====================
+
+    def _apply_delete(self, para_elem, violation_text: str,
+                     orig_runs_info: List[Dict],
+                     orig_match_start: int) -> str:
+        """
+        Apply delete operation with track changes.
         
-        match_start = combined.find(violation_text)
-        if match_start == -1:
-            return False
+        Args:
+            para_elem: Paragraph element
+            violation_text: Text to delete
+            orig_runs_info: Pre-computed original runs info from _process_item
+            orig_match_start: Pre-computed match position in original text
         
+        Returns:
+            'success': Deletion applied successfully
+            'fallback': Should fallback to comment annotation
+            'conflict': Text overlaps with previous rule modification
+        """
+        # Use original text position directly
+        match_start = orig_match_start
         match_end = match_start + len(violation_text)
-        affected = self._find_affected_runs(runs_info, match_start, match_end)
+        affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         
         if not affected:
-            return False
+            return 'fallback'
+        
+        # Check if text overlaps with previous modifications
+        if self._check_overlap_with_revisions(affected):
+            return 'conflict'
         
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -451,25 +584,55 @@ class AuditEditApplier:
             new_elements.append(self._create_run(after_text, rPr_xml))
         
         self._replace_runs(para_elem, affected, new_elements)
-        return True
+        return 'success'
     
     # ==================== Replace Operation ====================
     
     def _apply_replace(self, para_elem, violation_text: str, 
-                      revised_text: str) -> bool:
-        """Apply replace operation with diff-based track changes"""
-        runs_info = self._collect_runs_info(para_elem)
-        combined = self._get_combined_text(runs_info)
+                      revised_text: str,
+                      orig_runs_info: List[Dict],
+                      orig_match_start: int) -> str:
+        """
+        Apply replace operation with diff-based track changes.
         
-        match_start = combined.find(violation_text)
-        if match_start == -1:
-            return False
+        Args:
+            para_elem: Paragraph element
+            violation_text: Text to replace
+            revised_text: New text
+            orig_runs_info: Pre-computed original runs info from _process_item
+            orig_match_start: Pre-computed match position in original text
         
+        Returns:
+            'success': Replace applied (may be partial)
+            'fallback': Should fallback to comment annotation
+            'conflict': Modifying text overlaps with previous rule modification
+        """
+        # Use original text position directly
+        match_start = orig_match_start
         match_end = match_start + len(violation_text)
-        affected = self._find_affected_runs(runs_info, match_start, match_end)
+        affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         
         if not affected:
-            return False
+            return 'fallback'
+        
+        # Calculate diff first to check only the parts that will be modified
+        diff_ops = self._calculate_diff(violation_text, revised_text)
+        
+        # Check if any 'delete' operation overlaps with previous modifications
+        # Only the deleted parts need to be checked, not 'equal' or 'insert' parts
+        current_pos = match_start
+        for op, text in diff_ops:
+            if op == 'delete':
+                # Find runs for this delete operation
+                del_end = current_pos + len(text)
+                del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
+                if self._check_overlap_with_revisions(del_affected):
+                    return 'conflict'
+                current_pos = del_end
+            elif op == 'equal':
+                # Equal text consumes position but doesn't need conflict check
+                current_pos += len(text)
+            # 'insert' doesn't consume original text position
         
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -479,9 +642,6 @@ class AuditEditApplier:
         last_run = affected[-1]
         before_text = first_run['text'][:match_start - first_run['start']]
         after_text = last_run['text'][match_end - last_run['start']:]
-        
-        # Calculate diff
-        diff_ops = self._calculate_diff(violation_text, revised_text)
         
         new_elements = []
         
@@ -511,7 +671,7 @@ class AuditEditApplier:
             new_elements.append(self._create_run(after_text, rPr_xml))
         
         self._replace_runs(para_elem, affected, new_elements)
-        return True
+        return 'success'
     
     # ==================== Manual (Comment) Operation ====================
     
@@ -542,21 +702,73 @@ class AuditEditApplier:
         
         return True
     
+    def _apply_fallback_comment(self, para_elem, item: EditItem, reason: str = "") -> bool:
+        """
+        Insert a fallback comment when delete/replace/manual operation cannot be applied.
+        
+        This is different from _apply_error_comment:
+        - Error comment: Unexpected failure
+        - Fallback comment: Expected fallback (text was modified by previous rule)
+        
+        Args:
+            para_elem: Paragraph element
+            item: Edit item
+            reason: Reason for fallback (e.g., "Text modified by previous rule")
+        
+        Returns:
+            True (always succeeds)
+        """
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        
+        # Insert commentReference at end of paragraph
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+        
+        # Format: [FALLBACK] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
+        comment_text = f"[FALLBACK] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        
+        self.comments.append({
+            'id': comment_id,
+            'text': comment_text,
+            'author': 'AI-Fallback'
+        })
+        
+        return True
+    
     def _apply_manual(self, para_elem, violation_text: str,
-                     violation_reason: str, revised_text: str) -> bool:
-        """Apply manual operation by adding a Word comment"""
-        runs_info = self._collect_runs_info(para_elem)
-        combined = self._get_combined_text(runs_info)
+                     violation_reason: str, revised_text: str,
+                     orig_runs_info: List[Dict],
+                     orig_match_start: int) -> str:
+        """
+        Apply manual operation by adding a Word comment.
         
-        match_start = combined.find(violation_text)
-        if match_start == -1:
-            return False
+        Args:
+            para_elem: Paragraph element
+            violation_text: Text to mark with comment
+            violation_reason: Reason to show in comment
+            revised_text: Suggestion to show in comment
+            orig_runs_info: Pre-computed original runs info from _process_item
+            orig_match_start: Pre-computed match position in original text
         
+        Uses original text position directly to support commenting on text
+        that may have been deleted by previous rules (Word displays comments
+        on deleted text correctly).
+        
+        Returns:
+            'success': Comment added successfully
+            'fallback': Should fallback to error comment
+        """
+        # Use original text position directly
+        match_start = orig_match_start
         match_end = match_start + len(violation_text)
-        affected = self._find_affected_runs(runs_info, match_start, match_end)
+        affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         
         if not affected:
-            return False
+            return 'fallback'
         
         comment_id = self.next_comment_id
         self.next_comment_id += 1
@@ -613,7 +825,7 @@ class AuditEditApplier:
             'text': comment_text
         })
         
-        return True
+        return 'success'
     
     # ==================== Comment Saving ====================
     
@@ -685,19 +897,24 @@ class AuditEditApplier:
                 return EditResult(False, item,
                     f"Paragraph ID {item.uuid} not found (may be in header/footer or ID changed)")
             
-            # 2. Search for text from anchor paragraph
+            # 2. Search for text from anchor paragraph using ORIGINAL text (before revisions)
+            # Store match results to pass to apply methods (avoid double matching)
             target_para = None
+            matched_runs_info = None
+            matched_start = -1
             violation_text_to_use = item.violation_text
             revised_text_to_use = item.revised_text
             numbering_stripped = False
             
-            # Try original text first
+            # Try original text first (using revision-free view)
             for para in self._iter_paragraphs_following(anchor_para):
-                runs_info = self._collect_runs_info(para)
-                combined = self._get_combined_text(runs_info)
+                runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                 
-                if item.violation_text in combined:
+                pos = combined_orig.find(item.violation_text)
+                if pos != -1:
                     target_para = para
+                    matched_runs_info = runs_info_orig
+                    matched_start = pos
                     break
             
             # Fallback: Try stripping auto-numbering if original match failed
@@ -709,11 +926,13 @@ class AuditEditApplier:
                         print(f"  [Fallback] Trying without numbering: {stripped_violation[:30]}...")
                     
                     for para in self._iter_paragraphs_following(anchor_para):
-                        runs_info = self._collect_runs_info(para)
-                        combined = self._get_combined_text(runs_info)
+                        runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                         
-                        if stripped_violation in combined:
+                        pos = combined_orig.find(stripped_violation)
+                        if pos != -1:
                             target_para = para
+                            matched_runs_info = runs_info_orig
+                            matched_start = pos
                             numbering_stripped = True
                             violation_text_to_use = stripped_violation
                             
@@ -741,28 +960,51 @@ class AuditEditApplier:
                     f"Text not found after anchor: {item.violation_text[:30]}...")
             
             # 3. Apply operation based on fix_action
+            # Pass matched_runs_info and matched_start to avoid double matching
+            success_status = None
+            
             if item.fix_action == 'delete':
-                success = self._apply_delete(target_para, violation_text_to_use)
+                success_status = self._apply_delete(
+                    target_para, violation_text_to_use,
+                    matched_runs_info, matched_start
+                )
             elif item.fix_action == 'replace':
-                success = self._apply_replace(
-                    target_para, violation_text_to_use, revised_text_to_use
+                success_status = self._apply_replace(
+                    target_para, violation_text_to_use, revised_text_to_use,
+                    matched_runs_info, matched_start
                 )
             elif item.fix_action == 'manual':
-                success = self._apply_manual(
+                success_status = self._apply_manual(
                     target_para, violation_text_to_use,
-                    item.violation_reason, revised_text_to_use
+                    item.violation_reason, revised_text_to_use,
+                    matched_runs_info, matched_start
                 )
             else:
                 # Insert error comment for unknown action type
                 self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, f"Unknown action type: {item.fix_action}")
             
-            if success:
+            # Handle results
+            if success_status == 'success':
                 if numbering_stripped and self.verbose:
                     print(f"  [Success] Matched after stripping auto-numbering")
                 return EditResult(True, item)
+            elif success_status == 'conflict':
+                # Text overlaps with previous rule modification
+                reason = "Text overlaps with previous rule modification"
+                self._apply_fallback_comment(target_para, item, reason)
+                if self.verbose:
+                    print(f"  [Conflict] {reason}")
+                return EditResult(True, item, f"Fallback to comment: {reason}")
+            elif success_status == 'fallback':
+                # Fallback to comment annotation
+                reason = "Text not found in current document state"
+                self._apply_fallback_comment(target_para, item, reason)
+                if self.verbose:
+                    print(f"  [Fallback] {reason}")
+                return EditResult(True, item, f"Fallback to comment: {reason}")
             else:
-                # Insert error comment when operation fails
+                # Unexpected return value or old boolean False
                 self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, "Operation failed")
                 

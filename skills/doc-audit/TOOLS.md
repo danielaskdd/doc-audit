@@ -335,6 +335,23 @@ Apply audit results exported from HTML report to Word document with track change
 4. Export non-blocked issues to JSONL
 5. Apply edits to Word document using this tool
 
+### Source Document Requirements
+
+⚠️ **No Pre-existing Revisions**: The source Word document should **NOT** contain existing track changes (revisions).
+
+**Why this matters:**
+- The script was recently updated to search for `violation_text` in the document's *original text* view (before revisions)
+- While the script can now handle documents with existing revisions better than before, **the best practice is still to use clean documents without any track changes**
+- Pre-existing `<w:del>` and `<w:ins>` elements can still cause edge cases and increase complexity
+
+**If your document has track changes:**
+1. Open the document in Microsoft Word
+2. Go to **Review** → **Accept** → **Accept All Changes in Document** (or **Reject All Changes**)
+3. Save the document
+4. Re-run the audit workflow from the beginning (`parse_document.py` → `run_audit.py` → `generate_report.py`)
+
+**Alternative:** If you must apply edits to a document with existing revisions, use the `--skip-hash` flag (since accepting changes will modify the document hash).
+
 ### Usage Examples
 
 ```bash

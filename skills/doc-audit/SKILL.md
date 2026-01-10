@@ -385,6 +385,8 @@ python scripts/generate_report.py manifest.jsonl \
 
 Apply exported audit results to Word document with track changes and comments. **Used after manual review of HTML report.**
 
+**⚠️ Important:** The source Word document should ideally **NOT contain existing track changes (revisions)**. Documents with pre-existing revisions may cause text matching failures when applying edits. If your document contains track changes, accept or reject all changes before running the audit workflow.
+
 **Typical workflow**:
 1. Review audit report in browser
 2. Mark false positives as "blocked"
