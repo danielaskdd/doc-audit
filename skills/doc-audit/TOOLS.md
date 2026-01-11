@@ -87,7 +87,7 @@ The audit script processes multiple text blocks concurrently using asyncio for i
 **Usage Examples:**
 
 ```bash
-# Use default 4 workers
+# Use default 8 workers
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py -d blocks.jsonl -r rules.json
 
 # Increase parallelism for faster processing
@@ -98,7 +98,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py -d blocks.jsonl -r rules.json 
 ```
 
 **Performance Impact:**
-- With 4 workers: ~4x faster than sequential processing
+- With 8 workers: ~8x faster than sequential processing
 - Adjust `--workers` based on your API rate limits and document size
 - Progress output shows block completion in real-time (may appear out of order due to parallel execution)
 
@@ -266,6 +266,13 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --output report.html \
   --json
 
+# Also output Excel report
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
+  --template .claude-work/doc-audit/report_template.html \
+  --rules rules.json \
+  --output report.html \
+  --excel
+
 # For trusted HTML content (disables escaping, not recommended)
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
@@ -283,6 +290,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
 | `--rules` / `-r` | path | No | Path to rules JSON file (optional, recommended for displaying full rule details in modal popups) |
 | `--trusted-html` | flag | No | Disable HTML escaping (only for trusted inputs) |
 | `--json` | flag | No | Also output report data as JSON (same name with `.json` extension) |
+| `--excel` | flag | No | Also output report as Excel file (same name with `.xlsx` extension). Requires `openpyxl` package. |
 
 ### Features
 
@@ -322,6 +330,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
 
 - `<output>.html` - HTML report (always generated)
 - `<output>.json` - JSON report data (if `--json` flag is used)
+- `<output>.xlsx` - Excel report (if `--excel` flag is used, requires `openpyxl`)
 
 ---
 

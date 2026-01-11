@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 # Maximum number of concurrent LLM API calls
-MAX_PARALLEL_WORKERS = 4
+MAX_PARALLEL_WORKERS = 8
 
 # Retry configuration
 DEFAULT_MAX_RETRIES = 3
