@@ -1226,7 +1226,7 @@ class AuditEditApplier:
                     # For delete/replace, text not found is an error
                     self._apply_error_comment(anchor_para, item)
                     return EditResult(False, item,
-                        f"Text not found after anchor: {item.violation_text[:30]}...")
+                        f"Text not found after anchor: ")
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching
@@ -1442,9 +1442,6 @@ def main():
         warning_count = sum(1 for r in results if r.success and r.warning)
         fail_count = sum(1 for r in results if not r.success)
         
-        print("-" * 50)
-        print(f"Completed: {success_count} succeeded, {warning_count} warnings, {fail_count} failed")
-        
         if warning_count > 0:
             print("\nWarning items (fallback to comment):")
             for r in results:
@@ -1458,7 +1455,10 @@ def main():
                 if not r.success:
                     text_preview = format_text_preview(r.item.violation_text)
                     print(f"  - [{r.item.rule_id}] {r.error_message}: {text_preview}")
-        
+
+        print("-" * 50)
+        print(f"Completed: {success_count} succeeded, {warning_count} warnings, {fail_count} failed")
+
         if not args.dry_run:
             applier.save()
         else:
