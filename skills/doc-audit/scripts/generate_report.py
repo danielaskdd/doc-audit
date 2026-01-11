@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ABOUTME: Generates HTML audit reports from audit manifest
+ABOUTME: Generates HTML and Excel audit reports from audit manifest
 ABOUTME: Includes statistics, issue details, and source tracing
 """
 
@@ -18,6 +18,15 @@ try:
 except ImportError:
     print("Error: jinja2 not installed. Run: pip install jinja2", file=sys.stderr)
     sys.exit(1)
+
+# Optional Excel support
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
 
 
 def load_manifest(file_path: str) -> tuple:
@@ -255,6 +264,91 @@ def render_report_simple(data: dict, trusted_html: bool = False) -> str:
 </html>"""
 
 
+def generate_excel_report(data: dict, output_path: str) -> None:
+    """
+    Generate Excel report from audit data.
+
+    Args:
+        data: Report data dictionary containing violations
+        output_path: Path to save the Excel file
+
+    Raises:
+        ImportError: If openpyxl is not installed
+    """
+    if not EXCEL_AVAILABLE:
+        raise ImportError("openpyxl not installed. Run: pip install openpyxl")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit Report"
+
+    # Define headers (Chinese)
+    headers = [
+        "序号",           # Index
+        "错误类型",       # Error Type (category)
+        "规则id",         # Rule ID
+        "文本块标题",     # Text Block Title (heading)
+        "违规原因",       # Violation Reason
+        "操作建议",       # Operation Suggestion (fix_action)
+        "违规原文",       # Violation Original Text
+        "订正或建议"      # Correction or Suggestion (revised_text/suggestion)
+    ]
+
+    # Header styling
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # Write headers
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    # Content alignment
+    content_alignment = Alignment(vertical="top", wrap_text=True)
+
+    # Write violation data
+    for row_idx, violation in enumerate(data['violations'], 2):
+        # Get the correction/suggestion (prefer revised_text, fallback to suggestion)
+        correction = violation.get('revised_text', '') or violation.get('suggestion', '')
+
+        row_data = [
+            row_idx - 1,                              # 序号 (1-based index)
+            violation.get('category', ''),            # 错误类型
+            violation.get('rule_id', ''),             # 规则id
+            violation.get('heading', ''),             # 文本块标题
+            violation.get('violation_reason', ''),    # 违规原因
+            violation.get('fix_action', ''),          # 操作建议
+            violation.get('violation_text', ''),      # 违规原文
+            correction                                # 订正或建议
+        ]
+
+        for col_idx, value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.alignment = content_alignment
+            cell.border = thin_border
+
+    # Auto-adjust column widths
+    column_widths = [8, 15, 15, 25, 40, 15, 40, 40]  # Approximate widths
+    for col_idx, width in enumerate(column_widths, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Freeze the header row
+    ws.freeze_panes = "A2"
+
+    # Save workbook
+    wb.save(output_path)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate HTML audit report from manifest"
@@ -290,6 +384,11 @@ def main():
         "--rules", "-r",
         type=str,
         help="Path to rules JSON file (optional, for loading rule descriptions)"
+    )
+    parser.add_argument(
+        "--excel",
+        action="store_true",
+        help="Also output report as Excel file (.xlsx)"
     )
 
     args = parser.parse_args()
@@ -356,6 +455,16 @@ def main():
         json_path = output_path.with_suffix('.json')
         json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
         print(f"JSON data saved to: {json_path}")
+
+    # Optionally save Excel
+    if args.excel:
+        if not EXCEL_AVAILABLE:
+            print("Warning: openpyxl not installed. Skipping Excel output.", file=sys.stderr)
+            print("Install with: pip install openpyxl", file=sys.stderr)
+        else:
+            excel_path = output_path.with_suffix('.xlsx')
+            generate_excel_report(data, str(excel_path))
+            print(f"Excel report saved to: {excel_path}")
 
     # Summary
     print("\n--- Summary ---")
