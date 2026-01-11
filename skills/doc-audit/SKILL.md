@@ -337,7 +337,7 @@ python scripts/parse_document.py document.docx \
 
 Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within text content:
 ```json
-{"uuid": "12AB34CD", "heading": "2.1 Penalty Clause", "content": "If Party B delays...\n<table>[[\"Header 1\",\"Header 2\"],[\"Cell 1\",\"Cell 2\"]]</table>\nSubsequent paragraph...", "type": "text", "parent_headings": ["Chapter 2 Contract Terms"]}
+{"uuid": "12AB34CD", "uuid_end": "56EF78AB", "heading": "2.1 Penalty Clause", "content": "If Party B delays...\n<table>[[\"Header 1\",\"Header 2\"],[\"Cell 1\",\"Cell 2\"]]</table>\nSubsequent paragraph...", "type": "text", "parent_headings": ["Chapter 2 Contract Terms"]}
 ```
 
 **Output Format (JSON):**
@@ -348,6 +348,7 @@ Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within 
   "blocks": [
     {
       "uuid": "12AB34CD",
+      "uuid_end": "56EF78AB",
       "heading": "2.1 Penalty Clause",
       "content": "If Party B delays payment...\n<table>[[\"Penalty Type\",\"Amount\"],[\"Late Payment\",\"1% per day\"]]</table>\nThe above table shows penalty structure.",
       "type": "text",
@@ -426,56 +427,21 @@ python scripts/generate_report.py manifest.jsonl \
 
 ### 7. Apply Audit Edits (Post-Processing)
 
-Apply audit results to Word document with track changes and comments. Supports two input formats for flexible workflow.
+Apply audit results to Word document with track changes and comments.
 
-**⚠️ Important:** The source Word document should ideally **NOT contain existing track changes (revisions)**. Documents with pre-existing revisions may cause text matching failures when applying edits. If your document contains track changes, accept or reject all changes before running the audit workflow.
-
-**Usage Scenario A: Direct Apply (Skip Review)**
-
-Apply directly from Phase 2 manifest file without reviewing the HTML report:
+**Quick Usage:**
 
 ```bash
-# Apply all audit results from manifest
+# From manifest (skip review)
 python scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
 
-# Output: <docname>_edited.docx (in source document directory)
-```
-
-**Usage Scenario B: Reviewed Apply (Recommended)**
-
-Apply after reviewing and filtering results in HTML report:
-
-```bash
-# 1. Open HTML report in browser, block unwanted results
-# 2. Click "导出结果" to export control file
-# 3. Apply from exported control file
+# From exported control file (after review)
 python scripts/apply_audit_edits.py <docname>_audit_export.jsonl
-
-# Output: <original_document>_edited.docx
 ```
 
-**Supported Input Formats:**
+**Output:** `<source>_edited.docx` with track changes and comments
 
-| Format | Source | Description |
-|--------|--------|-------------|
-| Manifest | `<docname>_manifest.jsonl` | Phase 2 output, nested violations per paragraph |
-| Export | `<docname>_audit_export.jsonl` | HTML report export, flat format (one violation per line), blocked items excluded |
-
-Both formats include metadata (source file path, hash) in the first line, so only the JSONL file path is needed.
-
-**Key Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `jsonl_file` | path | Input JSONL file (manifest or export) |
-| `-o` / `--output` | path | Custom output path (default: `<source>_edited.docx`) |
-| `--skip-hash` | flag | Skip document hash verification |
-| `--author` | text | Author name for track changes (default: AI) |
-| `-v` / `--verbose` | flag | Verbose output |
-
-**Edit modes**: `delete` (track changes), `replace` (track changes), `manual` (Word comment)
-
-📖 **Detailed JSONL format and error handling**: See [TOOLS.md - Apply Audit Edits](TOOLS.md#7-apply-audit-edits)
+📖 **Detailed parameters, JSONL format, and error handling**: See [TOOLS.md - Apply Audit Edits](TOOLS.md#7-apply-audit-edits)
 
 ## Technical Requirements
 
@@ -560,13 +526,18 @@ If the document is missing `w14:paraId` attributes on paragraphs, `parse_documen
 
 ```json
 {
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "uuid": "12AB34CD",
+  "uuid_end": "56EF78AB",
   "heading": "2.1 Penalty Clause",
   "content": "If Party B delays payment, they shall pay approximately 1% of the total amount as compensation.",
   "type": "text",
   "parent_headings": ["Chapter 2 Contract Terms"]
 }
 ```
+
+**UUID Range Fields:**
+- `uuid`: 8-character hex ID (from `w14:paraId`) of the first paragraph in the block
+- `uuid_end`: 8-character hex ID of the last paragraph in the block (for tables, uses the last cell's last paragraph)
 
 **Note:** `parent_headings` contains only the ancestor headings hierarchy, not the current heading (which is in the `heading` field).
 
@@ -576,7 +547,8 @@ The manifest entry written by `run_audit.py` contains audit results with actiona
 
 ```json
 {
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "uuid": "12AB34CD",
+  "uuid_end": "56EF78AB",
   "p_heading": "2.1 Penalty Clause",
   "p_content": "If Party B delays payment, they shall pay approximately 1% of the total amount as compensation.",
   "is_violation": true,
@@ -584,6 +556,8 @@ The manifest entry written by `run_audit.py` contains audit results with actiona
     {
       "rule_id": "R002",
       "category": "semantic",
+      "uuid": "12AB34CD",
+      "uuid_end": "56EF78AB",
       "violation_text": "approximately 1% of the total amount",
       "violation_reason": "Contains vague term 'approximately' and does not specify currency",
       "fix_action": "replace",
@@ -593,9 +567,15 @@ The manifest entry written by `run_audit.py` contains audit results with actiona
 }
 ```
 
+**Entry-Level Fields:**
+- `uuid`: 8-character hex ID of the first paragraph in the source block
+- `uuid_end`: 8-character hex ID of the last paragraph in the source block
+
 **Violation Fields:**
 - `rule_id`: ID of the violated rule (e.g., "R002")
 - `category`: Automatically populated by script from rule's category
+- `uuid`: Injected by script - same as entry-level uuid (for apply_audit_edits.py)
+- `uuid_end`: Injected by script - same as entry-level uuid_end (for range-restricted search)
 - `violation_text`: Problematic text with sufficient context for unique string matching
 - `violation_reason`: Explanation of why this violates the rule
 - `fix_action`: Action to take - `"delete"`, `"replace"`, or `"manual"`
@@ -604,12 +584,13 @@ The manifest entry written by `run_audit.py` contains audit results with actiona
   - For `"delete"`: Empty string
   - For `"manual"`: Guidance for human reviewer
 
-**LLM Output:** The LLM outputs `rule_id`, `violation_text`, `violation_reason`, `fix_action`, and `revised_text` for each violation. The script adds `category` by looking up the rule's category from the rules file.
+**LLM Output:** The LLM outputs `rule_id`, `violation_text`, `violation_reason`, `fix_action`, and `revised_text` for each violation. The script adds `category`, `uuid`, and `uuid_end` by lookup and injection.
 
 When no violations are found:
 ```json
 {
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "uuid": "12AB34CD",
+  "uuid_end": "56EF78AB",
   "p_heading": "2.1 Penalty Clause",
   "p_content": "Party B shall pay 1% of the contract amount within 30 days.",
   "is_violation": false,

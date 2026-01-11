@@ -176,7 +176,8 @@ python skills/doc-audit/scripts/run_audit.py \
 Each line is an audit result:
 ```json
 {
-  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "uuid": "12AB34CD",
+  "uuid_end": "56EF78AB",
   "p_heading": "2.1 Penalty Clause",
   "p_content": "If Party B delays payment, they shall pay approximately 1%...",
   "is_violation": true,
@@ -184,6 +185,8 @@ Each line is an audit result:
     {
       "rule_id": "R002",
       "category": "semantic",
+      "uuid": "12AB34CD",
+      "uuid_end": "56EF78AB",
       "violation_text": "approximately 1% of the total amount",
       "violation_reason": "Contains vague term 'approximately' and does not specify currency",
       "fix_action": "replace",
@@ -192,6 +195,11 @@ Each line is an audit result:
   ]
 }
 ```
+
+**UUID Range Fields:**
+- `uuid`: 8-character hex paraId of first paragraph in source block
+- `uuid_end`: 8-character hex paraId of last paragraph in source block
+- Each violation also includes `uuid` and `uuid_end` (injected by script) for range-restricted text search in `apply_audit_edits.py`
 
 ---
 
@@ -405,12 +413,13 @@ The JSONL file exported from HTML report has the following structure:
 
 **Subsequent lines (edit actions):**
 ```json
-{"category":"grammar","uuid":"682A7C9F","violation_text":"本周的组要工作","violation_reason":"\"组要\"是错别字","fix_action":"replace","revised_text":"本周的主要工作","rule_id":"R001"}
-{"category":"logic","uuid":"682A7C9F","violation_text":"文件列表如下：","violation_reason":"缺少列表内容","fix_action":"manual","revised_text":"请补充文件列表","rule_id":"R008"}
+{"category":"grammar","uuid":"682A7C9F","uuid_end":"682A7CA3","violation_text":"本周的组要工作","violation_reason":"\"组要\"是错别字","fix_action":"replace","revised_text":"本周的主要工作","rule_id":"R001"}
+{"category":"logic","uuid":"682A7C9F","uuid_end":"682A7CA3","violation_text":"文件列表如下：","violation_reason":"缺少列表内容","fix_action":"manual","revised_text":"请补充文件列表","rule_id":"R008"}
 ```
 
 **Field Descriptions:**
-- `uuid`: Anchor paragraph's `w14:paraId` (search starts from this paragraph)
+- `uuid`: 8-character hex paraId - anchor paragraph where search starts
+- `uuid_end`: 8-character hex paraId - end of range for restricted search (ensures text matching stays within the source block)
 - `violation_text`: Text to find and modify (must match exactly)
 - `fix_action`: `delete` | `replace` | `manual`
 - `revised_text`: Replacement text (for replace) or suggestion (for manual)
