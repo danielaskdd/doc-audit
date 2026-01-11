@@ -132,6 +132,16 @@ class TableExtractor:
                                         if br_type in (None, 'textWrapping'):
                                             para_text += '\n'
                                         # Skip page and column breaks (layout elements)
+                                    elif tag == 'drawing':
+                                        # Extract inline images (ignore floating images wp:anchor)
+                                        ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
+                                        inline = child.find('wp:inline', ns_wp)
+                                        if inline is not None:
+                                            doc_pr = inline.find('wp:docPr', ns_wp)
+                                            if doc_pr is not None:
+                                                img_id = doc_pr.get('id', '')
+                                                img_name = doc_pr.get('name', '')
+                                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
                             
                             # Get numbering label
                             label = numbering_resolver.get_label(para_elem)
@@ -170,6 +180,16 @@ class TableExtractor:
                                         if br_type in (None, 'textWrapping'):
                                             para_text += '\n'
                                         # Skip page and column breaks (layout elements)
+                                    elif tag == 'drawing':
+                                        # Extract inline images (ignore floating images wp:anchor)
+                                        ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
+                                        inline = child.find('wp:inline', ns_wp)
+                                        if inline is not None:
+                                            doc_pr = inline.find('wp:docPr', ns_wp)
+                                            if doc_pr is not None:
+                                                img_id = doc_pr.get('id', '')
+                                                img_name = doc_pr.get('name', '')
+                                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
                             if para_text:
                                 para_texts.append(para_text.strip())
                         cell_text = '\n'.join(para_texts).replace('\x07', '')
