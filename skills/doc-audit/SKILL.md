@@ -83,6 +83,41 @@ This creates:
    - Intermediate: `.claude-work/doc-audit/<docname>_manifest.jsonl`
    - Output: `<document_directory>/<document_name>_audit_report.html` (same directory as source document)
 
+### Phase 3: Review and Apply Audit Results
+
+After Phase 2 generates the HTML audit report, user can review the results and apply them to the source document. Tell user to check the final report location or directly apply the edits without review.
+
+**Path A: Direct Apply (Skip Review)**
+
+- User doesn't need to review or filter audit results
+- Apply directly from Phase 2 manifest file:
+  ```bash
+  python scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
+  ```
+- Output: `<docname>_edited.docx` with track changes and comments
+
+**Path B: Review and Apply (Recommended)**
+
+7. **Review Results** - User opens HTML audit report in browser
+   - Location: `<document_directory>/<document_name>_audit_report.html`
+   - User can review each issue with source context
+
+8. **Block Unwanted Results** - User marks unreasonable or unwanted items as "blocked" (屏蔽)
+   - Click "屏蔽本条" checkbox on each item to exclude
+   - Blocked items are visually dimmed and excluded from export
+
+9. **Export Control File** - User clicks "导出结果" button
+   - Output: `<document_name>_audit_export.jsonl` (downloaded to browser's download folder)
+   - First line contains metadata with `source_file` and `source_hash`
+   - Only non-blocked items are included
+
+10. **Apply Edits** - Use the exported control file to apply changes:
+    ```bash
+    python scripts/apply_audit_edits.py <document_name>_audit_export.jsonl
+    ```
+    - The control file's metadata line contains the source document path, so only the control file path is needed
+    - Output: `<original_document>_edited.docx` with track changes and comments
+
 ```
 Phase 0 (Setup - First Time Only):
 Environment Setup → [User sets API key] → Ready to Audit
@@ -99,6 +134,14 @@ User: "Check for X, Y, Z" → Generate Rules → Present ───┐
                                                ↓
                                           Parse Document → Execute Audit
                                           
+Phase 3 (Apply Results):
+
+Path A (Direct Apply - Skip Review):
+Manifest.jsonl ──────────────────────────────────────→ apply_audit_edits.py → _edited.docx
+
+Path B (Reviewed Apply - Recommended):
+Open HTML Report → Block unwanted → Export JSONL → apply_audit_edits.py → _edited.docx
+
 Final Report Location: Same directory as source document (<filename>_audit_report.html)
 ```
 
@@ -383,27 +426,56 @@ python scripts/generate_report.py manifest.jsonl \
 
 ### 7. Apply Audit Edits (Post-Processing)
 
-Apply exported audit results to Word document with track changes and comments. **Used after manual review of HTML report.**
+Apply audit results to Word document with track changes and comments. Supports two input formats for flexible workflow.
 
 **⚠️ Important:** The source Word document should ideally **NOT contain existing track changes (revisions)**. Documents with pre-existing revisions may cause text matching failures when applying edits. If your document contains track changes, accept or reject all changes before running the audit workflow.
 
-**Typical workflow**:
-1. Review audit report in browser
-2. Mark false positives as "blocked"
-3. Export non-blocked issues to JSONL
-4. Apply edits to document with this tool
+**Usage Scenario A: Direct Apply (Skip Review)**
+
+Apply directly from Phase 2 manifest file without reviewing the HTML report:
 
 ```bash
-# Basic usage
-python scripts/apply_audit_edits.py export.jsonl
+# Apply all audit results from manifest
+python scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
 
-# With options
-python scripts/apply_audit_edits.py export.jsonl -o output.docx --skip-hash
+# Output: <docname>_edited.docx (in source document directory)
 ```
+
+**Usage Scenario B: Reviewed Apply (Recommended)**
+
+Apply after reviewing and filtering results in HTML report:
+
+```bash
+# 1. Open HTML report in browser, block unwanted results
+# 2. Click "导出结果" to export control file
+# 3. Apply from exported control file
+python scripts/apply_audit_edits.py <docname>_audit_export.jsonl
+
+# Output: <original_document>_edited.docx
+```
+
+**Supported Input Formats:**
+
+| Format | Source | Description |
+|--------|--------|-------------|
+| Manifest | `<docname>_manifest.jsonl` | Phase 2 output, nested violations per paragraph |
+| Export | `<docname>_audit_export.jsonl` | HTML report export, flat format (one violation per line), blocked items excluded |
+
+Both formats include metadata (source file path, hash) in the first line, so only the JSONL file path is needed.
+
+**Key Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `jsonl_file` | path | Input JSONL file (manifest or export) |
+| `-o` / `--output` | path | Custom output path (default: `<source>_edited.docx`) |
+| `--skip-hash` | flag | Skip document hash verification |
+| `--author` | text | Author name for track changes (default: AI) |
+| `-v` / `--verbose` | flag | Verbose output |
 
 **Edit modes**: `delete` (track changes), `replace` (track changes), `manual` (Word comment)
 
-📖 **Detailed parameters, JSONL format, and error handling**: See [TOOLS.md - Apply Audit Edits](TOOLS.md#7-apply-audit-edits)
+📖 **Detailed JSONL format and error handling**: See [TOOLS.md - Apply Audit Edits](TOOLS.md#7-apply-audit-edits)
 
 ## Technical Requirements
 
@@ -581,6 +653,15 @@ doc-audit/
     ├── <docname>_blocks.jsonl            # Parsed document blocks (per document)
     ├── <docname>_manifest.jsonl          # Audit results (per document)
     └── <docname>_custom_rules.json       # Custom rules (optional, per document)
+
+# Output files (generated by workflow)
+<document_directory>/
+├── <docname>_audit_report.html           # HTML audit report (Phase 2 output)
+└── <docname>_edited.docx                 # Edited document with track changes (Phase 3 output)
+
+# User downloaded files (from browser)
+<browser_download_folder>/
+└── <docname>_audit_export.jsonl          # Exported control file (from HTML report)
 ```
 
 ## Limitations
