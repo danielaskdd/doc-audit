@@ -2,14 +2,18 @@
 """
 ABOUTME: Executes LLM-based audit on document text blocks
 ABOUTME: Sends each block with context and rules to LLM, saves results to manifest
+ABOUTME: Supports parallel processing with configurable concurrency
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
-import time
 from pathlib import Path
+
+# Maximum number of concurrent LLM API calls
+MAX_PARALLEL_WORKERS = 4
 
 # Try to import LLM libraries
 HAS_GEMINI = False
@@ -295,9 +299,76 @@ def build_user_prompt(block: dict) -> str:
 {block_text}"""
 
 
+async def audit_block_gemini_async(block: dict, system_prompt: str, model_name: str, async_client) -> dict:
+    """
+    Audit a text block using Google Gemini with strict JSON mode (async version).
+
+    Args:
+        block: Text block to audit
+        system_prompt: Cached system prompt with rules and instructions
+        model_name: Gemini model to use
+        async_client: Gemini async client instance (client.aio)
+
+    Returns:
+        Audit result dictionary
+    """
+    user_prompt = build_user_prompt(block)
+
+    response = await async_client.models.generate_content(
+        model=model_name,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            response_mime_type="application/json",
+            response_schema=AUDIT_RESULT_SCHEMA
+        )
+    )
+    
+    # With structured output, response is guaranteed to be valid JSON
+    result = json.loads(response.text)
+    return result
+
+
+async def audit_block_openai_async(block: dict, system_prompt: str, model_name: str, client) -> dict:
+    """
+    Audit a text block using OpenAI with strict JSON mode (async version).
+
+    Args:
+        block: Text block to audit
+        system_prompt: Cached system prompt with rules and instructions
+        model_name: OpenAI model to use
+        client: AsyncOpenAI client instance
+
+    Returns:
+        Audit result dictionary
+    """
+    user_prompt = build_user_prompt(block)
+
+    response = await client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.2,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "audit_result",
+                "strict": True,
+                "schema": AUDIT_RESULT_SCHEMA
+            }
+        }
+    )
+
+    # With structured output, response is guaranteed to be valid JSON
+    result = json.loads(response.choices[0].message.content)
+    return result
+
+
 def audit_block_gemini(block: dict, system_prompt: str, model_name: str = None, client = None) -> dict:
     """
-    Audit a text block using Google Gemini with strict JSON mode.
+    Audit a text block using Google Gemini with strict JSON mode (sync version).
 
     Args:
         block: Text block to audit
@@ -333,7 +404,7 @@ def audit_block_gemini(block: dict, system_prompt: str, model_name: str = None, 
 
 def audit_block_openai(block: dict, system_prompt: str, model_name: str = None) -> dict:
     """
-    Audit a text block using OpenAI with strict JSON mode.
+    Audit a text block using OpenAI with strict JSON mode (sync version).
 
     Args:
         block: Text block to audit
@@ -369,6 +440,20 @@ def audit_block_openai(block: dict, system_prompt: str, model_name: str = None) 
     # With structured output, response is guaranteed to be valid JSON
     result = json.loads(response.choices[0].message.content)
     return result
+
+
+async def save_manifest_entry_async(manifest_path: str, entry: dict, lock: asyncio.Lock):
+    """
+    Append an entry to the manifest JSONL file (async with lock).
+
+    Args:
+        manifest_path: Path to manifest file
+        entry: Entry dictionary to append
+        lock: asyncio.Lock for thread-safe writing
+    """
+    async with lock:
+        with open(manifest_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
 def save_manifest_entry(manifest_path: str, entry: dict):
@@ -407,6 +492,194 @@ def load_completed_uuids(manifest_path: str) -> set:
     return completed
 
 
+async def process_block_async(
+    block: dict,
+    block_idx: int,
+    total_blocks: int,
+    system_prompt: str,
+    model_name: str,
+    use_gemini: bool,
+    client,
+    rule_category_map: dict,
+    manifest_path: str,
+    manifest_lock: asyncio.Lock,
+    rate_limit: float,
+    semaphore: asyncio.Semaphore
+) -> tuple:
+    """
+    Process a single block asynchronously with concurrency control.
+
+    Args:
+        block: Text block to audit
+        block_idx: Index of the block (0-based)
+        total_blocks: Total number of blocks
+        system_prompt: Cached system prompt
+        model_name: LLM model name
+        use_gemini: Whether to use Gemini (True) or OpenAI (False)
+        client: LLM client instance
+        rule_category_map: Mapping from rule_id to category
+        manifest_path: Path to manifest file
+        manifest_lock: asyncio.Lock for thread-safe manifest writing
+        rate_limit: Seconds to wait between API calls
+        semaphore: asyncio.Semaphore for concurrency control
+
+    Returns:
+        Tuple of (block_idx, success, violation_count, heading)
+    """
+    async with semaphore:
+        block_uuid = block.get('uuid', str(block_idx))
+        heading = block.get('heading', 'Unknown')[:50]
+        
+        try:
+            # Rate limiting (applied per concurrent task)
+            if rate_limit > 0:
+                await asyncio.sleep(rate_limit)
+            
+            # Call LLM with cached system prompt
+            if use_gemini:
+                result = await audit_block_gemini_async(block, system_prompt, model_name, client)
+            else:
+                result = await audit_block_openai_async(block, system_prompt, model_name, client)
+
+            # Get UUID range from block for injection into violations
+            block_uuid_start = block.get('uuid', '')
+            block_uuid_end = block.get('uuid_end', block_uuid_start)
+            
+            # Add category and UUID range to each violation based on rule_id
+            violations_with_metadata = []
+            for violation in result.get('violations', []):
+                rule_id = violation.get('rule_id', '')
+                category = rule_category_map.get(rule_id, 'other')
+                violation_with_metadata = {
+                    **violation,
+                    "category": category,
+                    "uuid": block_uuid_start,
+                    "uuid_end": block_uuid_end
+                }
+                violations_with_metadata.append(violation_with_metadata)
+
+            # Normalize is_violation based on actual violations
+            has_violations = len(violations_with_metadata) > 0
+            is_violation = has_violations
+
+            # Build manifest entry
+            entry = {
+                "uuid": block_uuid,
+                "uuid_end": block_uuid_end,
+                "p_heading": block.get('heading', ''),
+                "p_content": block.get('content', '') if isinstance(block.get('content'), str) else json.dumps(block.get('content', ''), ensure_ascii=False),
+                "is_violation": is_violation,
+                "violations": violations_with_metadata
+            }
+
+            # Save to manifest (thread-safe)
+            await save_manifest_entry_async(manifest_path, entry, manifest_lock)
+
+            violation_count = len(violations_with_metadata)
+            return (block_idx, True, violation_count, heading)
+
+        except json.JSONDecodeError as e:
+            print(f"[{block_idx+1}/{total_blocks}] Error: Failed to parse LLM response: {e}", file=sys.stderr)
+            return (block_idx, False, 0, heading)
+        except Exception as e:
+            print(f"[{block_idx+1}/{total_blocks}] Error: {e}", file=sys.stderr)
+            return (block_idx, False, 0, heading)
+
+
+async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, client, completed_uuids):
+    """
+    Run the audit process asynchronously with parallel block processing.
+
+    Args:
+        args: Parsed command-line arguments
+        blocks: List of text blocks to audit
+        rules: List of audit rules
+        metadata: Document metadata
+        use_gemini: Whether to use Gemini
+        model_name: LLM model name
+        client: LLM client instance
+        completed_uuids: Set of already-processed UUIDs
+    """
+    # Build rule category mapping
+    rule_category_map = build_rule_category_map(rules)
+
+    # Build system prompt once (will be cached by LLM)
+    system_prompt = build_system_prompt(rules)
+    print(f"System prompt built ({len(system_prompt)} chars, will be cached)")
+
+    # Determine block range
+    start_idx = args.start_block
+    end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
+    blocks_to_process = blocks[start_idx:end_idx + 1]
+
+    # Filter out already-processed blocks
+    blocks_with_indices = [
+        (start_idx + i, block) 
+        for i, block in enumerate(blocks_to_process)
+        if block.get('uuid', str(start_idx + i)) not in completed_uuids
+    ]
+
+    if not blocks_with_indices:
+        print("All blocks already processed!")
+        return
+
+    print(f"\nUsing model: {model_name}")
+    print(f"Processing blocks {start_idx} to {end_idx} ({len(blocks_with_indices)} blocks to process)")
+    print(f"Parallel workers: {args.workers}")
+    print(f"Output: {args.output}")
+    print("-" * 50)
+
+    # Create concurrency controls
+    semaphore = asyncio.Semaphore(args.workers)
+    manifest_lock = asyncio.Lock()
+
+    # Create tasks for all blocks
+    tasks = [
+        process_block_async(
+            block=block,
+            block_idx=block_idx,
+            total_blocks=len(blocks),
+            system_prompt=system_prompt,
+            model_name=model_name,
+            use_gemini=use_gemini,
+            client=client,
+            rule_category_map=rule_category_map,
+            manifest_path=args.output,
+            manifest_lock=manifest_lock,
+            rate_limit=args.rate_limit,
+            semaphore=semaphore
+        )
+        for block_idx, block in blocks_with_indices
+    ]
+
+    # Process all blocks in parallel with progress reporting
+    total_violations = 0
+    blocks_processed = 0
+    blocks_failed = 0
+
+    # Use asyncio.as_completed for real-time progress updates
+    for coro in asyncio.as_completed(tasks):
+        block_idx, success, violation_count, heading = await coro
+        
+        if success:
+            blocks_processed += 1
+            total_violations += violation_count
+            if violation_count > 0:
+                print(f"[{block_idx+1}/{len(blocks)}] {heading}... Found {violation_count} violation(s)")
+            else:
+                print(f"[{block_idx+1}/{len(blocks)}] {heading}... OK")
+        else:
+            blocks_failed += 1
+
+    # Summary
+    print("\n" + "=" * 50)
+    print("Audit Complete")
+    print(f"Blocks processed: {blocks_processed}")
+    print(f"Blocks failed: {blocks_failed}")
+    print(f"Total violations: {total_violations}")
+    print(f"Manifest saved to: {args.output}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run LLM-based audit on document text blocks"
@@ -436,10 +709,16 @@ def main():
         help="LLM model to use: gemini-3-flash, gpt-5.2, or auto (default: auto)"
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_PARALLEL_WORKERS,
+        help=f"Number of parallel workers (default: {MAX_PARALLEL_WORKERS})"
+    )
+    parser.add_argument(
         "--rate-limit",
         type=float,
         default=0.05,
-        help="Seconds to wait between API calls (default: 0.05)"
+        help="Seconds to wait between API calls per worker (default: 0.05)"
     )
     parser.add_argument(
         "--start-block",
@@ -483,16 +762,18 @@ def main():
 
     # Determine which model to use
     use_gemini = False
-    gemini_client = None
+    client = None
     model_name = args.model
 
     if model_name == "auto":
         if HAS_GEMINI and os.getenv("GOOGLE_API_KEY"):
             use_gemini = True
             model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-3-flash")
-            gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+            # Use .aio for async client access
+            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY")).aio
         elif HAS_OPENAI and os.getenv("OPENAI_API_KEY"):
             model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-5.2")
+            client = openai.AsyncOpenAI()
         else:
             print("Error: No API key found. Set GOOGLE_API_KEY or OPENAI_API_KEY", file=sys.stderr)
             sys.exit(1)
@@ -504,7 +785,8 @@ def main():
             print("Error: GOOGLE_API_KEY not set", file=sys.stderr)
             sys.exit(1)
         use_gemini = True
-        gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        # Use .aio for async client access
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY")).aio
     else:
         # Treat all other models as OpenAI (gpt-5.2, o1-mini, o3-mini, etc.)
         if not HAS_OPENAI:
@@ -513,6 +795,7 @@ def main():
         if not os.getenv("OPENAI_API_KEY"):
             print("Error: OPENAI_API_KEY not set", file=sys.stderr)
             sys.exit(1)
+        client = openai.AsyncOpenAI()
 
     # Load inputs
     print(f"Loading blocks from: {args.document}")
@@ -525,13 +808,6 @@ def main():
     print(f"Loading rules from: {args.rules}")
     rules = load_rules(args.rules)
     print(f"Loaded {len(rules)} rules")
-
-    # Build rule category mapping
-    rule_category_map = build_rule_category_map(rules)
-
-    # Build system prompt once (it will be cached by the LLM for all blocks)
-    system_prompt = build_system_prompt(rules)
-    print(f"System prompt built ({len(system_prompt)} chars, will be cached)")
 
     # Handle resume
     completed_uuids = set()
@@ -550,102 +826,29 @@ def main():
                 f.write(json.dumps(audit_metadata, ensure_ascii=False) + '\n')
             print(f"Created new manifest with source file metadata")
 
-    # Determine block range
-    start_idx = args.start_block
-    end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
-    blocks_to_process = blocks[start_idx:end_idx + 1]
-
-    print(f"\nUsing model: {model_name}")
-    print(f"Processing blocks {start_idx} to {end_idx}")
-    print(f"Output: {args.output}")
-    print("-" * 50)
-
-    # Process blocks
-    total_violations = 0
-    blocks_processed = 0
-
-    for i, block in enumerate(blocks_to_process):
-        block_idx = start_idx + i
-        block_uuid = block.get('uuid', str(block_idx))
-
-        # Skip if already processed
-        if block_uuid in completed_uuids:
-            print(f"[{block_idx+1}/{len(blocks)}] Skipping (already processed)")
-            continue
-
-        print(f"[{block_idx+1}/{len(blocks)}] Auditing: {block.get('heading', 'Unknown')[:50]}...")
-
-        if args.dry_run:
+    # Handle dry-run mode (no async needed)
+    if args.dry_run:
+        system_prompt = build_system_prompt(rules)
+        start_idx = args.start_block
+        end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
+        blocks_to_process = blocks[start_idx:end_idx + 1]
+        
+        for i, block in enumerate(blocks_to_process):
+            block_idx = start_idx + i
+            block_uuid = block.get('uuid', str(block_idx))
+            
+            if block_uuid in completed_uuids:
+                print(f"[{block_idx+1}/{len(blocks)}] Skipping (already processed)")
+                continue
+            
+            print(f"[{block_idx+1}/{len(blocks)}] Auditing: {block.get('heading', 'Unknown')[:50]}...")
             user_prompt = build_user_prompt(block)
             print(f"\n--- System Prompt ---\n{system_prompt[:300]}...\n")
             print(f"--- User Prompt ---\n{user_prompt[:300]}...")
-            continue
+        return
 
-        try:
-            # Call LLM with cached system prompt
-            if use_gemini:
-                result = audit_block_gemini(block, system_prompt, model_name, gemini_client)
-            else:
-                result = audit_block_openai(block, system_prompt, model_name)
-
-            # Get UUID range from block for injection into violations
-            block_uuid_start = block.get('uuid', '')
-            block_uuid_end = block.get('uuid_end', block_uuid_start)  # Fallback to uuid if uuid_end not present
-            
-            # Add category and UUID range to each violation based on rule_id
-            # UUID range is injected by code, NOT returned by LLM
-            violations_with_metadata = []
-            for violation in result.get('violations', []):
-                rule_id = violation.get('rule_id', '')
-                category = rule_category_map.get(rule_id, 'other')
-                violation_with_metadata = {
-                    **violation,
-                    "category": category,
-                    "uuid": block_uuid_start,      # Injected by code
-                    "uuid_end": block_uuid_end     # Injected by code
-                }
-                violations_with_metadata.append(violation_with_metadata)
-
-            # Normalize is_violation based on actual violations (don't blindly trust LLM)
-            # Ground truth: if violations array has items, it's a violation
-            has_violations = len(violations_with_metadata) > 0
-            is_violation = has_violations
-
-            # Build manifest entry
-            entry = {
-                "uuid": block_uuid,
-                "uuid_end": block_uuid_end,
-                "p_heading": block.get('heading', ''),
-                "p_content": block.get('content', '') if isinstance(block.get('content'), str) else json.dumps(block.get('content', ''), ensure_ascii=False),
-                "is_violation": is_violation,
-                "violations": violations_with_metadata
-            }
-
-            # Save to manifest
-            save_manifest_entry(args.output, entry)
-
-            if entry['is_violation']:
-                total_violations += len(entry['violations'])
-                print(f"    Found {len(entry['violations'])} violation(s)")
-            else:
-                print(f"    OK")
-
-            blocks_processed += 1
-
-            # Rate limiting
-            time.sleep(args.rate_limit)
-
-        except json.JSONDecodeError as e:
-            print(f"    Error: Failed to parse LLM response: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"    Error: {e}", file=sys.stderr)
-
-    # Summary
-    print("\n" + "=" * 50)
-    print("Audit Complete")
-    print(f"Blocks processed: {blocks_processed}")
-    print(f"Total violations: {total_violations}")
-    print(f"Manifest saved to: {args.output}")
+    # Run async audit
+    asyncio.run(run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, client, completed_uuids))
 
 
 if __name__ == "__main__":
