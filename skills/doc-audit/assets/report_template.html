@@ -202,6 +202,42 @@
             box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
         }
 
+        .bulk-action-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s;
+        }
+
+        .bulk-action-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+
+        .bulk-action-btn.block-all {
+            background: var(--warning);
+            color: white;
+        }
+
+        .bulk-action-btn.block-all:hover {
+            background: var(--warning-light);
+        }
+
+        .bulk-action-btn.unblock-all {
+            background: var(--gray-500);
+            color: white;
+        }
+
+        .bulk-action-btn.unblock-all:hover {
+            background: var(--gray-400);
+        }
+
         .container {
             max-width: 1200px;
             margin: 0 auto;
@@ -646,6 +682,14 @@
                         当前显示: <span id="filteredCount">0</span>
                     </span>
                 </span>
+                <button class="bulk-action-btn block-all" onclick="blockAllVisible()">
+                    <span>🚫</span>
+                    <span>全部屏蔽</span>
+                </button>
+                <button class="bulk-action-btn unblock-all" onclick="unblockAllVisible()">
+                    <span>✅</span>
+                    <span>清空屏蔽</span>
+                </button>
             </div>
         </div>
     </div>
@@ -819,7 +863,57 @@
             document.getElementById('blockedCount').textContent = blockedCount;
         }
 
+        // Block all visible issues under current filter conditions
+        function blockAllVisible() {
+            document.querySelectorAll('.issue').forEach(issue => {
+                // Only process currently visible items
+                if (issue.style.display !== 'none') {
+                    const checkbox = issue.querySelector('.block-checkbox');
+                    if (checkbox && !checkbox.checked) {
+                        checkbox.checked = true;
+                        issue.classList.add('blocked');
+                        issue.setAttribute('data-blocked', 'true');
+                    }
+                }
+            });
+            updateStats();
+            applyFilters();
+        }
+
+        // Unblock all visible issues under current filter conditions
+        function unblockAllVisible() {
+            document.querySelectorAll('.issue').forEach(issue => {
+                // Only process currently visible items
+                if (issue.style.display !== 'none') {
+                    const checkbox = issue.querySelector('.block-checkbox');
+                    if (checkbox && checkbox.checked) {
+                        checkbox.checked = false;
+                        issue.classList.remove('blocked');
+                        issue.removeAttribute('data-blocked');
+                    }
+                }
+            });
+            updateStats();
+            applyFilters();
+        }
+
         async function exportResults() {
+            // Check if there are no issues at all
+            const allIssues = document.querySelectorAll('.issue');
+            
+            if (allIssues.length === 0) {
+                alert('⚠️ 没有可导出的审核结果！\n\n当前文档未发现任何问题。');
+                return;
+            }
+            
+            // Check if all items are blocked
+            const blockedIssues = document.querySelectorAll('.issue[data-blocked="true"]');
+            
+            if (blockedIssues.length === allIssues.length) {
+                alert('⚠️ 所有条目都已被屏蔽，无法导出空结果！\n\n请取消部分条目的屏蔽状态后再导出。');
+                return;
+            }
+            
             // Prepare export data
             const exportData = [];
             
