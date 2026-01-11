@@ -797,10 +797,30 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
         if tag == 'p':  # Paragraph
             # Get paragraph text
             para_text = ''
-            for run in element.findall('.//w:r', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
-                for t in run.findall('w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
-                    if t.text:
-                        para_text += t.text
+            ns = {
+                'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+            }
+            for run in element.findall('.//w:r', ns):
+                for child in run:
+                    tag = child.tag.split('}')[-1]  # Remove namespace
+                    if tag == 't' and child.text:
+                        para_text += child.text
+                    elif tag == 'br':
+                        # Handle line breaks - textWrapping or no type = soft line break
+                        br_type = child.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type')
+                        if br_type in (None, 'textWrapping'):
+                            para_text += '\n'
+                        # Skip page and column breaks (layout elements)
+                    elif tag == 'drawing':
+                        # Extract inline images (ignore floating images wp:anchor)
+                        inline = child.find('wp:inline', ns)
+                        if inline is not None:
+                            doc_pr = inline.find('wp:docPr', ns)
+                            if doc_pr is not None:
+                                img_id = doc_pr.get('id', '')
+                                img_name = doc_pr.get('name', '')
+                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
             
             para_text = para_text.strip()
             if not para_text:

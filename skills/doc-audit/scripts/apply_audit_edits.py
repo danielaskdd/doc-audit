@@ -5,6 +5,7 @@ ABOUTME: Reads JSONL export from audit report and modifies the source document
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import sys
@@ -28,6 +29,7 @@ NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
     'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
     'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
 }
 
 COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
@@ -44,6 +46,10 @@ AUTO_NUMBERING_PATTERN = re.compile(
     r'•\s*'                   # Bullet: • (optional space)
     r')'
 )
+
+# Drawing pattern for detecting inline image placeholders
+# Matches: <drawing id="1" name="图片 1" />
+DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
 
 # ============================================================
 # Data Classes
@@ -246,37 +252,7 @@ class AuditEditApplier:
             return
     
     # ==================== Run Processing ====================
-    
-    def _collect_runs_info(self, para_elem) -> List[Dict]:
-        """
-        Collect information about all runs in a paragraph.
-        Returns: [{'elem': run, 'text': str, 'start': int, 'end': int, 'rPr': element}, ...]
-        """
-        runs_info = []
-        pos = 0
-        
-        for run in para_elem.findall('.//w:r', NS):
-            text_elems = run.findall('w:t', NS)
-            if not text_elems:
-                continue
-            
-            run_text = ''.join(t.text or '' for t in text_elems)
-            if not run_text:
-                continue
-                
-            rPr = run.find('w:rPr', NS)
-            
-            runs_info.append({
-                'elem': run,
-                'text': run_text,
-                'start': pos,
-                'end': pos + len(run_text),
-                'rPr': rPr
-            })
-            pos += len(run_text)
-        
-        return runs_info
-    
+
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
         Collect run info representing ORIGINAL text (before track changes).
@@ -370,6 +346,24 @@ class AuditEditApplier:
                             'rPr': rPr
                         })
                         pos += 1
+                    elif elem.tag == f'{{{NS["w"]}}}drawing':
+                        # Handle inline images (ignore floating/anchor images)
+                        inline = elem.find(f'{{{NS["wp"]}}}inline')
+                        if inline is not None:
+                            doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
+                            if doc_pr is not None:
+                                img_id = doc_pr.get('id', '')
+                                img_name = doc_pr.get('name', '')
+                                img_str = f'<drawing id="{img_id}" name="{img_name}" />'
+                                runs_info.append({
+                                    'text': img_str,
+                                    'start': pos,
+                                    'end': pos + len(img_str),
+                                    'elem': child,
+                                    'rPr': rPr,
+                                    'is_drawing': True
+                                })
+                                pos += len(img_str)
         
         combined_text = ''.join(r['text'] for r in runs_info)
         return runs_info, combined_text
@@ -494,11 +488,24 @@ class AuditEditApplier:
         
         first_run = affected_runs[0]['elem']
         parent = first_run.getparent()
-        insert_idx = list(parent).index(first_run)
+        
+        # Safety check: if element is no longer in DOM, skip
+        if parent is None:
+            return
+        
+        try:
+            insert_idx = list(parent).index(first_run)
+        except ValueError:
+            # Element no longer in parent
+            return
         
         # Remove old runs
         for info in affected_runs:
-            parent.remove(info['elem'])
+            try:
+                if info['elem'].getparent() is parent:
+                    parent.remove(info['elem'])
+            except ValueError:
+                pass  # Already removed
         
         # Insert new elements
         for i, elem in enumerate(new_elements):
@@ -525,6 +532,32 @@ class AuditEditApplier:
             ):
                 return True
         return False
+    
+    def _find_revision_ancestor(self, elem, para_elem) -> Optional[etree.Element]:
+        """
+        Find the outermost revision container (w:del or w:ins) for an element.
+        
+        Walks up the tree from elem to para_elem, looking for revision markup.
+        Returns the outermost revision container if found, None otherwise.
+        
+        Args:
+            elem: The element to check (usually a w:r run element)
+            para_elem: The paragraph element (stopping point for traversal)
+        
+        Returns:
+            The outermost w:del or w:ins element, or None if not inside revision
+        """
+        revision_tags = (f'{{{NS["w"]}}}del', f'{{{NS["w"]}}}ins')
+        outermost_revision = None
+        
+        current = elem
+        while current is not None and current is not para_elem:
+            parent = current.getparent()
+            if parent is not None and parent.tag in revision_tags:
+                outermost_revision = parent
+            current = parent
+        
+        return outermost_revision
     
     # ==================== Delete Operation ====================
 
@@ -595,6 +628,10 @@ class AuditEditApplier:
         """
         Apply replace operation with diff-based track changes.
         
+        Strategy: Build all elements in a single pass, preserving original elements
+        for 'equal' portions (to keep formatting, images, etc.) and creating
+        track changes for delete/insert portions.
+        
         Args:
             para_elem: Paragraph element
             violation_text: Text to replace
@@ -615,61 +652,107 @@ class AuditEditApplier:
         if not affected:
             return 'fallback'
         
-        # Calculate diff first to check only the parts that will be modified
+        # Calculate diff
         diff_ops = self._calculate_diff(violation_text, revised_text)
         
-        # Check if any 'delete' operation overlaps with previous modifications
-        # Only the deleted parts need to be checked, not 'equal' or 'insert' parts
+        # Check for image handling issues: cannot insert images via revision markup
+        for op, text in diff_ops:
+            if op == 'insert' and DRAWING_PATTERN.search(text):
+                if self.verbose:
+                    print(f"  [Fallback] Cannot insert images via revision markup")
+                return 'fallback'
+        
+        # Check for conflicts only on delete operations
         current_pos = match_start
         for op, text in diff_ops:
             if op == 'delete':
-                # Find runs for this delete operation
                 del_end = current_pos + len(text)
                 del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
                 if self._check_overlap_with_revisions(del_affected):
                     return 'conflict'
                 current_pos = del_end
             elif op == 'equal':
-                # Equal text consumes position but doesn't need conflict check
                 current_pos += len(text)
-            # 'insert' doesn't consume original text position
+            # insert doesn't consume original text position
         
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        # Calculate split points
+        # Calculate split points for before/after text
         first_run = affected[0]
         last_run = affected[-1]
         before_text = first_run['text'][:match_start - first_run['start']]
         after_text = last_run['text'][match_end - last_run['start']:]
         
+        # Build new elements in a single pass
         new_elements = []
         
-        # Before text
+        # Before text (unchanged part before the match)
         if before_text:
             new_elements.append(self._create_run(before_text, rPr_xml))
         
-        # Apply diff operations
+        # Process diff operations
+        violation_pos = 0  # Position within violation_text
+        
         for op, text in diff_ops:
             if op == 'equal':
-                new_elements.append(self._create_run(text, rPr_xml))
+                # For equal portions, try to preserve original elements (especially images)
+                equal_start = match_start + violation_pos
+                equal_end = equal_start + len(text)
+                equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
+                
+                if equal_runs:
+                    # Check if this is a single image run that matches exactly
+                    if (len(equal_runs) == 1 and 
+                        equal_runs[0].get('is_drawing') and
+                        equal_runs[0]['start'] == equal_start and
+                        equal_runs[0]['end'] == equal_end):
+                        # Copy original image element
+                        new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
+                    else:
+                        # Extract text from the equal portion
+                        # Handle partial runs at boundaries
+                        for i, eq_run in enumerate(equal_runs):
+                            run_text = eq_run['text']
+                            
+                            # Calculate the portion of this run that's in our range
+                            run_start_in_range = max(0, equal_start - eq_run['start'])
+                            run_end_in_range = min(len(run_text), equal_end - eq_run['start'])
+                            portion = run_text[run_start_in_range:run_end_in_range]
+                            
+                            if eq_run.get('is_drawing'):
+                                # Image run - copy entire element if fully contained
+                                if run_start_in_range == 0 and run_end_in_range == len(run_text):
+                                    new_elements.append(copy.deepcopy(eq_run['elem']))
+                            elif portion:
+                                new_elements.append(self._create_run(portion, rPr_xml))
+                else:
+                    # No runs found, create text directly
+                    new_elements.append(self._create_run(text, rPr_xml))
+                
+                violation_pos += len(text)
+                
             elif op == 'delete':
                 change_id = self._get_next_change_id()
                 del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:delText>{self._escape_xml(text)}</w:delText></w:r>
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
+                violation_pos += len(text)
+                
             elif op == 'insert':
                 change_id = self._get_next_change_id()
                 ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
+                # insert doesn't consume violation_pos
         
-        # After text
+        # After text (unchanged part after the match)
         if after_text:
             new_elements.append(self._create_run(after_text, rPr_xml))
         
+        # Single DOM operation to replace all affected runs
         self._replace_runs(para_elem, affected, new_elements)
         return 'success'
     
@@ -746,6 +829,16 @@ class AuditEditApplier:
         """
         Apply manual operation by adding a Word comment.
         
+        This method preserves internal run structure (including images, revision 
+        markup, etc.) by inserting comment markers at element boundaries rather
+        than replacing the content.
+        
+        Strategy:
+        1. Find the precise start/end positions in the original text
+        2. For each boundary (start/end), check if the run is inside revision markup
+        3. If inside revision: insert marker outside the revision container
+        4. If not inside revision: split run if needed, insert marker at precise position
+        
         Args:
             para_elem: Paragraph element
             violation_text: Text to mark with comment
@@ -753,10 +846,6 @@ class AuditEditApplier:
             revised_text: Suggestion to show in comment
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
-        
-        Uses original text position directly to support commenting on text
-        that may have been deleted by previous rules (Word displays comments
-        on deleted text correctly).
         
         Returns:
             'success': Comment added successfully
@@ -773,47 +862,103 @@ class AuditEditApplier:
         comment_id = self.next_comment_id
         self.next_comment_id += 1
         
-        rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
+        first_run_info = affected[0]
+        last_run_info = affected[-1]
+        first_run = first_run_info['elem']
+        last_run = last_run_info['elem']
+        rPr_xml = self._get_rPr_xml(first_run_info['rPr'])
         
-        # Calculate split points
-        first_run = affected[0]
-        last_run = affected[-1]
-        before_text = first_run['text'][:match_start - first_run['start']]
-        after_text = last_run['text'][match_end - last_run['start']:]
+        # Check if start/end runs are inside revision markup
+        start_revision = self._find_revision_ancestor(first_run, para_elem)
+        end_revision = self._find_revision_ancestor(last_run, para_elem)
         
-        new_elements = []
+        # Calculate text split points
+        before_text = first_run_info['text'][:match_start - first_run_info['start']]
+        after_text = last_run_info['text'][match_end - last_run_info['start']:]
         
-        # Before text
-        if before_text:
-            new_elements.append(self._create_run(before_text, rPr_xml))
-        
-        # Comment range start
+        # Create comment markers
         range_start = etree.fromstring(
             f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
         )
-        new_elements.append(range_start)
-        
-        # Commented text
-        new_elements.append(self._create_run(violation_text, rPr_xml))
-        
-        # Comment range end
         range_end = etree.fromstring(
             f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
         )
-        new_elements.append(range_end)
-        
-        # Comment reference
-        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+        comment_ref = etree.fromstring(f'''<w:r xmlns:w="{NS['w']}">
             <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
             <w:commentReference w:id="{comment_id}"/>
-        </w:r>'''
-        new_elements.append(etree.fromstring(ref_xml))
+        </w:r>''')
         
-        # After text
-        if after_text:
-            new_elements.append(self._create_run(after_text, rPr_xml))
+        # === Handle START position ===
+        if start_revision is not None:
+            # Start is inside revision: insert commentRangeStart before revision container
+            parent = start_revision.getparent()
+            if parent is not None:
+                idx = list(parent).index(start_revision)
+                parent.insert(idx, range_start)
+        else:
+            # Start is in normal run: may need to split
+            parent = first_run.getparent()
+            if parent is None:
+                return 'fallback'
+            
+            try:
+                idx = list(parent).index(first_run)
+            except ValueError:
+                return 'fallback'
+            
+            if before_text:
+                # Need to split: create run for before_text, insert before first_run
+                before_run = self._create_run(before_text, rPr_xml)
+                parent.insert(idx, before_run)
+                idx += 1
+                
+                # Update first_run's text content (remove before_text portion)
+                t_elem = first_run.find('w:t', NS)
+                if t_elem is not None and t_elem.text:
+                    t_elem.text = t_elem.text[len(before_text):]
+            
+            # Insert commentRangeStart before the (possibly modified) first_run
+            parent.insert(idx, range_start)
         
-        self._replace_runs(para_elem, affected, new_elements)
+        # === Handle END position ===
+        if end_revision is not None:
+            # End is inside revision: insert commentRangeEnd after revision container
+            parent = end_revision.getparent()
+            if parent is not None:
+                idx = list(parent).index(end_revision)
+                parent.insert(idx + 1, range_end)
+                parent.insert(idx + 2, comment_ref)
+        else:
+            # End is in normal run: may need to split
+            parent = last_run.getparent()
+            if parent is None:
+                return 'fallback'
+            
+            try:
+                idx = list(parent).index(last_run)
+            except ValueError:
+                return 'fallback'
+            
+            if after_text:
+                # Need to split: update last_run to remove after_text, create new run for after_text
+                t_elem = last_run.find('w:t', NS)
+                if t_elem is not None and t_elem.text:
+                    original_text = t_elem.text
+                    # Keep only the portion up to match_end
+                    keep_len = len(original_text) - len(after_text)
+                    t_elem.text = original_text[:keep_len]
+                
+                # Insert commentRangeEnd after last_run
+                parent.insert(idx + 1, range_end)
+                # Insert commentReference after range_end
+                parent.insert(idx + 2, comment_ref)
+                # Create after_run and insert after comment_ref
+                after_run = self._create_run(after_text, rPr_xml)
+                parent.insert(idx + 3, after_run)
+            else:
+                # No split needed: insert commentRangeEnd and reference after last_run
+                parent.insert(idx + 1, range_end)
+                parent.insert(idx + 2, comment_ref)
         
         # Record comment content
         comment_text = violation_reason

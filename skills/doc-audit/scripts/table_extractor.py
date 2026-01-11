@@ -114,11 +114,19 @@ class TableExtractor:
                                 if para_id_attr:
                                     cell_para_id = para_id_attr
                             
-                            # Get text content
+                            # Get text content (including line breaks)
                             para_text = ''
-                            for t_elem in para_elem.findall('.//'+qn('w:t')):
-                                if t_elem.text:
-                                    para_text += t_elem.text
+                            for run in para_elem.findall('.//'+qn('w:r')):
+                                for child in run:
+                                    tag = child.tag.split('}')[-1]
+                                    if tag == 't' and child.text:
+                                        para_text += child.text
+                                    elif tag == 'br':
+                                        # Handle line breaks - textWrapping or no type = soft line break
+                                        br_type = child.get(qn('w:type'))
+                                        if br_type in (None, 'textWrapping'):
+                                            para_text += '\n'
+                                        # Skip page and column breaks (layout elements)
                             
                             # Get numbering label
                             label = numbering_resolver.get_label(para_elem)
@@ -134,7 +142,7 @@ class TableExtractor:
                         
                         cell_text = '\n'.join(cell_paragraphs).replace('\x07', '')
                     else:
-                        # Fallback to simple text extraction
+                        # Fallback to simple text extraction (including line breaks)
                         # Cannot use cell.text here, must extract from XML
                         para_texts = []
                         for para_elem in tc.findall(qn('w:p')):
@@ -145,9 +153,17 @@ class TableExtractor:
                                     cell_para_id = para_id_attr
                             
                             para_text = ''
-                            for t_elem in para_elem.findall('.//'+qn('w:t')):
-                                if t_elem.text:
-                                    para_text += t_elem.text
+                            for run in para_elem.findall('.//'+qn('w:r')):
+                                for child in run:
+                                    tag = child.tag.split('}')[-1]
+                                    if tag == 't' and child.text:
+                                        para_text += child.text
+                                    elif tag == 'br':
+                                        # Handle line breaks - textWrapping or no type = soft line break
+                                        br_type = child.get(qn('w:type'))
+                                        if br_type in (None, 'textWrapping'):
+                                            para_text += '\n'
+                                        # Skip page and column breaks (layout elements)
                             if para_text:
                                 para_texts.append(para_text.strip())
                         cell_text = '\n'.join(para_texts).replace('\x07', '')
