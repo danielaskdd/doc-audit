@@ -1,11 +1,11 @@
 {
   "version": "1.0",
   "description": "Default audit rules for document verification",
-  "total_rules": 10,
+  "total_rules": 8,
   "rules": [
     {
       "id": "R001",
-      "description": "检查原文是否存在错别字、标点符号误用或严重的语法错误，忽略空格和换行等排版错误。因为word是自动编号的，如果发现编号错误不要试图修复它，而是标记为人工修复， 并把`violation_text`设置为出现编号错误的正文。",
+      "description": "检查原文是否存在错别字、标点符号误用或严重的语法错误，忽略空格和换行等排版错误。因为word是自动编号的，如果发现编号错误不要试图修复它，而是标记为人工修复，并把`violation_text`设置为出现编号错误的正文。",
       "severity": "medium",
       "category": "grammar",
       "examples": {
@@ -27,7 +27,7 @@
       "id": "R003",
       "description": "检查原文是否存在指代关系模糊和歧义；例如包含多个不同名词或短语，导致代词的指代对象不唯一；又如同一概念用不同的指代名词来表示。",
       "severity": "high",
-      "category": "clarity",
+      "category": "consistency",
       "examples": {
         "violation": "甲方通知乙方其应支付费用，我方须在30天内完成，否则它将失效。",
         "correction": "甲方通知乙方，乙方应支付费用；乙方须在30天内完成支付，否则本通知将失效。"
@@ -35,19 +35,19 @@
     },
     {
       "id": "R004",
-      "description": "检查是否存在导致责任主体定义模糊的被动语态。",
+      "description": "检查是否存在导致责任主体定义模糊的被动语态或主语缺失。",
       "severity": "low",
-      "category": "clarity",
+      "category": "consistency",
       "examples": {
-        "violation": "必须在项目截止日期前一个月被提交验收报告。",
-        "correction": "乙方必须在项目截止日期前一个月被提交验收报告。"
+        "violation": "必须在项目截止日期前一个月提交验收报告。",
+        "correction": "乙方必须在项目截止日期前一个月提交验收报告。"
       }
     },
     {
       "id": "R005",
-      "description": "检查是否存在时间或日期是的含糊表述。",
+      "description": "检查是否存在时间或日期的含糊表述, 是否存在或时间顺序的矛盾，是否存在时间或工期计算的错误。",
       "severity": "medium",
-      "category": "clarity",
+      "category": "time",
       "examples": {
         "violation": "交付物应在签署协议后立即提供。",
         "correction": "交付物应在协议签署之日起15个工作日内提供。"
@@ -57,7 +57,7 @@
       "id": "R006",
       "description": "检查金额数值中是否缺失具体的货币单位或币种规范。",
       "severity": "high",
-      "category": "semantic",
+      "category": "money",
       "examples": {
         "violation": "违约金总额为5万元。",
         "correction": "违约金总额为人民币5万元。"
@@ -67,7 +67,7 @@
       "id": "R007",
       "description": "检查是否存在数值计算错误；例如计算结果与实际情况不符，或计算过程中存在错误的操作顺序。",
       "severity": "high",
-      "category": "logic",
+      "category": "calculation",
       "examples": {
         "violation": "一年12月，每月25天，每天10小时，年工作时长为3600小时。",
         "correction": "一年12月，每月25天，每天10小时，年工作时长为3000小时。"
@@ -79,7 +79,7 @@
       "severity": "high",
       "category": "logic",
       "examples": {
-        "violation": "技术要求：内容容量256MB；投标相应：内容容量512MB；偏离结论：无偏离",
+        "violation": "技术要求：内容容量256MB；投标相应：内容容量512MB；偏离结论：无偏离。",
         "correction": "偏离结论：正偏离."
       }
     }
