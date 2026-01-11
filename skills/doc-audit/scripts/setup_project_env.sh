@@ -43,7 +43,7 @@ echo
 echo "3. Installing Python dependencies with uv..."
 source "$VENV_DIR/bin/activate"
 
-uv pip install python-docx lxml defusedxml jinja2 google-genai openai
+uv pip install python-docx lxml defusedxml jinja2 google-genai openai openpyxl
 
 echo "   ✓ Installed packages:"
 
@@ -126,6 +126,7 @@ fi
 DOC_DIR="$(cd "$(dirname "$DOCUMENT")" && pwd)"
 DOC_NAME="$(basename "$DOCUMENT" .docx)"
 OUTPUT_REPORT="$DOC_DIR/${DOC_NAME}_audit_report.html"
+OUTPUT_EXCEL="$DOC_DIR/${DOC_NAME}_audit_report.xlsx"
 
 # Define intermediate files with document name prefix
 BLOCKS_FILE="$SCRIPT_DIR/${DOC_NAME}_blocks.jsonl"
@@ -158,13 +159,14 @@ python3 "$DOC_AUDIT_SKILL_PATH/scripts/run_audit.py" \
     --output "$MANIFEST_FILE"
 echo
 
-# Step 3: Generate report
+# Step 3: Generate report (HTML + Excel)
 echo "Step 3: Generating report..."
 python3 "$DOC_AUDIT_SKILL_PATH/scripts/generate_report.py" \
     "$MANIFEST_FILE" \
     --output "$OUTPUT_REPORT" \
     --template "$SCRIPT_DIR/report_template.html" \
-    --rules "$RULES"
+    --rules "$RULES" \
+    --excel
 echo
 
 echo "=========================================="
@@ -172,7 +174,9 @@ echo "✓ Audit Complete!"
 echo "Intermediate files:"
 echo "  - Blocks: $BLOCKS_FILE"
 echo "  - Manifest: $MANIFEST_FILE"
-echo "Report: $OUTPUT_REPORT"
+echo "Reports:"
+echo "  - HTML:  $OUTPUT_REPORT"
+echo "  - Excel: $OUTPUT_EXCEL"
 echo "=========================================="
 EOF
 
@@ -218,7 +222,7 @@ This directory is automatically created by Claude for document audit work.
 ./.claude-work/doc-audit/workflow.sh document.docx custom_rules.json
 ```
 
-The audit report will be saved as `<document>_audit_report.html` in the same directory as the source document.
+The audit reports will be saved as `<document>_audit_report.html` and `<document>_audit_report.xlsx` in the same directory as the source document.
 
 ### Step-by-Step Workflow
 
@@ -241,7 +245,8 @@ python skills/doc-audit/scripts/generate_report.py \
   .claude-work/doc-audit/document_manifest.jsonl \
   --output document_audit_report.html \
   --template .claude-work/doc-audit/report_template.html \
-  --rules .claude-work/doc-audit/default_rules.json
+  --rules .claude-work/doc-audit/default_rules.json \
+  --excel
 ```
 
 ## Custom Rules Workflow
@@ -308,13 +313,15 @@ All scripts (`parse_rules.py` and `run_audit.py`) will automatically use the con
   - `<docname>_manifest.jsonl` - Detailed audit results
   - `<docname>_custom_rules.json` - Custom rules (if generated)
   
-- **Final report** → Same directory as source document
-  - `<docname>_audit_report.html` - HTML audit report
+- **Final reports** → Same directory as source document
+  - `<docname>_audit_report.html` - HTML audit report (interactive, with charts)
+  - `<docname>_audit_report.xlsx` - Excel audit report (tabular, for further analysis)
 
 **Example:** For `contract.docx`:
 - `.claude-work/doc-audit/contract_blocks.jsonl`
 - `.claude-work/doc-audit/contract_manifest.jsonl`
 - `contract_audit_report.html` (in same directory as source)
+- `contract_audit_report.xlsx` (in same directory as source)
 
 ## Features
 
