@@ -492,6 +492,92 @@ def load_completed_uuids(manifest_path: str) -> set:
     return completed
 
 
+def load_existing_entries_with_block_idx(manifest_path: str, uuid_to_block_idx: dict) -> list:
+    """
+    Load existing manifest entries with block_idx looked up from UUID mapping.
+    Used in resume mode to preserve previously processed entries.
+    
+    Args:
+        manifest_path: Path to manifest JSONL file
+        uuid_to_block_idx: Mapping from uuid to block index
+    
+    Returns:
+        List of (block_idx, entry) tuples for existing entries
+    """
+    entries = []
+    path = Path(manifest_path)
+    
+    if not path.exists():
+        return entries
+    
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entry = json.loads(line)
+                # Skip metadata entry
+                if 'audited_at' in entry or entry.get('type') == 'meta':
+                    continue
+                
+                # Look up block_idx from uuid
+                uuid = entry.get('uuid', '')
+                block_idx = uuid_to_block_idx.get(uuid, -1)
+                
+                if block_idx >= 0:
+                    entries.append((block_idx, entry))
+                else:
+                    # UUID not found in blocks - might be from different document
+                    print(f"Warning: UUID {uuid} not found in blocks, skipping", 
+                          file=sys.stderr)
+    
+    return entries
+
+
+def rewrite_manifest_sorted(manifest_path: str, metadata: dict, results: list):
+    """
+    Sort results by block index and rule ID, then rewrite manifest file.
+    Uses safe rewrite: backup old file, write new, delete backup on success.
+    
+    Args:
+        manifest_path: Path to manifest JSONL file
+        metadata: Metadata entry to write first (can be None)
+        results: List of (block_idx, entry) tuples from audit
+    """
+    path = Path(manifest_path)
+    backup_path = Path(str(manifest_path) + '.bak')
+    
+    # Sort by block_idx (primary sort key)
+    results.sort(key=lambda x: x[0])
+    
+    # Sort violations within each entry by rule_id (secondary sort)
+    for _, entry in results:
+        if 'violations' in entry:
+            entry['violations'].sort(key=lambda v: v.get('rule_id', ''))
+    
+    # Safe rewrite with backup
+    try:
+        # Step 1: Rename original to backup
+        if path.exists():
+            path.rename(backup_path)
+        
+        # Step 2: Write sorted content to new file
+        with open(path, 'w', encoding='utf-8') as f:
+            if metadata:
+                f.write(json.dumps(metadata, ensure_ascii=False) + '\n')
+            for _, entry in results:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        
+        # Step 3: Delete backup on success
+        if backup_path.exists():
+            backup_path.unlink()
+        
+    except Exception as e:
+        # Restore from backup if write failed
+        if backup_path.exists() and not path.exists():
+            backup_path.rename(path)
+        raise e
+
+
 async def process_block_async(
     block: dict,
     block_idx: int,
@@ -524,7 +610,8 @@ async def process_block_async(
         semaphore: asyncio.Semaphore for concurrency control
 
     Returns:
-        Tuple of (block_idx, success, violation_count, heading)
+        Tuple of (block_idx, success, violation_count, heading, entry)
+        entry is the manifest entry dict (None if failed)
     """
     async with semaphore:
         block_uuid = block.get('uuid', str(block_idx))
@@ -572,18 +659,18 @@ async def process_block_async(
                 "violations": violations_with_metadata
             }
 
-            # Save to manifest (thread-safe)
+            # Save to manifest (thread-safe) - ensures resume capability
             await save_manifest_entry_async(manifest_path, entry, manifest_lock)
 
             violation_count = len(violations_with_metadata)
-            return (block_idx, True, violation_count, heading)
+            return (block_idx, True, violation_count, heading, entry)
 
         except json.JSONDecodeError as e:
             print(f"[{block_idx+1}/{total_blocks}] Error: Failed to parse LLM response: {e}", file=sys.stderr)
-            return (block_idx, False, 0, heading)
+            return (block_idx, False, 0, heading, None)
         except Exception as e:
             print(f"[{block_idx+1}/{total_blocks}] Error: {e}", file=sys.stderr)
-            return (block_idx, False, 0, heading)
+            return (block_idx, False, 0, heading, None)
 
 
 async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, client, completed_uuids):
@@ -606,6 +693,18 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     # Build system prompt once (will be cached by LLM)
     system_prompt = build_system_prompt(rules)
     print(f"System prompt built ({len(system_prompt)} chars, will be cached)")
+
+    # Build uuid → block_idx mapping for all blocks
+    uuid_to_block_idx = {}
+    for idx, block in enumerate(blocks):
+        uuid = block.get('uuid', str(idx))
+        uuid_to_block_idx[uuid] = idx
+
+    # In resume mode, load existing entries to preserve them during rewrite
+    all_results = []  # Collect results for final sorting
+    if completed_uuids:
+        all_results = load_existing_entries_with_block_idx(args.output, uuid_to_block_idx)
+        print(f"Loaded {len(all_results)} existing entries for merge")
 
     # Determine block range
     start_idx = args.start_block
@@ -656,14 +755,16 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     total_violations = 0
     blocks_processed = 0
     blocks_failed = 0
+    # Note: all_results already initialized above (may contain existing entries in resume mode)
 
     # Use asyncio.as_completed for real-time progress updates
     for coro in asyncio.as_completed(tasks):
-        block_idx, success, violation_count, heading = await coro
+        block_idx, success, violation_count, heading, entry = await coro
         
         if success:
             blocks_processed += 1
             total_violations += violation_count
+            all_results.append((block_idx, entry))  # Collect for sorting
             if violation_count > 0:
                 print(f"[{block_idx+1}/{len(blocks)}] {heading}... Found {violation_count} violation(s)")
             else:
@@ -671,13 +772,27 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
         else:
             blocks_failed += 1
 
+    # Rewrite manifest with sorted results
+    if all_results:
+        # Prepare metadata for rewrite
+        audit_metadata = None
+        if metadata:
+            from datetime import datetime
+            audit_metadata = {
+                **metadata,
+                "audited_at": datetime.now().isoformat()
+            }
+        
+        print("Sorting and rewriting manifest...")
+        rewrite_manifest_sorted(args.output, audit_metadata, all_results)
+
     # Summary
     print("\n" + "=" * 50)
     print("Audit Complete")
     print(f"Blocks processed: {blocks_processed}")
     print(f"Blocks failed: {blocks_failed}")
     print(f"Total violations: {total_violations}")
-    print(f"Manifest saved to: {args.output}")
+    print(f"Manifest saved to: {args.output} (sorted by block order)")
 
 
 def main():
