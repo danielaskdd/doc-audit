@@ -50,6 +50,7 @@ class TableExtractor:
             Dict with:
             - rows: 2D list of cell text strings
             - para_ids: 2D list of paraIds (first paraId in each cell, or None)
+            - para_ids_end: 2D list of paraIds (last paraId in each cell, or None)
             - header_indices: List of row indices marked as table headers
         """
         tbl = table._tbl
@@ -61,7 +62,7 @@ class TableExtractor:
             num_cols = len(tbl_grid.findall(qn('w:gridCol')))
         
         if num_cols == 0:
-            return {'rows': [], 'para_ids': [], 'header_indices': []}
+            return {'rows': [], 'para_ids': [], 'para_ids_end': [], 'header_indices': []}
         
         # Detect header rows using w:tblHeader attribute
         header_indices = []
@@ -75,10 +76,12 @@ class TableExtractor:
         # Process each row by directly iterating <w:tr> elements
         grid = []
         para_ids_grid = []
+        para_ids_end_grid = []  # Track last paraId in each cell
         
         for tr in tbl.findall(qn('w:tr')):
             row_data = [''] * num_cols  # Pre-fill with empty strings
             row_para_ids = [None] * num_cols  # Pre-fill with None
+            row_para_ids_end = [None] * num_cols  # Pre-fill with None for last paraId
             grid_col = 0
             
             # Iterate actual <w:tc> elements (each physical cell appears once)
@@ -102,17 +105,19 @@ class TableExtractor:
                 # Only extract text if NOT a vMerge continuation
                 cell_text = ''
                 cell_para_id = None
+                cell_para_id_end = None  # Track last paraId in cell
                 if vmerge_val != 'continue' and not (vmerge_val is None and tcPr is not None and tcPr.find(qn('w:vMerge')) is not None):
                     # Get cell text with numbering support
                     if numbering_resolver is not None:
                         # Extract text with numbering labels
                         cell_paragraphs = []
                         for para_elem in tc.findall(qn('w:p')):
-                            # Capture first paraId in this cell
-                            if cell_para_id is None:
-                                para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                                if para_id_attr:
-                                    cell_para_id = para_id_attr
+                            # Capture paraId from each paragraph
+                            para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            if para_id_attr:
+                                if cell_para_id is None:
+                                    cell_para_id = para_id_attr  # First paraId
+                                cell_para_id_end = para_id_attr  # Always update to get last
                             
                             # Get text content (including line breaks)
                             para_text = ''
@@ -146,11 +151,12 @@ class TableExtractor:
                         # Cannot use cell.text here, must extract from XML
                         para_texts = []
                         for para_elem in tc.findall(qn('w:p')):
-                            # Capture first paraId in this cell
-                            if cell_para_id is None:
-                                para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                                if para_id_attr:
-                                    cell_para_id = para_id_attr
+                            # Capture paraId from each paragraph
+                            para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            if para_id_attr:
+                                if cell_para_id is None:
+                                    cell_para_id = para_id_attr  # First paraId
+                                cell_para_id_end = para_id_attr  # Always update to get last
                             
                             para_text = ''
                             for run in para_elem.findall('.//'+qn('w:r')):
@@ -172,15 +178,18 @@ class TableExtractor:
                 if grid_col < num_cols:
                     row_data[grid_col] = cell_text
                     row_para_ids[grid_col] = cell_para_id
+                    row_para_ids_end[grid_col] = cell_para_id_end
                 
                 # Move grid position by gridSpan
                 grid_col += grid_span
             
             grid.append(row_data)
             para_ids_grid.append(row_para_ids)
+            para_ids_end_grid.append(row_para_ids_end)
         
         return {
             'rows': grid,
             'para_ids': para_ids_grid,
+            'para_ids_end': para_ids_end_grid,
             'header_indices': header_indices
         }

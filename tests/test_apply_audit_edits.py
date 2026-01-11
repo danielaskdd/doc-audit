@@ -5,12 +5,15 @@ ABOUTME: Uses mock functions to construct various document content and rule scen
 """
 
 import sys
+import json
+import tempfile
 from pathlib import Path
 
 # Add skills/doc-audit/scripts directory to path (must be before import)
 _scripts_dir = Path(__file__).parent.parent / 'skills' / 'doc-audit' / 'scripts'
 sys.path.insert(0, str(_scripts_dir))
 
+import pytest  # noqa: E402
 from lxml import etree  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
@@ -1211,9 +1214,273 @@ class TestApplyManualWithRevisions:
 
 
 # ============================================================
+# Tests: _load_jsonl strict uuid_end validation
+# ============================================================
+
+class TestLoadJsonlStrictValidation:
+    """Tests for _load_jsonl strict uuid_end validation"""
+    
+    def test_load_jsonl_with_uuid_end_flat_format(self):
+        """Test loading flat format JSONL with uuid_end field"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            # Write meta line
+            meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
+            json.dump(meta, f)
+            f.write('\n')
+            
+            # Write edit item with uuid_end
+            item = {
+                'uuid': 'AAAAAAAA',
+                'uuid_end': 'BBBBBBBB',
+                'violation_text': 'bad text',
+                'violation_reason': 'wrong',
+                'fix_action': 'delete',
+                'revised_text': '',
+                'category': 'test',
+                'rule_id': 'R001'
+            }
+            json.dump(item, f)
+            f.write('\n')
+            
+            f.flush()
+            
+            # Create applier with mocked dependencies
+            with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
+                applier = AuditEditApplier.__new__(AuditEditApplier)
+                applier.jsonl_path = Path(f.name)
+                
+                meta_loaded, items_loaded = applier._load_jsonl()
+                
+                assert len(items_loaded) == 1
+                assert items_loaded[0].uuid == 'AAAAAAAA'
+                assert items_loaded[0].uuid_end == 'BBBBBBBB'
+    
+    def test_load_jsonl_missing_uuid_end_flat_format_raises(self):
+        """Test that missing uuid_end in flat format raises ValueError"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            # Write meta line
+            meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
+            json.dump(meta, f)
+            f.write('\n')
+            
+            # Write edit item WITHOUT uuid_end
+            item = {
+                'uuid': 'AAAAAAAA',
+                # 'uuid_end' is missing
+                'violation_text': 'bad text',
+                'violation_reason': 'wrong',
+                'fix_action': 'delete',
+                'revised_text': '',
+                'category': 'test',
+                'rule_id': 'R001'
+            }
+            json.dump(item, f)
+            f.write('\n')
+            
+            f.flush()
+            
+            # Create applier with mocked dependencies
+            with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
+                applier = AuditEditApplier.__new__(AuditEditApplier)
+                applier.jsonl_path = Path(f.name)
+                
+                with pytest.raises(ValueError, match="Missing 'uuid_end' field"):
+                    applier._load_jsonl()
+    
+    def test_load_jsonl_with_uuid_end_nested_format(self):
+        """Test loading nested format JSONL (from run_audit.py) with uuid_end"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            # Write meta line
+            meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
+            json.dump(meta, f)
+            f.write('\n')
+            
+            # Write paragraph with violations (nested format)
+            para = {
+                'uuid': 'AAAAAAAA',
+                'uuid_end': 'BBBBBBBB',  # Block-level uuid_end
+                'p_heading': 'Section 1',
+                'p_content': 'Content text',
+                'violations': [
+                    {
+                        'violation_text': 'bad text',
+                        'violation_reason': 'wrong',
+                        'fix_action': 'replace',
+                        'revised_text': 'good text',
+                        'category': 'test',
+                        'rule_id': 'R001'
+                        # uuid_end inherited from paragraph level
+                    }
+                ]
+            }
+            json.dump(para, f)
+            f.write('\n')
+            
+            f.flush()
+            
+            # Create applier with mocked dependencies
+            with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
+                applier = AuditEditApplier.__new__(AuditEditApplier)
+                applier.jsonl_path = Path(f.name)
+                
+                meta_loaded, items_loaded = applier._load_jsonl()
+                
+                assert len(items_loaded) == 1
+                assert items_loaded[0].uuid == 'AAAAAAAA'
+                assert items_loaded[0].uuid_end == 'BBBBBBBB'
+                assert items_loaded[0].heading == 'Section 1'
+    
+    def test_load_jsonl_missing_uuid_end_nested_format_raises(self):
+        """Test that missing uuid_end in nested format raises ValueError"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+            # Write meta line
+            meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
+            json.dump(meta, f)
+            f.write('\n')
+            
+            # Write paragraph with violations WITHOUT uuid_end
+            para = {
+                'uuid': 'AAAAAAAA',
+                # 'uuid_end' is missing at both levels
+                'p_heading': 'Section 1',
+                'p_content': 'Content text',
+                'violations': [
+                    {
+                        'violation_text': 'bad text',
+                        'violation_reason': 'wrong',
+                        'fix_action': 'replace',
+                        'revised_text': 'good text',
+                        'category': 'test',
+                        'rule_id': 'R001'
+                    }
+                ]
+            }
+            json.dump(para, f)
+            f.write('\n')
+            
+            f.flush()
+            
+            # Create applier with mocked dependencies
+            with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
+                applier = AuditEditApplier.__new__(AuditEditApplier)
+                applier.jsonl_path = Path(f.name)
+                
+                with pytest.raises(ValueError, match="Missing 'uuid_end' field"):
+                    applier._load_jsonl()
+
+
+# ============================================================
+# Tests: _iter_paragraphs_in_range
+# ============================================================
+
+def create_mock_body_with_paragraphs(para_ids: list) -> etree.Element:
+    """
+    Create a mock document body with multiple paragraphs.
+    
+    Args:
+        para_ids: List of paraId values for each paragraph
+    
+    Returns:
+        lxml Element representing document body
+    """
+    body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+    
+    for para_id in para_ids:
+        p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p.set(f'{{{NS["w14"]}}}paraId', para_id)
+        r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+        t.text = f"Paragraph {para_id}"
+    
+    return body
+
+
+class TestIterParagraphsInRange:
+    """Tests for _iter_paragraphs_in_range method"""
+    
+    def test_iter_single_paragraph(self):
+        """Test iteration over a single paragraph (uuid == uuid_end)"""
+        applier = create_mock_applier()
+        body = create_mock_body_with_paragraphs(['AAA', 'BBB', 'CCC'])
+        applier.body_elem = body
+        
+        # Find start paragraph
+        start_para = body.find(f'.//w:p[@w14:paraId="BBB"]', NSMAP)
+        
+        # Iterate with same uuid_end (single paragraph)
+        paras = list(applier._iter_paragraphs_in_range(start_para, 'BBB'))
+        
+        assert len(paras) == 1
+        assert paras[0].get(f'{{{NS["w14"]}}}paraId') == 'BBB'
+    
+    def test_iter_multiple_paragraphs(self):
+        """Test iteration over multiple paragraphs"""
+        applier = create_mock_applier()
+        body = create_mock_body_with_paragraphs(['AAA', 'BBB', 'CCC', 'DDD', 'EEE'])
+        applier.body_elem = body
+        
+        # Find start paragraph
+        start_para = body.find(f'.//w:p[@w14:paraId="BBB"]', NSMAP)
+        
+        # Iterate from BBB to DDD
+        paras = list(applier._iter_paragraphs_in_range(start_para, 'DDD'))
+        
+        assert len(paras) == 3
+        para_ids = [p.get(f'{{{NS["w14"]}}}paraId') for p in paras]
+        assert para_ids == ['BBB', 'CCC', 'DDD']
+    
+    def test_iter_stops_at_uuid_end(self):
+        """Test that iteration stops at uuid_end (inclusive)"""
+        applier = create_mock_applier()
+        body = create_mock_body_with_paragraphs(['AAA', 'BBB', 'CCC', 'DDD', 'EEE'])
+        applier.body_elem = body
+        
+        # Find start paragraph
+        start_para = body.find(f'.//w:p[@w14:paraId="AAA"]', NSMAP)
+        
+        # Iterate from AAA to CCC - should not include DDD, EEE
+        paras = list(applier._iter_paragraphs_in_range(start_para, 'CCC'))
+        
+        assert len(paras) == 3
+        para_ids = [p.get(f'{{{NS["w14"]}}}paraId') for p in paras]
+        assert para_ids == ['AAA', 'BBB', 'CCC']
+        assert 'DDD' not in para_ids
+        assert 'EEE' not in para_ids
+    
+    def test_iter_with_nonexistent_uuid_end(self):
+        """Test iteration when uuid_end doesn't exist (iterates to end)"""
+        applier = create_mock_applier()
+        body = create_mock_body_with_paragraphs(['AAA', 'BBB', 'CCC'])
+        applier.body_elem = body
+        
+        # Find start paragraph
+        start_para = body.find(f'.//w:p[@w14:paraId="AAA"]', NSMAP)
+        
+        # uuid_end doesn't exist - should iterate all remaining paragraphs
+        paras = list(applier._iter_paragraphs_in_range(start_para, 'ZZZZZ'))
+        
+        assert len(paras) == 3
+        para_ids = [p.get(f'{{{NS["w14"]}}}paraId') for p in paras]
+        assert para_ids == ['AAA', 'BBB', 'CCC']
+    
+    def test_iter_start_not_in_body(self):
+        """Test iteration when start_node is not in body"""
+        applier = create_mock_applier()
+        body = create_mock_body_with_paragraphs(['AAA', 'BBB', 'CCC'])
+        applier.body_elem = body
+        
+        # Create a detached paragraph (not in body)
+        detached_para = create_paragraph_xml("Detached", "XXX")
+        
+        # Should return empty list
+        paras = list(applier._iter_paragraphs_in_range(detached_para, 'BBB'))
+        
+        assert len(paras) == 0
+
+
+# ============================================================
 # Main
 # ============================================================
 
 if __name__ == '__main__':
-    import pytest
     pytest.main([__file__, '-v'])

@@ -161,7 +161,27 @@ def find_first_valid_para_id(para_ids: list) -> str:
     sys.exit(1)
 
 
-def split_table(table_rows: list, para_ids: list, header_indices: list, debug: bool = False) -> list:
+def find_last_valid_para_id(para_ids: list) -> str:
+    """
+    Find the last valid paraId in a 2D array of paraIds.
+    
+    Args:
+        para_ids: 2D list of paraIds from table cells
+        
+    Returns:
+        str: Last non-None paraId found, or first valid if none found in reverse
+    """
+    # Iterate in reverse order to find last valid paraId
+    for row in reversed(para_ids):
+        for para_id in reversed(row):
+            if para_id:
+                return para_id
+    
+    # Fallback to first valid paraId
+    return find_first_valid_para_id(para_ids)
+
+
+def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_indices: list, debug: bool = False) -> list:
     """
     Split large table into chunks at row boundaries.
     
@@ -180,7 +200,8 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
     
     Args:
         table_rows: 2D array of table content
-        para_ids: 2D array of paraIds (parallel structure to table_rows)
+        para_ids: 2D array of paraIds - first paraId in each cell (for uuid)
+        para_ids_end: 2D array of paraIds - last paraId in each cell (for uuid_end)
         header_indices: List of row indices that are table headers
         debug: If True, output debug information
         
@@ -188,6 +209,7 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
         List of chunk dicts: [{
             'rows': 2D array subset,
             'para_ids': 2D array subset,
+            'para_ids_end': 2D array subset,
             'uuid': first valid paraId in chunk,
             'is_first': True if first chunk,
             'is_last': True if last chunk
@@ -205,6 +227,7 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
         return [{
             'rows': table_rows,
             'para_ids': para_ids,
+            'para_ids_end': para_ids_end,
             'uuid': uuid,
             'is_first': True,
             'is_last': True
@@ -239,12 +262,14 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
         # Extract chunk
         chunk_rows = table_rows[start_row:end_row]
         chunk_para_ids = para_ids[start_row:end_row]
+        chunk_para_ids_end = para_ids_end[start_row:end_row]
         
         if chunk_rows:
             chunk_uuid = find_first_valid_para_id(chunk_para_ids)
             chunks.append({
                 'rows': chunk_rows,
                 'para_ids': chunk_para_ids,
+                'para_ids_end': chunk_para_ids_end,
                 'uuid': chunk_uuid,
                 'is_first': (i == 0),
                 'is_last': (end_row >= num_rows)
@@ -271,9 +296,11 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
             if len(combined_json) <= TABLE_MAX_LENGTH:
                 # Merge the chunks
                 merged_para_ids = prev_chunk['para_ids'] + last_chunk['para_ids']
+                merged_para_ids_end = prev_chunk['para_ids_end'] + last_chunk['para_ids_end']
                 chunks[-2] = {
                     'rows': combined_rows,
                     'para_ids': merged_para_ids,
+                    'para_ids_end': merged_para_ids_end,
                     'uuid': prev_chunk['uuid'],  # Keep UUID of first chunk
                     'is_first': prev_chunk['is_first'],
                     'is_last': True  # This becomes the last chunk
@@ -287,14 +314,15 @@ def split_table(table_rows: list, para_ids: list, header_indices: list, debug: b
     return chunks
 
 
-def split_table_with_heading(table_rows: list, para_ids: list, header_indices: list, current_heading: str, start_suffix: int = 0, debug: bool = False) -> list:
+def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: list, header_indices: list, current_heading: str, start_suffix: int = 0, debug: bool = False) -> list:
     """
     Wrapper for split_table that includes heading information in debug output.
     Supports sequential numbering when multiple tables are split in the same block.
     
     Args:
         table_rows: 2D array of table content
-        para_ids: 2D array of paraIds
+        para_ids: 2D array of paraIds - first paraId in each cell (for uuid)
+        para_ids_end: 2D array of paraIds - last paraId in each cell (for uuid_end)
         header_indices: List of row indices that are table headers
         current_heading: Current block heading (for generating chunk headings)
         start_suffix: Starting suffix number for non-first chunks (default: 0)
@@ -305,7 +333,7 @@ def split_table_with_heading(table_rows: list, para_ids: list, header_indices: l
     Returns:
         Same as split_table(), with each chunk having suffix calculated from start_suffix
     """
-    chunks = split_table(table_rows, para_ids, header_indices, debug=False)
+    chunks = split_table(table_rows, para_ids, para_ids_end, header_indices, debug=False)
     
     # Add suffix_number to each chunk for later use
     for i, chunk in enumerate(chunks):
@@ -370,9 +398,11 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
                 if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
                     # Merge current into next block
                     # Current block's heading becomes the new heading
+                    # UUID range: current's uuid to next's uuid_end
                     merged_content = current_block['content'] + "\n" + next_block['content']
                     merged_block = {
                         "uuid": current_block['uuid'],  # Use current block's UUID
+                        "uuid_end": next_block.get('uuid_end', next_block['uuid']),  # Use next block's end UUID
                         "heading": current_block['heading'],  # Use current block's heading
                         "content": merged_content,
                         "type": "text",
@@ -394,9 +424,11 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
                 if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
                     # Merge current into previous block
                     # Previous block remains the heading
+                    # UUID range: prev's uuid to current's uuid_end
                     merged_content = prev_block['content'] + "\n" + current_block['content']
                     merged_blocks[-1] = {
                         "uuid": prev_block['uuid'],  # Keep previous UUID
+                        "uuid_end": current_block.get('uuid_end', current_block['uuid']),  # Use current block's end UUID
                         "heading": prev_block['heading'],  # Keep previous heading
                         "content": merged_content,
                         "type": "text",
@@ -461,8 +493,13 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     if total_length <= MAX_BLOCK_CONTENT_LENGTH:
         # Within limit, return as single block
         # Use first paragraph's para_id as UUID
+        # For uuid_end: use para_id_end if last element is a table, otherwise para_id
+        last_para = paragraphs[-1] if paragraphs else {}
+        uuid_end = last_para.get('para_id_end') or last_para.get('para_id')
+        
         block = {
             "uuid": paragraphs[0]['para_id'] if paragraphs else None,
+            "uuid_end": uuid_end,
             "heading": effective_heading,
             "content": total_content,
             "type": "text",
@@ -550,8 +587,12 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         block_paragraphs = paragraphs[prev_idx:split_idx]
         if block_paragraphs:
             block_content = "\n".join(p['text'] for p in block_paragraphs)
+            # For uuid_end: use para_id_end if last element is a table, otherwise para_id
+            last_para = block_paragraphs[-1]
+            block_uuid_end = last_para.get('para_id_end') or last_para.get('para_id')
             result_blocks.append({
                 "uuid": block_paragraphs[0]['para_id'],  # UUID from first paragraph in content
+                "uuid_end": block_uuid_end,  # UUID_end from last paragraph (or table's last cell)
                 "heading": current_block_heading,
                 "content": block_content,
                 "type": "text",
@@ -574,8 +615,12 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     final_paragraphs = paragraphs[prev_idx:]
     if final_paragraphs:
         final_content = "\n".join(p['text'] for p in final_paragraphs)
+        # For uuid_end: use para_id_end if last element is a table, otherwise para_id
+        last_final_para = final_paragraphs[-1]
+        final_uuid_end = last_final_para.get('para_id_end') or last_final_para.get('para_id')
         result_blocks.append({
             "uuid": final_paragraphs[0]['para_id'],  # UUID from first paragraph in content
+            "uuid_end": final_uuid_end,  # UUID_end from last paragraph (or table's last cell)
             "heading": current_block_heading,
             "content": final_content,
             "type": "text",
@@ -910,6 +955,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             
             table_rows = table_metadata['rows']
             para_ids = table_metadata['para_ids']
+            para_ids_end = table_metadata['para_ids_end']  # Last paraId in each cell
             header_indices = table_metadata['header_indices']
             
             # Convert table to JSON to check length
@@ -919,7 +965,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             if len(table_json) > TABLE_MAX_LENGTH:
                 # Table exceeds limit - split it
                 # Pass table_split_counter to ensure sequential numbering across multiple tables
-                table_chunks = split_table_with_heading(table_rows, para_ids, header_indices, current_heading, table_split_counter, debug)
+                table_chunks = split_table_with_heading(table_rows, para_ids, para_ids_end, header_indices, current_heading, table_split_counter, debug)
                 
                 # Extract header rows if any
                 header_rows = []
@@ -928,12 +974,15 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 
                 for chunk_idx, chunk in enumerate(table_chunks):
                     chunk_json = json.dumps(chunk['rows'], ensure_ascii=False)
+                    # Get uuid_end from last valid paraId in chunk (use para_ids_end for last cell's last paragraph)
+                    chunk_para_id_end = find_last_valid_para_id(chunk['para_ids_end'])
                     
                     if chunk['is_first']:
                         # First chunk: add to current_paragraphs (will merge with preceding content)
                         current_paragraphs.append({
                             'text': f"<table>{chunk_json}</table>",
                             'para_id': chunk['uuid'],
+                            'para_id_end': chunk_para_id_end,  # Store end paraId for uuid_end calculation
                             'is_table': True
                         })
                         has_body_content = True
@@ -952,8 +1001,11 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                             chunk_heading = current_heading
                         
                         # Build block for this table chunk
+                        # Get uuid_end from last valid paraId in chunk (use para_ids_end for last cell's last paragraph)
+                        chunk_uuid_end = find_last_valid_para_id(chunk['para_ids_end'])
                         chunk_block = {
                             "uuid": chunk['uuid'],
+                            "uuid_end": chunk_uuid_end,
                             "heading": chunk_heading,
                             "content": f"<table>{chunk_json}</table>",
                             "type": "text",
@@ -969,6 +1021,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                             current_paragraphs.append({
                                 'text': f"<table>{chunk_json}</table>",
                                 'para_id': chunk['uuid'],
+                                'para_id_end': chunk_para_id_end,  # Store end paraId for uuid_end calculation
                                 'is_table': True,
                                 '_chunk_heading': chunk_heading,
                                 '_table_header': header_rows if header_rows else None
@@ -984,11 +1037,13 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             else:
                 # Table is within size limit - no splitting needed
                 # Store table as a paragraph with special marker
-                # Use first valid paraId from table
+                # Use first valid paraId from table, and last valid paraId (from para_ids_end) for uuid_end
                 table_para_id = find_first_valid_para_id(para_ids)
+                table_para_id_end = find_last_valid_para_id(para_ids_end)
                 current_paragraphs.append({
                     'text': f"<table>{table_json}</table>",
                     'para_id': table_para_id,
+                    'para_id_end': table_para_id_end,  # Store end paraId for uuid_end calculation
                     'is_table': True
                 })
                 

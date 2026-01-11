@@ -588,29 +588,37 @@ def main():
             else:
                 result = audit_block_openai(block, system_prompt, model_name)
 
-            # Add category to each violation based on rule_id
-            violations_with_category = []
+            # Get UUID range from block for injection into violations
+            block_uuid_start = block.get('uuid', '')
+            block_uuid_end = block.get('uuid_end', block_uuid_start)  # Fallback to uuid if uuid_end not present
+            
+            # Add category and UUID range to each violation based on rule_id
+            # UUID range is injected by code, NOT returned by LLM
+            violations_with_metadata = []
             for violation in result.get('violations', []):
                 rule_id = violation.get('rule_id', '')
                 category = rule_category_map.get(rule_id, 'other')
-                violation_with_category = {
+                violation_with_metadata = {
                     **violation,
-                    "category": category
+                    "category": category,
+                    "uuid": block_uuid_start,      # Injected by code
+                    "uuid_end": block_uuid_end     # Injected by code
                 }
-                violations_with_category.append(violation_with_category)
+                violations_with_metadata.append(violation_with_metadata)
 
             # Normalize is_violation based on actual violations (don't blindly trust LLM)
             # Ground truth: if violations array has items, it's a violation
-            has_violations = len(violations_with_category) > 0
+            has_violations = len(violations_with_metadata) > 0
             is_violation = has_violations
 
             # Build manifest entry
             entry = {
                 "uuid": block_uuid,
+                "uuid_end": block_uuid_end,
                 "p_heading": block.get('heading', ''),
                 "p_content": block.get('content', '') if isinstance(block.get('content'), str) else json.dumps(block.get('content', ''), ensure_ascii=False),
                 "is_violation": is_violation,
-                "violations": violations_with_category
+                "violations": violations_with_metadata
             }
 
             # Save to manifest

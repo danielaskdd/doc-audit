@@ -839,6 +839,7 @@
                     return; // Skip blocked items
                 }
                 // Export with specified field order
+                // uuid_end is required by apply_audit_edits.py for range-restricted search
                 const orderedViolation = {
                     category: v.category,
                     fix_action: v.fix_action,
@@ -847,6 +848,7 @@
                     revised_text: v.revised_text,
                     rule_id: v.rule_id,
                     uuid: v.uuid,
+                    uuid_end: v.uuid_end,
                     heading: v.heading,
                     content: v.content
                 };

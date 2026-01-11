@@ -102,6 +102,7 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
 
                 violations.append({
                     'uuid': entry.get('uuid', ''),
+                    'uuid_end': v.get('uuid_end', entry.get('uuid_end', '')),  # Required for apply_audit_edits.py
                     'heading': entry.get('p_heading', ''),
                     'content': entry.get('p_content', ''),
                     'category': category,

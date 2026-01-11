@@ -58,7 +58,8 @@ DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
 @dataclass
 class EditItem:
     """Single edit item from JSONL export"""
-    uuid: str                    # Paragraph ID (w14:paraId)
+    uuid: str                    # Start paragraph ID (w14:paraId)
+    uuid_end: str                # End paragraph ID (w14:paraId) - required
     violation_text: str          # Text to find
     violation_reason: str        # Reason for violation  
     fix_action: str              # delete | replace | manual
@@ -150,13 +151,15 @@ class AuditEditApplier:
         
         Supports two formats:
         1. Flat format (from html report export): Each line is a single violation with all fields
-        2. Nested format (from run_audit.py outpu): Each line contains multiple violations per paragraph
+        2. Nested format (from run_audit.py output): Each line contains multiple violations per paragraph
+        
+        STRICT MODE: uuid_end is required for all violations. If missing, raises ValueError.
         """
         meta = {}
         items = []
         
         with open(self.jsonl_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
@@ -179,8 +182,19 @@ class AuditEditApplier:
                     
                     # Flatten violations array into separate EditItems
                     for v in violations:
+                        # STRICT: uuid_end is required (from violation or paragraph-level)
+                        uuid_end = v.get('uuid_end', data.get('uuid_end', ''))
+                        if not uuid_end:
+                            raise ValueError(
+                                f"Missing 'uuid_end' field in violation at line {line_num}.\n"
+                                f"Rule: {v.get('rule_id', 'N/A')}\n"
+                                f"Text: {v.get('violation_text', '')[:50]}...\n"
+                                f"Please re-run the audit with the latest parse_document.py and run_audit.py"
+                            )
+                        
                         items.append(EditItem(
-                            uuid=uuid,
+                            uuid=v.get('uuid', uuid),  # Use violation-level uuid if present, else paragraph
+                            uuid_end=uuid_end,
                             violation_text=v.get('violation_text', ''),
                             violation_reason=v.get('violation_reason', ''),
                             fix_action=v.get('fix_action', 'manual'),
@@ -192,8 +206,19 @@ class AuditEditApplier:
                         ))
                 else:
                     # Flat format (existing format for backward compatibility)
+                    # STRICT: uuid_end is required
+                    uuid_end = data.get('uuid_end', '')
+                    if not uuid_end:
+                        raise ValueError(
+                            f"Missing 'uuid_end' field in edit item at line {line_num}.\n"
+                            f"Rule: {data.get('rule_id', 'N/A')}\n"
+                            f"Text: {data.get('violation_text', '')[:50]}...\n"
+                            f"Please re-run the audit with the latest parse_document.py and run_audit.py"
+                        )
+                    
                     items.append(EditItem(
                         uuid=data.get('uuid', ''),
+                        uuid_end=uuid_end,
                         violation_text=data.get('violation_text', ''),
                         violation_reason=data.get('violation_reason', ''),
                         fix_action=data.get('fix_action', 'manual'),
@@ -228,26 +253,77 @@ class AuditEditApplier:
     
     # ==================== Paragraph Location ====================
     
+    def _xpath(self, elem, expr: str):
+        """
+        Execute XPath expression with proper namespace handling.
+        
+        python-docx's BaseOxmlElement has namespaces pre-registered,
+        while pure lxml elements (used in tests) require explicit namespaces.
+        This helper method handles both cases.
+        
+        Args:
+            elem: Element to query (BaseOxmlElement or lxml.etree.Element)
+            expr: XPath expression using namespace prefixes (e.g., './/w:p')
+        
+        Returns:
+            List of matching elements
+        """
+        try:
+            # First try without explicit namespaces (python-docx BaseOxmlElement)
+            return elem.xpath(expr)
+        except etree.XPathEvalError:
+            # Fallback to explicit namespaces (pure lxml elements in tests)
+            return elem.xpath(expr, namespaces=NS)
+    
     def _find_para_node_by_id(self, para_id: str):
         """
         Find paragraph by w14:paraId using XPath deep search.
         Handles paragraphs nested in tables.
         """
         xpath_expr = f'.//w:p[@w14:paraId="{para_id}"]'
-        nodes = self.body_elem.xpath(xpath_expr)
+        nodes = self._xpath(self.body_elem, xpath_expr)
         return nodes[0] if nodes else None
     
     def _iter_paragraphs_following(self, start_node) -> Generator:
         """
         Generator: iterate paragraphs from start_node in document order.
         Handles transitions from table cells to main body and vice versa.
+        
+        DEPRECATED: Use _iter_paragraphs_in_range() with uuid_end boundary instead.
         """
-        all_paras = self.body_elem.xpath('.//w:p')
+        all_paras = self._xpath(self.body_elem, './/w:p')
         
         try:
             start_index = all_paras.index(start_node)
             for p in all_paras[start_index:]:
                 yield p
+        except ValueError:
+            return
+    
+    def _iter_paragraphs_in_range(self, start_node, uuid_end: str) -> Generator:
+        """
+        Generator: iterate paragraphs from start_node to uuid_end (inclusive).
+        
+        This restricts the search range to within a specific text block,
+        preventing accidental modifications to content in other blocks.
+        
+        Args:
+            start_node: Starting paragraph element (from _find_para_node_by_id)
+            uuid_end: End boundary paraId (w14:paraId) - iteration stops after this paragraph
+        
+        Yields:
+            Paragraph elements in document order, from start_node to uuid_end (inclusive)
+        """
+        all_paras = self._xpath(self.body_elem, './/w:p')
+        
+        try:
+            start_index = all_paras.index(start_node)
+            for p in all_paras[start_index:]:
+                yield p
+                # Stop after reaching the end boundary (inclusive)
+                para_id = p.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                if para_id == uuid_end:
+                    return
         except ValueError:
             return
     
@@ -1049,13 +1125,15 @@ class AuditEditApplier:
             
             # 2. Search for text from anchor paragraph using ORIGINAL text (before revisions)
             # Store match results to pass to apply methods (avoid double matching)
+            # IMPORTANT: Search is restricted to uuid -> uuid_end range to prevent
+            # accidental modifications to content in other text blocks
             target_para = None
             matched_runs_info = None
             matched_start = -1
             numbering_stripped = False
             
             # Try original text first (using revision-free view)
-            for para in self._iter_paragraphs_following(anchor_para):
+            for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                 runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                 
                 pos = combined_orig.find(violation_text)
@@ -1073,7 +1151,7 @@ class AuditEditApplier:
                     if self.verbose:
                         print(f"  [Fallback] Trying without numbering: {stripped_violation[:30]}...")
                     
-                    for para in self._iter_paragraphs_following(anchor_para):
+                    for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                         runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                         
                         pos = combined_orig.find(stripped_violation)
@@ -1247,6 +1325,7 @@ class AuditEditApplier:
                     'revised_text': item.revised_text,
                     'rule_id': item.rule_id,
                     'uuid': item.uuid,
+                    'uuid_end': item.uuid_end,  # Required for retry
                     'heading': item.heading,
                     'content': item.content,
                     '_error': result.error_message  # Add error info for debugging
