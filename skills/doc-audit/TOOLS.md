@@ -60,7 +60,8 @@ python skills/doc-audit/scripts/run_audit.py \
 | `--rules` / `-r` | path | Yes | Path to audit rules JSON file |
 | `--output` / `-o` | path | No | Output manifest file path (default: `manifest.jsonl`) |
 | `--model` | text | No | LLM model: `auto` (default), `gemini-2.5-flash`, `gpt-5.2`, etc. |
-| `--rate-limit` | float | No | Seconds to wait between API calls (default: 0.5) |
+| `--workers` | int | No | Number of parallel workers for concurrent API calls (default: 4) |
+| `--rate-limit` | float | No | Seconds to wait between API calls per worker (default: 0.05) |
 | `--start-block` | int | No | Start from this block index (0-based, default: 0) |
 | `--end-block` | int | No | End at this block index (inclusive, default: last block) |
 | `--resume` | flag | No | Resume from previous run (skip already-processed blocks) |
@@ -72,6 +73,36 @@ python skills/doc-audit/scripts/run_audit.py \
 - `gemini-2.5-flash`, `gemini-3-flash`: Use Google Gemini (requires `GOOGLE_API_KEY`)
 - `gpt-5.2`, `gpt-4o`, `gpt-4o-mini`: Use OpenAI (requires `OPENAI_API_KEY`)
 - Model defaults are configured in `.claude-work/doc-audit/env.sh`
+
+### Parallel Processing (`--workers`)
+
+The audit script processes multiple text blocks concurrently using asyncio for improved performance:
+
+- **Default**: 4 parallel workers
+- **Implementation**: Uses `asyncio.Semaphore` to limit concurrent API calls
+- **Rate limiting**: Applied per worker (default 0.05s between calls per worker)
+
+**Usage Examples:**
+
+```bash
+# Use default 4 workers
+python scripts/run_audit.py -d blocks.jsonl -r rules.json
+
+# Increase parallelism for faster processing
+python scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 8
+
+# Reduce parallelism to avoid rate limits
+python scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 2 --rate-limit 0.5
+```
+
+**Performance Impact:**
+- With 4 workers: ~4x faster than sequential processing
+- Adjust `--workers` based on your API rate limits and document size
+- Progress output shows block completion in real-time (may appear out of order due to parallel execution)
+
+**SDK Support:**
+- Both Google Gemini (`client.aio`) and OpenAI (`AsyncOpenAI`) use native async APIs
+- No thread overhead - uses Python's asyncio event loop
 
 ### Resume Functionality (Advanced)
 

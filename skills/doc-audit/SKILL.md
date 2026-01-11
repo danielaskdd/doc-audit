@@ -362,11 +362,16 @@ Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within 
 
 Execute LLM-based audit on each text block against audit rules. **Typically invoked automatically by `workflow.sh`** (see tool #6 below).
 
+**Features**:
+- **Parallel processing**: Uses asyncio for concurrent API calls (default: 4 workers)
+- Supports both Google Gemini and OpenAI with native async APIs
+
 **Independent use cases**:
 - Debugging audit behavior with `--dry-run`
 - Processing large documents in chunks (`--start-block`, `--end-block`)
 - Resuming interrupted runs (`--resume`)
 - Custom model selection (`--model`)
+- Adjusting parallelism (`--workers`)
 
 ```bash
 # Basic usage
@@ -379,9 +384,15 @@ python scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --resume
+
+# Increase parallelism for faster processing
+python scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --workers 8
 ```
 
-📖 **Detailed parameters, resume functionality, and advanced use cases**: See [TOOLS.md - Run Audit](TOOLS.md#4-run-audit)
+📖 **Detailed parameters, parallel processing, resume functionality, and advanced use cases**: See [TOOLS.md - Run Audit](TOOLS.md#4-run-audit)
 
 ### 5. Generate Report (Advanced)
 
