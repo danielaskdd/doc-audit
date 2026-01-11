@@ -837,12 +837,17 @@ class AuditEditApplier:
     
     # ==================== Manual (Comment) Operation ====================
     
-    def _apply_error_comment(self, para_elem, item: EditItem) -> bool:
+    def _apply_error_comment(self, para_elem, item: EditItem, author_override: str = None) -> bool:
         """
         Insert an unselected comment at the end of paragraph for failed items.
         
         Comment format: {WHY}<violation_reason>  {WHERE}<violation_text>{SUGGEST}<revised_text>
-        Author: {self.author}-notfound
+        Author: author_override if provided, otherwise {self.author}-notfound
+        
+        Args:
+            para_elem: Paragraph element to attach comment
+            item: EditItem with violation details
+            author_override: Optional author name to use instead of default
         """
         comment_id = self.next_comment_id
         self.next_comment_id += 1
@@ -856,10 +861,11 @@ class AuditEditApplier:
         
         # Record comment content with custom format and author
         comment_text = f"{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        comment_author = author_override if author_override else f"{self.author}-notfound"
         self.comments.append({
             'id': comment_id,
             'text': comment_text,
-            'author': f"{self.author}-notfound"
+            'author': comment_author
         })
         
         return True
@@ -1184,10 +1190,17 @@ class AuditEditApplier:
                             break
             
             if target_para is None:
-                # Insert error comment immediately on failure
-                self._apply_error_comment(anchor_para, item)
-                return EditResult(False, item,
-                    f"Text not found after anchor: {item.violation_text[:30]}...")
+                # For manual fix_action, text not found is expected (not an error)
+                # Use AI-comment author instead of AI-notfound
+                if item.fix_action == 'manual':
+                    self._apply_error_comment(anchor_para, item, author_override=self.comment_author)
+                    return EditResult(True, item,
+                        f"Manual item: text not found, comment annotation added")
+                else:
+                    # For delete/replace, text not found is an error
+                    self._apply_error_comment(anchor_para, item)
+                    return EditResult(False, item,
+                        f"Text not found after anchor: {item.violation_text[:30]}...")
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching
@@ -1228,8 +1241,13 @@ class AuditEditApplier:
                 return EditResult(True, item, f"Fallback to comment: {reason}")
             elif success_status == 'fallback':
                 # Fallback to comment annotation
+                # For manual fix_action, use AI-comment author (expected behavior)
+                # For delete/replace, use AI-conflict author (unexpected fallback)
                 reason = "Text not found in current document state"
-                self._apply_fallback_comment(target_para, item, reason)
+                if item.fix_action == 'manual':
+                    self._apply_error_comment(target_para, item, author_override=self.comment_author)
+                else:
+                    self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
                     print(f"  [Fallback] {reason}")
                 return EditResult(True, item, f"Fallback to comment: {reason}")

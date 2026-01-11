@@ -216,6 +216,9 @@ def create_mock_applier():
         applier.edit_items = []
         applier.verbose = True
         applier.author = 'Test'
+        applier.initials = 'Te'
+        applier.revision_author = 'Test-fixed'
+        applier.comment_author = 'Test-comment'
         applier.next_change_id = 0
         applier.next_comment_id = 0
         applier.comments = []
