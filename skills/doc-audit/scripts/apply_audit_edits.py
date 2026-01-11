@@ -75,10 +75,32 @@ class EditResult:
     success: bool
     item: EditItem
     error_message: Optional[str] = None
+    warning: bool = False  # Warning flag for expected fallback cases (e.g., manual text not found)
 
 # ============================================================
 # Helper Functions
 # ============================================================
+
+def format_text_preview(text: str, max_len: int = 30) -> str:
+    """
+    Format text for log output: remove newlines and truncate.
+    
+    Args:
+        text: Text to format
+        max_len: Maximum length before truncation
+    
+    Returns:
+        Clean, truncated text with "..." suffix if truncated
+    """
+    clean = text.replace('\n', ' ').replace('\r', '').replace('\t', ' ')
+    # Collapse multiple spaces
+    while '  ' in clean:
+        clean = clean.replace('  ', ' ')
+    clean = clean.strip()
+    if len(clean) > max_len:
+        return clean[:max_len] + "..."
+    return clean
+
 
 def strip_auto_numbering(text: str) -> Tuple[str, bool]:
     """
@@ -1191,11 +1213,15 @@ class AuditEditApplier:
             
             if target_para is None:
                 # For manual fix_action, text not found is expected (not an error)
-                # Use AI-comment author instead of AI-notfound
+                # Use AI-comment author instead of AI-notfound, mark as warning
                 if item.fix_action == 'manual':
                     self._apply_error_comment(anchor_para, item, author_override=self.comment_author)
-                    return EditResult(True, item,
-                        f"Manual item: text not found, comment annotation added")
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message="Target missing, comment on heading instead: ",
+                        warning=True
+                    )
                 else:
                     # For delete/replace, text not found is an error
                     self._apply_error_comment(anchor_para, item)
@@ -1233,16 +1259,21 @@ class AuditEditApplier:
                     print(f"  [Success] Matched after stripping auto-numbering")
                 return EditResult(True, item)
             elif success_status == 'conflict':
-                # Text overlaps with previous rule modification
+                # Text overlaps with previous rule modification - mark as warning
                 reason = "Text overlaps with previous rule modification"
                 self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
                     print(f"  [Conflict] {reason}")
-                return EditResult(True, item, f"Fallback to comment: {reason}")
+                return EditResult(
+                    success=True,
+                    item=item,
+                    error_message=reason,
+                    warning=True
+                )
             elif success_status == 'fallback':
-                # Fallback to comment annotation
+                # Fallback to comment annotation - mark as warning for all fix_actions
                 # For manual fix_action, use AI-comment author (expected behavior)
-                # For delete/replace, use AI-conflict author (unexpected fallback)
+                # For delete/replace, use AI-conflict author
                 reason = "Text not found in current document state"
                 if item.fix_action == 'manual':
                     self._apply_error_comment(target_para, item, author_override=self.comment_author)
@@ -1250,7 +1281,12 @@ class AuditEditApplier:
                     self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
                     print(f"  [Fallback] {reason}")
-                return EditResult(True, item, f"Fallback to comment: {reason}")
+                return EditResult(
+                    success=True,
+                    item=item,
+                    error_message=reason,
+                    warning=True
+                )
             else:
                 # Unexpected return value or old boolean False
                 self._apply_error_comment(anchor_para, item)
@@ -1402,17 +1438,26 @@ def main():
         results = applier.apply()
         
         # Statistics
-        success_count = sum(1 for r in results if r.success)
-        fail_count = len(results) - success_count
+        success_count = sum(1 for r in results if r.success and not r.warning)
+        warning_count = sum(1 for r in results if r.success and r.warning)
+        fail_count = sum(1 for r in results if not r.success)
         
         print("-" * 50)
-        print(f"Completed: {success_count} succeeded, {fail_count} failed")
+        print(f"Completed: {success_count} succeeded, {warning_count} warnings, {fail_count} failed")
+        
+        if warning_count > 0:
+            print("\nWarning items (fallback to comment):")
+            for r in results:
+                if r.success and r.warning:
+                    text_preview = format_text_preview(r.item.violation_text)
+                    print(f"  - [{r.item.rule_id}] {r.error_message}: {text_preview}")
         
         if fail_count > 0:
             print("\nFailed items:")
             for r in results:
                 if not r.success:
-                    print(f"  - [{r.item.rule_id}] {r.error_message}")
+                    text_preview = format_text_preview(r.item.violation_text)
+                    print(f"  - [{r.item.rule_id}] {r.error_message}: {text_preview}")
         
         if not args.dry_run:
             applier.save()
