@@ -9,11 +9,18 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 from pathlib import Path
 
 # Maximum number of concurrent LLM API calls
 MAX_PARALLEL_WORKERS = 4
+
+# Retry configuration
+DEFAULT_MAX_RETRIES = 3
+INITIAL_BACKOFF = 1.0  # Initial backoff time in seconds
+MAX_BACKOFF = 60.0     # Maximum backoff time in seconds
+BACKOFF_MULTIPLIER = 2.0  # Backoff multiplier for exponential growth
 
 # Try to import LLM libraries
 HAS_GEMINI = False
@@ -31,6 +38,241 @@ try:
     HAS_OPENAI = True
 except ImportError:
     pass
+
+
+class NonRetryableError(Exception):
+    """
+    Exception for errors that should not be retried.
+    
+    These include authentication errors, invalid API keys, permission errors,
+    and other permanent failures that won't be resolved by retrying.
+    """
+    pass
+
+
+def is_openai_retryable(error: Exception) -> bool:
+    """
+    Determine if an OpenAI error should be retried.
+    
+    Non-retryable errors:
+    - AuthenticationError (401): Invalid API key
+    - PermissionDeniedError (403): No access to resource
+    - BadRequestError (400): Invalid request format
+    - NotFoundError (404): Model or resource not found
+    
+    Retryable errors:
+    - RateLimitError (429): Rate limit exceeded
+    - APIConnectionError: Network issues
+    - InternalServerError (500): Server errors
+    - APIStatusError with 502, 503, 504: Gateway/service errors
+    
+    Args:
+        error: The exception from OpenAI API call
+        
+    Returns:
+        True if the error should be retried, False otherwise
+    """
+    if not HAS_OPENAI:
+        return True
+    
+    # Authentication error - invalid API key (401)
+    if isinstance(error, openai.AuthenticationError):
+        return False
+    
+    # Permission denied - no access to resource (403)
+    if isinstance(error, openai.PermissionDeniedError):
+        return False
+    
+    # Bad request - invalid request format (400)
+    if isinstance(error, openai.BadRequestError):
+        return False
+    
+    # Not found - model or resource doesn't exist (404)
+    if isinstance(error, openai.NotFoundError):
+        return False
+    
+    # Rate limit exceeded - should retry with backoff (429)
+    if isinstance(error, openai.RateLimitError):
+        return True
+    
+    # API connection error - network issues, should retry
+    if isinstance(error, openai.APIConnectionError):
+        return True
+    
+    # Internal server error - should retry (500)
+    if isinstance(error, openai.InternalServerError):
+        return True
+    
+    # For other APIStatusError, check HTTP status code
+    if isinstance(error, openai.APIStatusError):
+        # Retryable server-side errors
+        return error.status_code in (429, 500, 502, 503, 504)
+    
+    # For unknown errors, default to retry (network issues, timeouts, etc.)
+    return True
+
+
+def is_gemini_retryable(error: Exception) -> bool:
+    """
+    Determine if a Gemini error should be retried.
+    
+    Uses string matching on error messages since google-genai may not have
+    well-defined exception types for all error cases.
+    
+    Non-retryable errors:
+    - API key errors
+    - Authentication/permission errors
+    - Invalid request errors
+    - Model not found errors
+    - Billing/quota permanently exceeded
+    
+    Retryable errors:
+    - Rate limit (429)
+    - Server errors (500, 502, 503, 504)
+    - Timeout/connection errors
+    
+    Args:
+        error: The exception from Gemini API call
+        
+    Returns:
+        True if the error should be retried, False otherwise
+    """
+    error_str = str(error).lower()
+    
+    # API key / authentication errors - do not retry
+    if 'api_key' in error_str or 'api key' in error_str:
+        return False
+    if 'authentication' in error_str or 'authenticate' in error_str:
+        return False
+    if 'invalid_api_key' in error_str or 'invalid api key' in error_str:
+        return False
+    
+    # Permission / forbidden errors - do not retry
+    if 'permission' in error_str and 'denied' in error_str:
+        return False
+    if 'forbidden' in error_str or '403' in error_str:
+        return False
+    
+    # Invalid request errors - do not retry
+    if 'invalid' in error_str and ('request' in error_str or 'argument' in error_str):
+        return False
+    if '400' in error_str and 'bad request' in error_str:
+        return False
+    
+    # Model not found - do not retry
+    if 'model' in error_str and ('not found' in error_str or 'not exist' in error_str):
+        return False
+    if '404' in error_str:
+        return False
+    
+    # Billing / permanent quota errors - do not retry
+    if 'billing' in error_str:
+        return False
+    if 'quota' in error_str and ('exceeded' in error_str or 'exhausted' in error_str):
+        # Check if it mentions billing which indicates permanent quota issue
+        if 'billing' in error_str or 'payment' in error_str:
+            return False
+        # Temporary quota (rate limit) - should retry
+        return True
+    
+    # Rate limit errors - should retry (429)
+    if 'rate' in error_str and 'limit' in error_str:
+        return True
+    if '429' in error_str or 'resource_exhausted' in error_str:
+        return True
+    
+    # Server errors - should retry (500, 502, 503, 504)
+    if any(code in error_str for code in ['500', '502', '503', '504']):
+        return True
+    if 'internal' in error_str and ('error' in error_str or 'server' in error_str):
+        return True
+    if 'service' in error_str and 'unavailable' in error_str:
+        return True
+    if 'gateway' in error_str:
+        return True
+    
+    # Timeout / connection errors - should retry
+    if 'timeout' in error_str or 'timed out' in error_str:
+        return True
+    if 'connection' in error_str:
+        return True
+    if 'network' in error_str:
+        return True
+    
+    # Unknown errors - default to retry with limited attempts
+    return True
+
+
+async def audit_block_with_retry(
+    block: dict,
+    system_prompt: str,
+    model_name: str,
+    client,
+    use_gemini: bool,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    block_idx: int = 0,
+    total_blocks: int = 1
+) -> dict:
+    """
+    Audit a block with automatic retry on transient errors.
+    
+    Uses exponential backoff with jitter to handle rate limits and transient
+    server errors. Non-retryable errors (authentication, invalid request) are
+    raised immediately without retry.
+    
+    Args:
+        block: Text block to audit
+        system_prompt: Cached system prompt with rules
+        model_name: LLM model name
+        client: Async LLM client instance
+        use_gemini: Whether to use Gemini (True) or OpenAI (False)
+        max_retries: Maximum number of retry attempts
+        block_idx: Block index for logging
+        total_blocks: Total blocks for logging
+        
+    Returns:
+        Audit result dictionary
+        
+    Raises:
+        NonRetryableError: For permanent errors that should not be retried
+        Exception: For errors that exceeded retry attempts
+    """
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            if use_gemini:
+                return await audit_block_gemini_async(block, system_prompt, model_name, client)
+            else:
+                return await audit_block_openai_async(block, system_prompt, model_name, client)
+                
+        except Exception as e:
+            last_error = e
+            
+            # Check if error is retryable
+            if use_gemini:
+                retryable = is_gemini_retryable(e)
+            else:
+                retryable = is_openai_retryable(e)
+            
+            if not retryable:
+                raise NonRetryableError(f"Non-retryable error: {e}") from e
+            
+            # Check if we have retries left
+            if attempt >= max_retries:
+                raise
+            
+            # Calculate backoff with jitter
+            backoff = min(INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt), MAX_BACKOFF)
+            jitter = backoff * 0.1 * (2 * random.random() - 1)  # ±10% jitter
+            wait_time = backoff + jitter
+            
+            print(f"  [{block_idx+1}/{total_blocks}] Retry {attempt + 1}/{max_retries} "
+                  f"after {wait_time:.1f}s: {type(e).__name__}: {str(e)[:100]}")
+            await asyncio.sleep(wait_time)
+    
+    # Should not reach here, but just in case
+    raise last_error
 
 
 # JSON Schema for LLM structured output
@@ -590,10 +832,11 @@ async def process_block_async(
     manifest_path: str,
     manifest_lock: asyncio.Lock,
     rate_limit: float,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    max_retries: int = DEFAULT_MAX_RETRIES
 ) -> tuple:
     """
-    Process a single block asynchronously with concurrency control.
+    Process a single block asynchronously with concurrency control and retry.
 
     Args:
         block: Text block to audit
@@ -608,6 +851,7 @@ async def process_block_async(
         manifest_lock: asyncio.Lock for thread-safe manifest writing
         rate_limit: Seconds to wait between API calls
         semaphore: asyncio.Semaphore for concurrency control
+        max_retries: Maximum number of retry attempts for transient errors
 
     Returns:
         Tuple of (block_idx, success, violation_count, heading, entry)
@@ -622,11 +866,17 @@ async def process_block_async(
             if rate_limit > 0:
                 await asyncio.sleep(rate_limit)
             
-            # Call LLM with cached system prompt
-            if use_gemini:
-                result = await audit_block_gemini_async(block, system_prompt, model_name, client)
-            else:
-                result = await audit_block_openai_async(block, system_prompt, model_name, client)
+            # Call LLM with retry mechanism
+            result = await audit_block_with_retry(
+                block=block,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                client=client,
+                use_gemini=use_gemini,
+                max_retries=max_retries,
+                block_idx=block_idx,
+                total_blocks=total_blocks
+            )
 
             # Get UUID range from block for injection into violations
             block_uuid_start = block.get('uuid', '')
@@ -746,7 +996,8 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
             manifest_path=args.output,
             manifest_lock=manifest_lock,
             rate_limit=args.rate_limit,
-            semaphore=semaphore
+            semaphore=semaphore,
+            max_retries=args.max_retries
         )
         for block_idx, block in blocks_with_indices
     ]
@@ -851,6 +1102,12 @@ def main():
         "--resume",
         action="store_true",
         help="Resume from previous run (skip already-processed blocks)"
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=DEFAULT_MAX_RETRIES,
+        help=f"Maximum retries for transient errors (default: {DEFAULT_MAX_RETRIES})"
     )
     parser.add_argument(
         "--dry-run",
