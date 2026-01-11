@@ -1036,6 +1036,11 @@ class AuditEditApplier:
         """Process a single edit item"""
         anchor_para = None
         try:
+            # Strip leading/trailing whitespace from search and replacement text
+            # to prevent matching failures caused by whitespace in JSONL data
+            violation_text = item.violation_text.strip()
+            revised_text = item.revised_text.strip()
+            
             # 1. Find anchor paragraph by ID
             anchor_para = self._find_para_node_by_id(item.uuid)
             if anchor_para is None:
@@ -1047,15 +1052,13 @@ class AuditEditApplier:
             target_para = None
             matched_runs_info = None
             matched_start = -1
-            violation_text_to_use = item.violation_text
-            revised_text_to_use = item.revised_text
             numbering_stripped = False
             
             # Try original text first (using revision-free view)
             for para in self._iter_paragraphs_following(anchor_para):
                 runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                 
-                pos = combined_orig.find(item.violation_text)
+                pos = combined_orig.find(violation_text)
                 if pos != -1:
                     target_para = para
                     matched_runs_info = runs_info_orig
@@ -1064,7 +1067,7 @@ class AuditEditApplier:
             
             # Fallback: Try stripping auto-numbering if original match failed
             if target_para is None:
-                stripped_violation, was_stripped = strip_auto_numbering(item.violation_text)
+                stripped_violation, was_stripped = strip_auto_numbering(violation_text)
                 
                 if was_stripped:
                     if self.verbose:
@@ -1079,22 +1082,18 @@ class AuditEditApplier:
                             matched_runs_info = runs_info_orig
                             matched_start = pos
                             numbering_stripped = True
-                            violation_text_to_use = stripped_violation
+                            violation_text = stripped_violation
                             
                             # Handle revised_text for replace operation
                             if item.fix_action == 'replace':
-                                stripped_revised, revised_has_numbering = strip_auto_numbering(item.revised_text)
+                                stripped_revised, revised_has_numbering = strip_auto_numbering(revised_text)
                                 
                                 if revised_has_numbering:
                                     # Both have numbering: strip both
-                                    revised_text_to_use = stripped_revised
+                                    revised_text = stripped_revised
                                     if self.verbose:
                                         print(f"  [Fallback] Stripped numbering from both texts")
-                                else:
-                                    # Only violation_text has numbering: use original revised_text
-                                    revised_text_to_use = item.revised_text
-                                    if self.verbose:
-                                        print(f"  [Fallback] Only violation_text had numbering")
+                                # else: Only violation_text had numbering, keep revised_text as-is
                             
                             break
             
@@ -1110,18 +1109,18 @@ class AuditEditApplier:
             
             if item.fix_action == 'delete':
                 success_status = self._apply_delete(
-                    target_para, violation_text_to_use,
+                    target_para, violation_text,
                     matched_runs_info, matched_start
                 )
             elif item.fix_action == 'replace':
                 success_status = self._apply_replace(
-                    target_para, violation_text_to_use, revised_text_to_use,
+                    target_para, violation_text, revised_text,
                     matched_runs_info, matched_start
                 )
             elif item.fix_action == 'manual':
                 success_status = self._apply_manual(
-                    target_para, violation_text_to_use,
-                    item.violation_reason, revised_text_to_use,
+                    target_para, violation_text,
+                    item.violation_reason, revised_text,
                     matched_runs_info, matched_start
                 )
             else:
