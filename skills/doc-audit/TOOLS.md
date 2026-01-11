@@ -2,6 +2,8 @@
 
 This document provides detailed documentation for advanced tools that are typically invoked through `workflow.sh` but can also be used independently for debugging, large document processing, or error recovery.
 
+> **Note:** All script examples below use `$DOC_AUDIT_SKILL_PATH` environment variable, which is automatically set by `source .claude-work/doc-audit/env.sh`. Always run `source .claude-work/doc-audit/env.sh` before executing any scripts.
+
 **Quick Navigation:**
 - [4. Run Audit](#4-run-audit) - Execute LLM-based audit
 - [5. Generate Report](#5-generate-report) - Create HTML report from audit results
@@ -22,31 +24,31 @@ Execute LLM-based audit on each text block against audit rules. This tool is aut
 
 ```bash
 # Basic usage with auto model selection
-python scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/blocks.jsonl \
   --rules .claude-work/doc-audit/default_rules.json
 
 # Specify model explicitly
-python scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules custom_rules.json \
   --model gemini-2.5-flash
 
 # Process specific block range
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --start-block 10 \
   --end-block 50
 
 # Resume from previous interrupted run
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --resume
 
 # Dry run to preview prompts without calling LLM
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --dry-run
@@ -86,13 +88,13 @@ The audit script processes multiple text blocks concurrently using asyncio for i
 
 ```bash
 # Use default 4 workers
-python scripts/run_audit.py -d blocks.jsonl -r rules.json
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py -d blocks.jsonl -r rules.json
 
 # Increase parallelism for faster processing
-python scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 8
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 8
 
 # Reduce parallelism to avoid rate limits
-python scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 2 --rate-limit 0.5
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py -d blocks.jsonl -r rules.json --workers 2 --rate-limit 0.5
 ```
 
 **Performance Impact:**
@@ -117,14 +119,14 @@ The `--resume` flag enables recovery from interrupted audit runs by:
 **Case 1: Simple Resume After Interruption**
 ```bash
 # Initial run (interrupted at block 45/100)
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --output manifest.jsonl
 # ... interrupted (Ctrl+C, network error, etc.)
 
 # Resume from where it left off
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --output manifest.jsonl \
@@ -138,14 +140,14 @@ For large documents, process in chunks to avoid API rate limits or long-running 
 
 ```bash
 # Process first chunk (blocks 0-99)
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --start-block 0 \
   --end-block 99
 
 # Process second chunk (blocks 100-199) - interrupted at block 150
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --start-block 100 \
@@ -153,7 +155,7 @@ python skills/doc-audit/scripts/run_audit.py \
 # ... interrupted
 
 # Resume second chunk (will skip 100-149, continue from 150)
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --start-block 100 \
@@ -161,7 +163,7 @@ python skills/doc-audit/scripts/run_audit.py \
   --resume
 
 # Process third chunk (blocks 200-299)
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --start-block 200 \
@@ -174,7 +176,7 @@ To re-audit specific blocks (e.g., after changing rules), **do NOT use `--resume
 
 ```bash
 # Re-audit blocks 10-20 (will overwrite those results in manifest)
-python skills/doc-audit/scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules updated_rules.json \
   --start-block 10 \
@@ -246,26 +248,26 @@ Create HTML audit report from audit manifest with statistics and traceability. T
 
 ```bash
 # Basic usage
-python scripts/generate_report.py manifest.jsonl \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --rules .claude-work/doc-audit/default_rules.json \
   --output audit_report.html
 
 
 # No rule descriptions in report (not recommended)
-python scripts/generate_report.py manifest.jsonl \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --output audit_report.html
 
 # Also output JSON data
-python skills/doc-audit/scripts/generate_report.py manifest.jsonl \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --rules rules.json \
   --output report.html \
   --json
 
 # For trusted HTML content (disables escaping, not recommended)
-python skills/doc-audit/scripts/generate_report.py manifest.jsonl \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --output report.html \
   --trusted-html
@@ -395,19 +397,19 @@ Apply audit results exported from HTML report to Word document with track change
 
 ```bash
 # Basic usage (outputs to <source>_edited.docx)
-python scripts/apply_audit_edits.py weekly-report_audit_export.jsonl
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py weekly-report_audit_export.jsonl
 
 # Specify output path
-python scripts/apply_audit_edits.py export.jsonl -o output.docx
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py export.jsonl -o output.docx
 
 # Skip hash verification (if document was modified after export)
-python scripts/apply_audit_edits.py export.jsonl --skip-hash
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py export.jsonl --skip-hash
 
 # Verbose output (show each edit item processing)
-python scripts/apply_audit_edits.py export.jsonl -v
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py export.jsonl -v
 
 # Dry run (validate without saving)
-python scripts/apply_audit_edits.py export.jsonl --dry-run
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py export.jsonl --dry-run
 ```
 
 ### Key Parameters

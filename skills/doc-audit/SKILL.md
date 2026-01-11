@@ -92,7 +92,7 @@ After Phase 2 generates the HTML audit report, user can review the results and a
 - User doesn't need to review or filter audit results
 - Apply directly from Phase 2 manifest file:
   ```bash
-  python scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
+  python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
   ```
 - Output: `<docname>_edited.docx` with track changes and comments
 
@@ -113,7 +113,7 @@ After Phase 2 generates the HTML audit report, user can review the results and a
 
 10. **Apply Edits** - Use the exported control file to apply changes:
     ```bash
-    python scripts/apply_audit_edits.py <document_name>_audit_export.jsonl
+    python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py <document_name>_audit_export.jsonl
     ```
     - The control file's metadata line contains the source document path, so only the control file path is needed
     - Output: `<original_document>_edited.docx` with track changes and comments
@@ -147,12 +147,14 @@ Final Report Location: Same directory as source document (<filename>_audit_repor
 
 ## Available Tools
 
+> **Note:** All script examples below use `$DOC_AUDIT_SKILL_PATH` environment variable, which is automatically set by `source .claude-work/doc-audit/env.sh`. Always run `source .claude-work/doc-audit/env.sh` before executing any scripts.
+
 ### 1. Environment Setup (First Time Only)
 
 Setup the project environment before running any audit:
 
 ```bash
-bash scripts/setup_project_env.sh
+bash skills/doc-audit/scripts/setup_project_env.sh
 source ./.claude-work/doc-audit/env.sh
 ```
 
@@ -188,19 +190,19 @@ Intelligently merge base rules with user requirements using LLM.
 # ✅ RECOMMENDED: Initial generation (automatically merges with default rules)
 # Use when: User wants custom requirements PLUS default rules
 # Tip: Use document name prefix for better organization
-python scripts/parse_rules.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --input "Check for ambiguous payment terms and missing signatures" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
 
 # ✅ RECOMMENDED: Iterative refinement (continues from previous output)
 # Use when: User wants to modify/add/remove specific rules
-python scripts/parse_rules.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
   --input "Add rule for checking ambiguous references" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
 
 # ✅ Further iteration
-python scripts/parse_rules.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
   --input "Remove R009, make signature rule more specific" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
@@ -211,7 +213,7 @@ python scripts/parse_rules.py \
 #   - "Only check for X and Y, don't include any default rules"
 #   - "Start from scratch without default rules"
 #   - "I only want these specific rules, no others"
-python scripts/parse_rules.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --no-base \
   --input "Check for missing section numbers and inconsistent terminology" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
@@ -279,20 +281,20 @@ Extract text blocks from a Word document with proper heading hierarchy and numbe
 
 ```bash
 # Basic usage (outputs to <document>_blocks.jsonl)
-python scripts/parse_document.py document.docx
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx
 
 # Custom output path
-python scripts/parse_document.py document.docx \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
   --output .claude-work/doc-audit/blocks.jsonl
 
 # With preview and statistics
-python scripts/parse_document.py document.docx \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
   --output blocks.jsonl \
   --preview \
   --stats
 
 # Output as regular JSON instead of JSONL
-python scripts/parse_document.py document.docx \
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
   --output blocks.json \
   --format json
 ```
@@ -375,18 +377,18 @@ Execute LLM-based audit on each text block against audit rules. **Typically invo
 
 ```bash
 # Basic usage
-python scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json
 
 # Resume from interruption
-python scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --resume
 
 # Increase parallelism for faster processing
-python scripts/run_audit.py \
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
   --rules rules.json \
   --workers 8
@@ -405,7 +407,7 @@ Generate interactive HTML audit report from manifest. **Typically invoked automa
 
 ```bash
 # Basic usage
-python scripts/generate_report.py manifest.jsonl \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --rules rules.json \
   --output audit_report.html
@@ -444,10 +446,10 @@ Apply audit results to Word document with track changes and comments.
 
 ```bash
 # From manifest (skip review)
-python scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py .claude-work/doc-audit/<docname>_manifest.jsonl
 
 # From exported control file (after review)
-python scripts/apply_audit_edits.py <docname>_audit_export.jsonl
+python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py <docname>_audit_export.jsonl
 ```
 
 **Output:** `<source>_edited.docx` with track changes and comments
