@@ -114,12 +114,15 @@ class AuditEditApplier:
     
     def __init__(self, jsonl_path: str, output_path: str = None,
                  skip_hash: bool = False, verbose: bool = False,
-                 author: str = 'AI-Assistant', initials: str = 'AI'):
+                 author: str = 'AI', initials: str = 'AI'):
         self.jsonl_path = Path(jsonl_path)
         self.skip_hash = skip_hash
         self.verbose = verbose
         self.author = author
         self.initials = initials if initials else author[:2] if len(author) >= 2 else author
+        # Different author names for revisions vs comments
+        self.revision_author = f"{author}-fixed"
+        self.comment_author = f"{author}-comment"
         
         # Load JSONL
         self.meta, self.edit_items = self._load_jsonl()
@@ -683,7 +686,7 @@ class AuditEditApplier:
             new_elements.append(self._create_run(before_text, rPr_xml))
         
         # Deleted text
-        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.author}" w:date="{timestamp}">
+        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
             <w:r>{rPr_xml}<w:delText>{self._escape_xml(violation_text)}</w:delText></w:r>
         </w:del>'''
         new_elements.append(etree.fromstring(del_xml))
@@ -810,7 +813,7 @@ class AuditEditApplier:
                 
             elif op == 'delete':
                 change_id = self._get_next_change_id()
-                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.author}" w:date="{timestamp}">
+                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:delText>{self._escape_xml(text)}</w:delText></w:r>
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
@@ -818,7 +821,7 @@ class AuditEditApplier:
                 
             elif op == 'insert':
                 change_id = self._get_next_change_id()
-                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.author}" w:date="{timestamp}">
+                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
@@ -839,7 +842,7 @@ class AuditEditApplier:
         Insert an unselected comment at the end of paragraph for failed items.
         
         Comment format: {WHY}<violation_reason>  {WHERE}<violation_text>{SUGGEST}<revised_text>
-        Author: AI-Error
+        Author: {self.author}-notfound
         """
         comment_id = self.next_comment_id
         self.next_comment_id += 1
@@ -856,7 +859,7 @@ class AuditEditApplier:
         self.comments.append({
             'id': comment_id,
             'text': comment_text,
-            'author': 'AI-Error'
+            'author': f"{self.author}-notfound"
         })
         
         return True
@@ -893,7 +896,7 @@ class AuditEditApplier:
         self.comments.append({
             'id': comment_id,
             'text': comment_text,
-            'author': 'AI-Fallback'
+            'author': f"{self.author}-conflict"
         })
         
         return True
@@ -1074,12 +1077,17 @@ class AuditEditApplier:
                 comments_xml, f'{{{NS["w"]}}}comment'
             )
             comment_elem.set(f'{{{NS["w"]}}}id', str(comment['id']))
-            # Support independent author for each comment (e.g., AI-Error for failed items)
-            comment_author = comment.get('author', self.author)
+            # Support independent author for each comment (e.g., AI-notfound, AI-conflict)
+            # Default author is comment_author (author-comment suffix)
+            comment_author = comment.get('author', self.comment_author)
             comment_elem.set(f'{{{NS["w"]}}}author', comment_author)
             comment_elem.set(f'{{{NS["w"]}}}date', timestamp)
-            # Use author initials or default
-            comment_initials = comment_author[:2] if len(comment_author) >= 2 else comment_author
+            # Use self.initials for all comments with author prefix matching self.author
+            # This includes: AI-comment, AI-notfound, AI-conflict (all share same initials)
+            if comment_author.startswith(self.author):
+                comment_initials = self.initials
+            else:
+                comment_initials = comment_author[:2] if len(comment_author) >= 2 else comment_author
             comment_elem.set(f'{{{NS["w"]}}}initials', comment_initials)
 
             # Add paragraph with text
