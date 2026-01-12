@@ -271,16 +271,14 @@ class NumberingResolver:
                 return ""
             
             # Smart numbering merge: (Word's rendering behavior)
-            #    - IF last_numID had different numId but same abstractNumId
-            #    - AND current numId has been used before (not new)
-            #    - AND style matches
+            # When consecutive paragraphs have different numId but same abstractNumId,
+            # Word continues the numbering sequence rather than restarting.
+            # This happens regardless of whether the numId is new or style matches.
 
             if (self.last_numId is not None and 
                 self.last_numId != num_id and 
                 self.last_abstract_id == abstract_id and
-                self.last_numId in self.counters and
-                num_id in self.counters and
-                self.last_style_id == style_id):
+                self.last_numId in self.counters):
                 # Merge: copy previous numId's counter to current numId
                 self.counters[num_id] = self.counters[self.last_numId].copy()
             
