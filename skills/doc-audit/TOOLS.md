@@ -71,10 +71,74 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 
 ### Model Selection (`--model`)
 
-- `auto` (default): Auto-select based on available API keys (Gemini preferred if both are set)
-- `gemini-2.5-flash`, `gemini-3-flash`: Use Google Gemini (requires `GOOGLE_API_KEY`)
+- `auto` (default): Auto-select based on available credentials (Gemini preferred if configured)
+- `gemini-2.5-flash`, `gemini-3-flash`: Use Google Gemini (via AI Studio or Vertex AI)
 - `gpt-5.2`, `gpt-4o`, `gpt-4o-mini`: Use OpenAI (requires `OPENAI_API_KEY`)
 - Model defaults are configured in `.claude-work/doc-audit/env.sh`
+
+### Google Gemini Configuration
+
+The audit tool supports two modes for accessing Google Gemini:
+
+#### AI Studio Mode (Default)
+
+Uses Google AI Studio API with an API key. This is the simplest setup for development and testing.
+
+```bash
+# Required environment variable
+export GOOGLE_API_KEY="your-api-key"
+```
+
+#### Vertex AI Mode
+
+Uses Google Cloud Vertex AI with Application Default Credentials (ADC). This is recommended for production deployments and enterprise use.
+
+```bash
+# Enable Vertex AI mode
+export GOOGLE_GENAI_USE_VERTEXAI=true
+
+# Required: GCP project ID
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+
+# Optional: GCP region (default: us-central1)
+export GOOGLE_CLOUD_LOCATION="us-central1"
+
+# Authentication: One of the following
+# Option 1: Service account JSON file
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+
+# Option 2: Use gcloud CLI authentication
+gcloud auth application-default login
+```
+
+**Note:** When `GOOGLE_GENAI_USE_VERTEXAI=true` is set, the `GOOGLE_API_KEY` environment variable is ignored. The tool will use ADC for authentication instead.
+
+#### Environment Variable Summary
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| **AI Studio Mode** | | |
+| `GOOGLE_API_KEY` | Yes | API key from Google AI Studio |
+| **Vertex AI Mode** | | |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Yes | Set to `true` to enable |
+| `GOOGLE_CLOUD_PROJECT` | Yes | GCP project ID |
+| `GOOGLE_CLOUD_LOCATION` | No | GCP region (default: `us-central1`) |
+| `GOOGLE_VERTEX_BASE_URL` | No | Custom API endpoint (for API gateway proxies) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | No* | Path to service account JSON |
+
+\* Not required if using `gcloud auth application-default login` or running on GCP (GCE, GKE, Cloud Run)
+
+#### Custom API Endpoint
+
+For scenarios requiring a custom API gateway proxy (e.g., corporate network policies, custom load balancing), you can specify a custom base URL:
+
+```bash
+export GOOGLE_GENAI_USE_VERTEXAI=true
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+export GOOGLE_VERTEX_BASE_URL="https://custom-api-gateway.example.com"
+```
+
+When `GOOGLE_VERTEX_BASE_URL` is set, the SDK will route all requests through the specified endpoint instead of the default Vertex AI endpoint. If not set, the SDK automatically determines the appropriate endpoint based on the project and location.
 
 ### Parallel Processing (`--workers`)
 

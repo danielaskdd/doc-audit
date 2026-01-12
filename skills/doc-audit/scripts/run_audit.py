@@ -40,6 +40,97 @@ except ImportError:
     pass
 
 
+def is_vertex_ai_mode() -> bool:
+    """
+    Check if Vertex AI mode is enabled via environment variable.
+    
+    Returns:
+        True if GOOGLE_GENAI_USE_VERTEXAI is set to 'true', False otherwise
+    """
+    return os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
+
+
+def create_gemini_client(use_async: bool = False):
+    """
+    Create Gemini client for AI Studio or Vertex AI.
+    
+    Supports two modes:
+    - AI Studio (default): Uses GOOGLE_API_KEY for authentication
+    - Vertex AI: Uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
+    
+    Environment variables for Vertex AI mode:
+    - GOOGLE_GENAI_USE_VERTEXAI: Set to 'true' to enable Vertex AI mode
+    - GOOGLE_CLOUD_PROJECT: Required GCP project ID
+    - GOOGLE_CLOUD_LOCATION: Optional region (default: us-central1)
+    - GOOGLE_VERTEX_BASE_URL: Optional custom API endpoint (for API gateway proxies)
+    - GOOGLE_APPLICATION_CREDENTIALS: Path to service account JSON (or use gcloud auth)
+    
+    Args:
+        use_async: If True, return the async client (.aio), otherwise return sync client
+        
+    Returns:
+        Gemini client instance (sync or async based on use_async parameter)
+        
+    Raises:
+        ValueError: If required environment variables are not set
+    """
+    use_vertex = is_vertex_ai_mode()
+    
+    if use_vertex:
+        # Vertex AI mode - uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        base_url = os.getenv("GOOGLE_VERTEX_BASE_URL")
+        
+        if not project:
+            raise ValueError(
+                "GOOGLE_CLOUD_PROJECT is required for Vertex AI mode. "
+                "Set GOOGLE_GENAI_USE_VERTEXAI=false to use AI Studio mode instead."
+            )
+        
+        # Build http_options only if custom base_url is specified
+        http_options = None
+        if base_url:
+            http_options = {"base_url": base_url}
+        
+        # Note: ADC handles authentication automatically
+        # via GOOGLE_APPLICATION_CREDENTIALS env var or gcloud auth
+        client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+            http_options=http_options
+        )
+    else:
+        # AI Studio mode - requires API key
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is required for AI Studio mode. "
+                "Set GOOGLE_GENAI_USE_VERTEXAI=true and configure GCP credentials for Vertex AI mode."
+            )
+        
+        client = genai.Client(api_key=api_key)
+    
+    # Return async or sync client based on parameter
+    return client.aio if use_async else client
+
+
+def get_gemini_provider_name() -> str:
+    """
+    Get the Gemini provider name based on current mode.
+    
+    Returns:
+        Provider name string for display purposes
+    """
+    if is_vertex_ai_mode():
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "unknown")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        return f"Google Gemini (Vertex AI: {project}/{location})"
+    else:
+        return "Google Gemini (AI Studio)"
+
+
 class NonRetryableError(Exception):
     """
     Exception for errors that should not be retried.
@@ -611,21 +702,24 @@ async def audit_block_openai_async(block: dict, system_prompt: str, model_name: 
 def audit_block_gemini(block: dict, system_prompt: str, model_name: str = None, client = None) -> dict:
     """
     Audit a text block using Google Gemini with strict JSON mode (sync version).
+    
+    Supports both AI Studio and Vertex AI modes based on environment configuration.
+    See create_gemini_client() for details on environment variables.
 
     Args:
         block: Text block to audit
         system_prompt: Cached system prompt with rules and instructions
         model_name: Gemini model to use (uses DOC_AUDIT_GEMINI_MODEL env var if None)
-        client: Gemini client instance (uses DOC_AUDIT_GEMINI_MODEL env var if None)
+        client: Gemini client instance (creates one using create_gemini_client if None)
 
     Returns:
         Audit result dictionary
     """
     if model_name is None:
-        model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-3-flash")
+        model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-2.5-flash")
     
     if client is None:
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        client = create_gemini_client(use_async=False)
     
     user_prompt = build_user_prompt(block)
 
@@ -1140,30 +1234,70 @@ def main():
     client = None
     model_name = args.model
 
+    # Check if Vertex AI mode is enabled
+    use_vertex = is_vertex_ai_mode()
+
     if model_name == "auto":
-        if HAS_GEMINI and os.getenv("GOOGLE_API_KEY"):
+        # Auto-detect: check Gemini credentials first (AI Studio or Vertex AI)
+        gemini_available = False
+        if HAS_GEMINI:
+            if use_vertex:
+                # Vertex AI mode explicitly enabled - require project configuration
+                # Do NOT silently fall back to OpenAI as user may have compliance/data residency requirements
+                if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+                    print("Error: Vertex AI mode is enabled (GOOGLE_GENAI_USE_VERTEXAI=true) "
+                          "but GOOGLE_CLOUD_PROJECT is not set.", file=sys.stderr)
+                    print("Either:", file=sys.stderr)
+                    print("  1. Set GOOGLE_CLOUD_PROJECT to your GCP project ID", file=sys.stderr)
+                    print("  2. Unset GOOGLE_GENAI_USE_VERTEXAI to use AI Studio mode", file=sys.stderr)
+                    sys.exit(1)
+                gemini_available = True
+            else:
+                # AI Studio mode - check for API key
+                gemini_available = bool(os.getenv("GOOGLE_API_KEY"))
+        
+        if gemini_available:
             use_gemini = True
-            model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-3-flash")
-            # Use .aio for async client access
-            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY")).aio
+            model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-2.5-flash")
+            try:
+                client = create_gemini_client(use_async=True)
+            except ValueError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
         elif HAS_OPENAI and os.getenv("OPENAI_API_KEY"):
-            model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-5.2")
+            model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-4.1")
             client = openai.AsyncOpenAI()
         else:
-            print("Error: No API key found. Set GOOGLE_API_KEY or OPENAI_API_KEY", file=sys.stderr)
+            print("Error: No LLM credentials found.", file=sys.stderr)
+            print("For AI Studio: Set GOOGLE_API_KEY", file=sys.stderr)
+            print("For Vertex AI: Set GOOGLE_GENAI_USE_VERTEXAI=true and GOOGLE_CLOUD_PROJECT", file=sys.stderr)
+            print("For OpenAI: Set OPENAI_API_KEY", file=sys.stderr)
             sys.exit(1)
     elif "gemini" in model_name.lower():
         if not HAS_GEMINI:
             print("Error: google-genai not installed", file=sys.stderr)
             sys.exit(1)
-        if not os.getenv("GOOGLE_API_KEY"):
-            print("Error: GOOGLE_API_KEY not set", file=sys.stderr)
-            sys.exit(1)
+        
+        # Validate credentials based on mode
+        if use_vertex:
+            if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+                print("Error: GOOGLE_CLOUD_PROJECT not set for Vertex AI mode", file=sys.stderr)
+                print("Hint: Set GOOGLE_GENAI_USE_VERTEXAI=false to use AI Studio mode", file=sys.stderr)
+                sys.exit(1)
+        else:
+            if not os.getenv("GOOGLE_API_KEY"):
+                print("Error: GOOGLE_API_KEY not set for AI Studio mode", file=sys.stderr)
+                print("Hint: Set GOOGLE_GENAI_USE_VERTEXAI=true for Vertex AI mode", file=sys.stderr)
+                sys.exit(1)
+        
         use_gemini = True
-        # Use .aio for async client access
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY")).aio
+        try:
+            client = create_gemini_client(use_async=True)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
-        # Treat all other models as OpenAI (gpt-5.2, o1-mini, o3-mini, etc.)
+        # Treat all other models as OpenAI (gpt-4.1, o1-mini, o3-mini, etc.)
         if not HAS_OPENAI:
             print("Error: openai not installed", file=sys.stderr)
             sys.exit(1)
@@ -1173,7 +1307,7 @@ def main():
         client = openai.AsyncOpenAI()
 
     # Determine and print LLM provider name
-    provider_name = "Google Gemini" if use_gemini else "OpenAI"
+    provider_name = get_gemini_provider_name() if use_gemini else "OpenAI"
     print(f"\nLLM Provider: {provider_name}")
     print(f"Model: {model_name}")
 
