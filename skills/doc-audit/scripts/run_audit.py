@@ -923,7 +923,7 @@ async def process_block_async(
             return (block_idx, False, 0, heading, None)
 
 
-async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, client, completed_uuids):
+async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids):
     """
     Run the audit process asynchronously with parallel block processing.
 
@@ -934,6 +934,7 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
         metadata: Document metadata
         use_gemini: Whether to use Gemini
         model_name: LLM model name
+        provider_name: LLM provider name (e.g., "Google Gemini", "OpenAI")
         client: LLM client instance
         completed_uuids: Set of already-processed UUIDs
     """
@@ -1031,6 +1032,8 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
             from datetime import datetime
             audit_metadata = {
                 **metadata,
+                "llm_provider": provider_name,
+                "llm_model": model_name,
                 "audited_at": datetime.now().isoformat()
             }
         
@@ -1169,6 +1172,11 @@ def main():
             sys.exit(1)
         client = openai.AsyncOpenAI()
 
+    # Determine and print LLM provider name
+    provider_name = "Google Gemini" if use_gemini else "OpenAI"
+    print(f"\nLLM Provider: {provider_name}")
+    print(f"Model: {model_name}")
+
     # Load inputs
     print(f"Loading blocks from: {args.document}")
     metadata, blocks = load_blocks(args.document)
@@ -1192,6 +1200,8 @@ def main():
             from datetime import datetime
             audit_metadata = {
                 **metadata,
+                "llm_provider": provider_name,
+                "llm_model": model_name,
                 "audited_at": datetime.now().isoformat()
             }
             with open(args.output, 'w', encoding='utf-8') as f:
@@ -1220,7 +1230,7 @@ def main():
         return
 
     # Run async audit
-    asyncio.run(run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, client, completed_uuids))
+    asyncio.run(run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids))
 
 
 if __name__ == "__main__":
