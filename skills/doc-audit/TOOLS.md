@@ -140,6 +140,34 @@ export GOOGLE_VERTEX_BASE_URL="https://custom-api-gateway.example.com"
 
 When `GOOGLE_VERTEX_BASE_URL` is set, the SDK will route all requests through the specified endpoint instead of the default Vertex AI endpoint. If not set, the SDK automatically determines the appropriate endpoint based on the project and location.
 
+### OpenAI Configuration
+
+#### Default Mode
+
+Uses the official OpenAI API with an API key.
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+#### Custom Endpoint
+
+For scenarios requiring a custom API endpoint (e.g., corporate proxy, Azure OpenAI, local LLM server with OpenAI-compatible API), you can specify a custom base URL:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+export OPENAI_BASE_URL="https://my-proxy.example.com/v1"
+```
+
+**Note:** `OPENAI_BASE_URL` is natively supported by the OpenAI Python SDK.
+
+#### Environment Variable Summary
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENAI_API_KEY` | Yes | OpenAI API key |
+| `OPENAI_BASE_URL` | No | Custom API endpoint (for proxies, Azure, etc.) |
+
 ### Parallel Processing (`--workers`)
 
 The audit script processes multiple text blocks concurrently using asyncio for improved performance:

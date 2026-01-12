@@ -131,6 +131,49 @@ def get_gemini_provider_name() -> str:
         return "Google Gemini (AI Studio)"
 
 
+def create_openai_client(use_async: bool = True):
+    """
+    Create OpenAI client with optional custom base URL.
+    
+    Environment variables:
+    - OPENAI_API_KEY: Required API key
+    - OPENAI_BASE_URL: Optional custom API endpoint (for proxies, Azure, etc.)
+    
+    Args:
+        use_async: If True, return AsyncOpenAI, otherwise return OpenAI
+        
+    Returns:
+        OpenAI client instance (async or sync based on use_async parameter)
+        
+    Raises:
+        ValueError: If OPENAI_API_KEY is not set
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is required for OpenAI mode.")
+    
+    base_url = os.getenv("OPENAI_BASE_URL")
+    
+    if use_async:
+        return openai.AsyncOpenAI(base_url=base_url)
+    else:
+        return openai.OpenAI(base_url=base_url)
+
+
+def get_openai_provider_name() -> str:
+    """
+    Get the OpenAI provider name, including custom endpoint if configured.
+    
+    Returns:
+        Provider name string for display purposes
+    """
+    base_url = os.getenv("OPENAI_BASE_URL")
+    if base_url:
+        return f"OpenAI (Custom: {base_url})"
+    else:
+        return "OpenAI"
+
+
 class NonRetryableError(Exception):
     """
     Exception for errors that should not be retried.
@@ -738,14 +781,18 @@ def audit_block_gemini(block: dict, system_prompt: str, model_name: str = None, 
     return result
 
 
-def audit_block_openai(block: dict, system_prompt: str, model_name: str = None) -> dict:
+def audit_block_openai(block: dict, system_prompt: str, model_name: str = None, client = None) -> dict:
     """
     Audit a text block using OpenAI with strict JSON mode (sync version).
+    
+    Supports custom base URL via OPENAI_BASE_URL environment variable.
+    See create_openai_client() for details.
 
     Args:
         block: Text block to audit
         system_prompt: Cached system prompt with rules and instructions
         model_name: OpenAI model to use (uses DOC_AUDIT_OPENAI_MODEL env var if None)
+        client: OpenAI client instance (creates one using create_openai_client if None)
 
     Returns:
         Audit result dictionary
@@ -753,9 +800,11 @@ def audit_block_openai(block: dict, system_prompt: str, model_name: str = None) 
     if model_name is None:
         model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-5.2")
     
+    if client is None:
+        client = create_openai_client(use_async=False)
+    
     user_prompt = build_user_prompt(block)
 
-    client = openai.OpenAI()
     response = client.chat.completions.create(
         model=model_name,
         messages=[
@@ -1266,7 +1315,7 @@ def main():
                 sys.exit(1)
         elif HAS_OPENAI and os.getenv("OPENAI_API_KEY"):
             model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-4.1")
-            client = openai.AsyncOpenAI()
+            client = create_openai_client(use_async=True)
         else:
             print("Error: No LLM credentials found.", file=sys.stderr)
             print("For AI Studio: Set GOOGLE_API_KEY", file=sys.stderr)
@@ -1304,10 +1353,10 @@ def main():
         if not os.getenv("OPENAI_API_KEY"):
             print("Error: OPENAI_API_KEY not set", file=sys.stderr)
             sys.exit(1)
-        client = openai.AsyncOpenAI()
+        client = create_openai_client(use_async=True)
 
     # Determine and print LLM provider name
-    provider_name = get_gemini_provider_name() if use_gemini else "OpenAI"
+    provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
     print(f"\nLLM Provider: {provider_name}")
     print(f"Model: {model_name}")
 
