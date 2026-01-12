@@ -37,8 +37,6 @@ This creates:
 - `.claude-work/venv/` - Python virtual environment (shared across skills)
 - `.claude-work/logs/` - Operation logs (shared across skills)
 
-**Note:** User should have already set `GOOGLE_API_KEY` or `OPENAI_API_KEY` environment variable to choose their preferred LLM provider.
-
 ### Phase 1: Rule Selection
 
 **Decision Point:** Does user specify custom audit requirements?
@@ -137,7 +135,7 @@ User: "Check for X, Y, Z" → Generate Rules → Present ───┐
 Phase 3 (Apply Results):
 
 Path A (Direct Apply - Skip Review):
-Manifest.jsonl ──────────────────────────────────────→ apply_audit_edits.py → _edited.docx
+Manifest.jsonl → apply_audit_edits.py → <origin_file_name>_edited.docx
 
 Path B (Reviewed Apply - Recommended):
 Open HTML Report → Block unwanted → Export JSONL → apply_audit_edits.py → _edited.docx
@@ -177,7 +175,7 @@ source ./.claude-work/doc-audit/env.sh
 - `google-genai` - Google Gemini LLM
 - `openai` - OpenAI LLM
 
-**Note:** User must set `GOOGLE_API_KEY` or `OPENAI_API_KEY` environment variable before running audits.
+**Note:** User must set `GOOGLE_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS`or `OPENAI_API_KEY` environment variable before running audits.
 
 ### 2. Generate Customized Rules (Iterative)
 
@@ -240,13 +238,8 @@ When auditing multiple documents, use document name prefixes for custom rules to
 | `--base-rules` | path | No | Base rules to merge with (default: auto-detects `.claude-work/doc-audit/default_rules.json`, then falls back to `assets/default_rules.json`) |
 | `--output` / `-o` | path | No | Output rules file (default: `rules.json`) |
 | `--no-base` | flag | No | ⚠️ **DO NOT USE** unless user explicitly requests to exclude default rules. Starts from scratch without loading any base rules. |
-| `--api-key` | text | No | API key for LLM service (uses `GOOGLE_API_KEY` or `OPENAI_API_KEY` env var by default) |
 
 \* At least one of `--input` or `--file` is required, unless you just want to renumber base rules
-
-**LLM Requirements:**
-- Requires `google-genai` or `openai` package installed
-- Requires `GOOGLE_API_KEY` / `DOC_AUDIT_GEMINI_MODEL` or `OPENAI_API_KEY` / `DOC_AUDIT_OPENAI_MODEL` environment variable set
 
 **Workflow:**
 
@@ -276,9 +269,31 @@ When auditing multiple documents, use document name prefixes for custom rules to
 }
 ```
 
-### 3. Parse Document
+### 3. Workflow Script (Recommended for Normal Audit Workflow)
 
-Extract text blocks from a Word document with proper heading hierarchy and numbering:
+`workflow.sh` runs the complete audit pipeline: parse → audit → report. **This is the recommended way to perform audits instead of involving each tool separately  .**
+
+```bash
+# Use default rules
+./.claude-work/doc-audit/workflow.sh document.docx
+
+# Use custom rules
+./.claude-work/doc-audit/workflow.sh document.docx custom_rules.json
+```
+
+**What it does**:
+
+1. Parse document → `<docname>_blocks.jsonl`
+2. Run audit → `<docname>_manifest.jsonl`
+3. Generate reports → `<document_name>_audit_report.html` and `<document_name>_audit_report.xlsx` (saved alongside source document)
+
+**Note**: If workflow fails, use individual tools (#3, #4, #5) to debug or continue manually.
+
+📖 **Internal process details**: See [TOOLS.md - Workflow Script](TOOLS.md#6-workflow-script)
+
+### 4. Parse
+
+Extract text blocks from a Word document with proper heading hierarchy and numbering. **Use this document parsing script independently only in cases where the workflow script cannot be applied**:
 
 ```bash
 # Basic usage (outputs to <document>_blocks.jsonl)
@@ -302,13 +317,13 @@ python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
 
 **Key Parameters:**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `document` | path | Yes | Path to the DOCX file to parse |
-| `--output` / `-o` | path | No | Output file path (default: `<document>_blocks.jsonl`) |
-| `--format` | choice | No | Output format: `jsonl` (default) or `json` |
-| `--preview` | flag | No | Print preview of first 5 extracted blocks |
-| `--stats` | flag | No | Print document statistics (headings, characters, etc.) |
+| Parameter         | Type   | Required | Description                                            |
+| ----------------- | ------ | -------- | ------------------------------------------------------ |
+| `document`        | path   | Yes      | Path to the DOCX file to parse                         |
+| `--output` / `-o` | path   | No       | Output file path (default: `<document>_blocks.jsonl`)  |
+| `--format`        | choice | No       | Output format: `jsonl` (default) or `json`             |
+| `--preview`       | flag   | No       | Print preview of first 5 extracted blocks              |
+| `--stats`         | flag   | No       | Print document statistics (headings, characters, etc.) |
 
 **Features:**
 
@@ -339,6 +354,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
 **Output Format (JSONL):**
 
 Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within text content:
+
 ```json
 {"uuid": "12AB34CD", "uuid_end": "56EF78AB", "heading": "2.1 Penalty Clause", "content": "If Party B delays...\n<table>[[\"Header 1\",\"Header 2\"],[\"Cell 1\",\"Cell 2\"]]</table>\nSubsequent paragraph...", "type": "text", "parent_headings": ["Chapter 2 Contract Terms"]}
 ```
@@ -361,15 +377,12 @@ Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within 
 }
 ```
 
-### 4. Run Audit (Advanced)
+### 5. Audit
 
-Execute LLM-based audit on each text block against audit rules. **Typically invoked automatically by `workflow.sh`** (see tool #6 below).
-
-**Features**:
-- **Parallel processing**: Uses asyncio for concurrent API calls (default: 8 workers)
-- Supports both Google Gemini and OpenAI with native async APIs
+Execute LLM-based audit on each text block against audit rules. **Use this audit script independently only in cases where the workflow script cannot be applied.**
 
 **Independent use cases**:
+
 - Debugging audit behavior with `--dry-run`
 - Processing large documents in chunks (`--start-block`, `--end-block`)
 - Resuming interrupted runs (`--resume`)
@@ -397,11 +410,12 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 
 📖 **Detailed parameters, parallel processing, resume functionality, and advanced use cases**: See [TOOLS.md - Run Audit](TOOLS.md#4-run-audit)
 
-### 5. Generate Report (Advanced)
+### 6. Report
 
-Generate interactive HTML audit report from manifest. **Typically invoked automatically by `workflow.sh`** (see tool #6 below).
+Generate interactive HTML audit report from manifest. **Use this report script independently only in cases where the workflow script cannot be applied.** (see tool #6 below).
 
 **Independent use cases**:
+
 - Re-generating reports after template modifications
 - Custom output locations
 - JSON export for further processing (`--json`)
@@ -419,30 +433,9 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
 
 📖 **Detailed parameters and features**: See [TOOLS.md - Generate Report](TOOLS.md#5-generate-report)
 
-### 6. Workflow Script (Recommended Entry Point)
+### 7. Edits
 
-`workflow.sh` runs the complete audit pipeline: parse → audit → report. **This is the recommended way to perform audits.**
-
-```bash
-# Use default rules
-./.claude-work/doc-audit/workflow.sh document.docx
-
-# Use custom rules
-./.claude-work/doc-audit/workflow.sh document.docx custom_rules.json
-```
-
-**What it does**:
-1. Parse document → `<docname>_blocks.jsonl`
-2. Run audit → `<docname>_manifest.jsonl`
-3. Generate reports → `<document_name>_audit_report.html` and `<document_name>_audit_report.xlsx` (saved alongside source document)
-
-**Note**: If workflow fails, use individual tools (#3, #4, #5) to debug or continue manually.
-
-📖 **Internal process details**: See [TOOLS.md - Workflow Script](TOOLS.md#6-workflow-script)
-
-### 7. Apply Audit Edits (Post-Processing)
-
-Apply audit results to Word document with track changes and comments.
+Apply audit results to the original word document using track changes and comments. This post-processing should be performed only upon user request.
 
 **Quick Usage:**
 

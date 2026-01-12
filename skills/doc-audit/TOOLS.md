@@ -104,11 +104,10 @@ export GOOGLE_CLOUD_PROJECT="your-project-id"
 export GOOGLE_CLOUD_LOCATION="us-central1"
 
 # Authentication: One of the following
-# Option 1: Service account JSON file
 export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 
-# Option 2: Use gcloud CLI authentication
-gcloud auth application-default login
+# Base URL (Optional: for proxy or public models available general)
+export GOOGLE_VERTEX_BASE_URL='https://aiplatform.googleapis.com'
 ```
 
 **Note:** When `GOOGLE_GENAI_USE_VERTEXAI=true` is set, the `GOOGLE_API_KEY` environment variable is ignored. The tool will use ADC for authentication instead.

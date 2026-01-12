@@ -45,8 +45,16 @@ pip install uv
 2. **Set up environment variables**:
 
 ```bash
-# For Google Gemini (recommended)
+# For Google Gemini with AI Studio
 export GOOGLE_API_KEY="your_api_key_here"
+
+# For Google Gemini with Vertex AI
+export GOOGLE_GENAI_USE_VERTEXAI=true
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+export GOOGLE_CLOUD_LOCATION="us-central1"
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+# For proxy or public models available general
+# export GOOGLE_VERTEX_BASE_URL='https://aiplatform.googleapis.com'
 
 # OR for OpenAI (requires gpt-4o-2024-08-06+, gpt-4o-mini, or gpt-5.x)
 export OPENAI_API_KEY="your_api_key_here"
