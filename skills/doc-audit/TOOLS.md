@@ -4,15 +4,349 @@ This document provides detailed documentation for advanced tools that are typica
 
 > **Note:** All script examples below use `$DOC_AUDIT_SKILL_PATH` environment variable, which is automatically set by `source .claude-work/doc-audit/env.sh`. Always run `source .claude-work/doc-audit/env.sh` before executing any scripts.
 
-**Quick Navigation:**
-- [4. Run Audit](#4-run-audit) - Execute LLM-based audit
-- [5. Generate Report](#5-generate-report) - Create HTML report from audit results
-- [6. Workflow Script](#6-workflow-script) - Complete automated workflow
-- [7. Apply Audit Edits](#7-apply-audit-edits) - Apply exported edits to Word document
+---
+
+## Parse Rules
+
+Parse natural language audit criteria into structured JSON rules using LLM. This tool is typically used to:
+- **Create custom rules**: Convert user requirements into structured audit rules
+- **Extend base rules**: Add new rules while preserving existing ones
+- **Modify rules**: Update specific rules by explicit request
+
+**DEFAULT BEHAVIOR**: Always merges with base rules unless user explicitly requests otherwise.
+
+### Usage Examples
+
+**Common Usage Patterns:**
+
+```bash
+# ✅ RECOMMENDED: Initial generation (automatically merges with default rules)
+# Use when: User wants custom requirements PLUS default rules
+# Tip: Use document name prefix for better organization
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --input "Check for ambiguous payment terms and missing signatures" \
+  --output .claude-work/doc-audit/mydoc_custom_rules.json
+
+# ✅ RECOMMENDED: Iterative refinement (continues from previous output)
+# Use when: User wants to modify/add/remove specific rules
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
+  --input "Add rule for checking ambiguous references" \
+  --output .claude-work/doc-audit/mydoc_custom_rules.json
+
+# ✅ Further iteration
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
+  --input "Remove R009, make signature rule more specific" \
+  --output .claude-work/doc-audit/mydoc_custom_rules.json
+
+# Read requirements from file
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --file requirements.txt \
+  --output custom_rules.json
+
+# ⚠️ ONLY use --no-base when user EXPLICITLY requests to exclude default rules
+# Example user requests that warrant --no-base:
+#   - "Only check for X and Y, don't include any default rules"
+#   - "Start from scratch without default rules"
+#   - "I only want these specific rules, no others"
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --no-base \
+  --input "Check for missing section numbers and inconsistent terminology" \
+  --output .claude-work/doc-audit/mydoc_custom_rules.json
+```
+
+### Decision Guide
+
+When to use each parameter:
+
+| User Request | Recommended Usage |
+|--------------|-------------------|
+| "Check for A, B, C" | ✅ Default (merges with base rules) |
+| "Add rule for X" | ✅ Use `--base-rules` with previous output |
+| "ONLY check for A, no other rules" | ⚠️ Use `--no-base` |
+| "Don't include default/standard rules" | ⚠️ Use `--no-base` |
+
+### Naming Best Practice
+
+When auditing multiple documents, use document name prefixes for custom rules to avoid confusion:
+- `mydoc_custom_rules.json` for mydoc.docx
+- `contract_custom_rules.json` for contract.docx
+
+### Key Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `--input` / `-i` | text | No* | Natural language audit criteria text |
+| `--file` / `-f` | path | No* | File containing audit criteria |
+| `--base-rules` | path | No | Base rules file to merge with (default: auto-detect) |
+| `--output` / `-o` | path | No | Output JSON file path (default: `rules.json`) |
+| `--no-base` | flag | No | Don't load base rules (start from scratch) |
+| `--api-key` | text | No | API key for LLM service (uses env vars by default) |
+
+\* Either `--input` or `--file` is required unless base rules are available
+
+### LLM Configuration
+
+The tool supports both Google Gemini and OpenAI for rule generation, with Gemini preferred when available.
+
+#### Google Gemini Configuration
+
+##### AI Studio Mode (Default)
+
+Uses Google AI Studio API with an API key.
+
+```bash
+export GOOGLE_API_KEY="your-api-key"
+```
+
+##### Vertex AI Mode
+
+Uses Google Cloud Vertex AI with Application Default Credentials (ADC).
+
+```bash
+# Enable Vertex AI mode
+export GOOGLE_GENAI_USE_VERTEXAI=true
+
+# Required: GCP project ID
+export GOOGLE_CLOUD_PROJECT="your-project-id"
+
+# Optional: GCP region (default: us-central1)
+export GOOGLE_CLOUD_LOCATION="us-central1"
+
+# Optional: Custom API endpoint
+export GOOGLE_VERTEX_BASE_URL="https://custom-api-gateway.example.com"
+
+# Authentication (one of the following)
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+# Or use: gcloud auth application-default login
+```
+
+#### OpenAI Configuration
+
+```bash
+export OPENAI_API_KEY="sk-..."
+
+# Optional: Custom endpoint
+export OPENAI_BASE_URL="https://my-proxy.example.com/v1"
+```
+
+#### Environment Variable Summary
+
+| Variable | Mode | Required | Description |
+|----------|------|----------|-------------|
+| `GOOGLE_API_KEY` | AI Studio | Yes | API key from Google AI Studio |
+| `GOOGLE_GENAI_USE_VERTEXAI` | Vertex AI | Yes | Set to `true` to enable |
+| `GOOGLE_CLOUD_PROJECT` | Vertex AI | Yes | GCP project ID |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI | No | GCP region (default: `us-central1`) |
+| `GOOGLE_VERTEX_BASE_URL` | Vertex AI | No | Custom API endpoint |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex AI | No* | Path to service account JSON |
+| `OPENAI_API_KEY` | OpenAI | Yes | OpenAI API key |
+| `OPENAI_BASE_URL` | OpenAI | No | Custom API endpoint |
+| `DOC_AUDIT_GEMINI_MODEL` | Both | No | Gemini model name (default: `gemini-3-flash-preview`) |
+| `DOC_AUDIT_OPENAI_MODEL` | Both | No | OpenAI model name (default: `gpt-5.2`) |
+| `AUDIT_LANGUAGE` | Both | No | Output language for rules (default: `Chinese`) |
+
+\* Not required if using `gcloud auth application-default login` or running on GCP
+
+### Output Format
+
+The generated `rules.json` file has this structure:
+
+```json
+{
+  "version": "1.0",
+  "total_rules": 5,
+  "rules": [
+    {
+      "id": "R001",
+      "description": "Check for spelling and typo errors",
+      "severity": "high",
+      "category": "grammar",
+      "examples": {
+        "violation": "本周的组要工作",
+        "correction": "本周的主要工作"
+      }
+    },
+    {
+      "id": "R002",
+      "description": "Check for unclear or ambiguous expressions",
+      "severity": "medium",
+      "category": "clarity"
+    }
+  ]
+}
+```
+
+**Rule Fields:**
+- `id`: Unique identifier (R001, R002, ...)
+- `description`: Clear description of what to check
+- `severity`: `high`, `medium`, or `low`
+- `category`: Rule category (e.g., `grammar`, `clarity`, `logic`, `compliance`, `format`, `semantic`, `other`)
+- `examples`: Optional object with `violation` and `correction` examples
+
+### Workflow
+
+1. **Load base rules**: Auto-detect from `.claude-work/doc-audit/default_rules.json` or skill assets
+2. **Build prompt**: Create LLM prompt with base rules and user requirements
+3. **Call LLM**: Use Gemini (preferred) or OpenAI with structured JSON output
+4. **Renumber rules**: Ensure sequential IDs (R001, R002, ...)
+5. **Save output**: Write JSON file with version and total count
+
+### Notes
+
+- ⚠️ **LLM Required**: This tool always requires an LLM for rule generation
+- ✅ **Rule Preservation**: When merging, existing rules are preserved unless explicitly modified
+- ✅ **Auto-numbering**: Rules are automatically renumbered to avoid ID conflicts
+- ✅ **Language Control**: Set `AUDIT_LANGUAGE` to control output language (e.g., `English`, `Chinese`)
 
 ---
 
-## 4. Run Audit
+## Workflow Script
+
+`workflow.sh` is a convenience script that runs all three stages (parse, audit, report) automatically. This is the **recommended way** to perform a complete audit workflow.
+
+### Usage Examples
+
+```bash
+# Use default rules
+./.claude-work/doc-audit/workflow.sh document.docx
+
+# Use custom rules
+./.claude-work/doc-audit/workflow.sh document.docx .claude-work/doc-audit/custom_rules.json
+```
+
+### Internal Process
+
+The script executes these steps in sequence:
+
+1. **Parse document** → `.claude-work/doc-audit/<docname>_blocks.jsonl` (via `parse_document.py`)
+2. **Run audit** → `.claude-work/doc-audit/<docname>_manifest.jsonl` (via `run_audit.py`)
+3. **Generate report** → `<document_directory>/<document_name>_audit_report.html` and `<document_name>_audit_report.xlsx` (via `generate_report.py`)
+
+### Features
+
+- ✅ Cleans previous intermediate files (`<docname>_blocks.jsonl`, `<docname>_manifest.jsonl`) before starting
+- ✅ Final report saved in same directory as source document
+- ✅ Uses working directory's default rules if no custom rules specified
+- ✅ Automatically passes rules to report generation for full rule details
+
+### When to Use Individual Tools Instead
+
+If the workflow fails at any stage, you can run individual tools to debug or continue manually:
+
+- **Parse failed**: Check document format, paraId presence
+- **Audit interrupted**: Use `run_audit.py --resume` to continue
+- **Report customization**: Use `generate_report.py` with custom templates
+- **Large documents**: Use `run_audit.py` with `--start-block`/`--end-block` for chunked processing
+
+---
+
+## Parse Document
+
+Extract text blocks from a Word document with proper heading hierarchy and numbering. This tool is automatically invoked by `workflow.sh`, but can be used independently for:
+- **Custom output paths**: Save blocks to a specific location
+- **Preview mode**: Preview extracted blocks without full processing
+- **Statistics**: Get document statistics (headings, characters, etc.)
+- **Format selection**: Output as JSONL (streaming) or JSON (single file)
+
+### Usage Examples
+
+```bash
+# Basic usage (outputs to <document>_blocks.jsonl)
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx
+
+# Custom output path
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
+  --output .claude-work/doc-audit/blocks.jsonl
+
+# With preview and statistics
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
+  --output blocks.jsonl \
+  --preview \
+  --stats
+
+# Output as regular JSON instead of JSONL
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx \
+  --output blocks.json \
+  --format json
+```
+
+### Key Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `document` | path | Yes | Path to the DOCX file to parse |
+| `--output` / `-o` | path | No | Output file path (default: `<document>_blocks.jsonl`) |
+| `--format` | choice | No | Output format: `jsonl` (default) or `json` |
+| `--preview` | flag | No | Print preview of first 5 extracted blocks |
+| `--stats` | flag | No | Print document statistics (headings, characters, etc.) |
+
+### Features
+
+- **File Metadata**: Includes source file path, SHA256 hash, and parse timestamp
+  - JSONL: First line contains metadata (type: "meta")
+  - JSON: Top-level "meta" field with metadata
+- **Automatic numbering capture**: Extracts list labels (e.g., "1.1", "Chapter 1") via Word's numbering XML
+- **Heading-based splitting**: Each heading starts a new text block
+- **Table embedding**: Tables converted to `<table>JSON</table>` format and embedded in text blocks with surrounding paragraphs
+- **Heading hierarchy**: Preserves parent headings context for each block
+- **Stable UUIDs**: Uses `w14:paraId` from heading paragraphs as block UUID (8-character hex ID unique within document)
+- **paraId validation**: Requires Word 2013+ documents with `w14:paraId` attributes (terminates with error if missing)
+
+### Workflow
+
+1. Load document with python-docx library
+2. Parse styles.xml to extract outline levels for headings
+3. Iterate through body nodes (paragraphs and tables)
+4. For each paragraph:
+   - Extract `w14:paraId` attribute (validates presence, errors if missing)
+   - Check if it's a heading via outline level
+   - If heading: save previous block with heading's paraId as UUID
+   - If content: append to current block, track first paraId for Preface blocks
+5. For each table: convert to 2D array and embed in content
+6. Use heading's `w14:paraId` as block UUID (or first content paraId for Preface blocks)
+7. Clean up old `manifest.jsonl` to prevent UUID mismatch in resume mode
+
+### Output Format (JSONL)
+
+Each line is a JSON object. Tables are embedded as `<table>JSON</table>` within text content:
+
+```json
+{"uuid": "12AB34CD", "uuid_end": "56EF78AB", "heading": "2.1 Penalty Clause", "content": "If Party B delays...\n<table>[[\"Header 1\",\"Header 2\"],[\"Cell 1\",\"Cell 2\"]]</table>\nSubsequent paragraph...", "type": "text", "parent_headings": ["Chapter 2 Contract Terms"]}
+```
+
+### Output Format (JSON)
+
+```json
+{
+  "total_blocks": 42,
+  "blocks": [
+    {
+      "uuid": "12AB34CD",
+      "uuid_end": "56EF78AB",
+      "heading": "2.1 Penalty Clause",
+      "content": "If Party B delays payment...\n<table>[[\"Penalty Type\",\"Amount\"],[\"Late Payment\",\"1% per day\"]]</table>\nThe above table shows penalty structure.",
+      "type": "text",
+      "parent_headings": ["Chapter 2 Contract Terms"]
+    }
+  ]
+}
+```
+
+### Error Handling
+
+**Missing paraId Error:**
+
+If the document is missing `w14:paraId` attributes on paragraphs, the script will display a user-friendly error message and exit with code 1. This typically occurs with:
+- Documents created by older versions of Microsoft Word (before Office 2013)
+- Documents generated programmatically without paraId attributes
+
+When this error occurs, the workflow must stop immediately.
+
+---
+
+## Run Audit
 
 Execute LLM-based audit on each text block against audit rules. This tool is automatically invoked by `workflow.sh`, but can be used independently for:
 - **Debugging**: Test audit with specific blocks using `--dry-run`
@@ -62,7 +396,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | `--rules` / `-r` | path | Yes | Path to audit rules JSON file |
 | `--output` / `-o` | path | No | Output manifest file path (default: `manifest.jsonl`) |
 | `--model` | text | No | LLM model: `auto` (default), `gemini-2.5-flash`, `gpt-5.2`, etc. |
-| `--workers` | int | No | Number of parallel workers for concurrent API calls (default: 4) |
+| `--workers` | int | No | Number of parallel workers for concurrent API calls (default: 8) |
 | `--rate-limit` | float | No | Seconds to wait between API calls per worker (default: 0.05) |
 | `--start-block` | int | No | Start from this block index (0-based, default: 0) |
 | `--end-block` | int | No | End at this block index (inclusive, default: last block) |
@@ -171,7 +505,7 @@ export OPENAI_BASE_URL="https://my-proxy.example.com/v1"
 
 The audit script processes multiple text blocks concurrently using asyncio for improved performance:
 
-- **Default**: 4 parallel workers
+- **Default**: 8 parallel workers
 - **Implementation**: Uses `asyncio.Semaphore` to limit concurrent API calls
 - **Rate limiting**: Applied per worker (default 0.05s between calls per worker)
 
@@ -327,7 +661,7 @@ Each line is an audit result:
 
 ---
 
-## 5. Generate Report
+## Generate Report
 
 Create HTML audit report from audit manifest with statistics and traceability. This tool is automatically invoked by `workflow.sh`, but can be used independently for:
 - **Re-generating reports**: After modifying the template
@@ -425,47 +759,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
 
 ---
 
-## 6. Workflow Script
-
-`workflow.sh` is a convenience script that runs all three stages (parse, audit, report) automatically. This is the **recommended way** to perform a complete audit workflow.
-
-### Usage Examples
-
-```bash
-# Use default rules
-./.claude-work/doc-audit/workflow.sh document.docx
-
-# Use custom rules
-./.claude-work/doc-audit/workflow.sh document.docx .claude-work/doc-audit/custom_rules.json
-```
-
-### Internal Process
-
-The script executes these steps in sequence:
-
-1. **Parse document** → `.claude-work/doc-audit/blocks.jsonl` (via `parse_document.py`)
-2. **Run audit** → `.claude-work/doc-audit/manifest.jsonl` (via `run_audit.py`)
-3. **Generate report** → `<document_directory>/<document_name>_audit_report.html` (via `generate_report.py`)
-
-### Features
-
-- ✅ Cleans previous intermediate files (`blocks.jsonl`, `manifest.jsonl`) before starting
-- ✅ Final report saved in same directory as source document
-- ✅ Uses working directory's default rules if no custom rules specified
-- ✅ Automatically passes rules to report generation for full rule details
-
-### When to Use Individual Tools Instead
-
-If the workflow fails at any stage, you can run individual tools to debug or continue manually:
-
-- **Parse failed**: Check document format, paraId presence
-- **Audit interrupted**: Use `run_audit.py --resume` to continue
-- **Report customization**: Use `generate_report.py` with custom templates
-- **Large documents**: Use `run_audit.py` with `--start-block`/`--end-block` for chunked processing
-
----
-
-## 7. Apply Audit Edits
+## Apply Audit Edits
 
 Apply audit results exported from HTML report to Word document with track changes and comments. This is a **post-processing tool** used after manual review of audit results.
 
