@@ -11,6 +11,113 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Try to import LLM libraries
+HAS_GEMINI = False
+HAS_OPENAI = False
+
+try:
+    from google import genai
+    from google.genai import types
+    HAS_GEMINI = True
+except ImportError:
+    pass
+
+try:
+    import openai
+    HAS_OPENAI = True
+except ImportError:
+    pass
+
+
+def is_vertex_ai_mode() -> bool:
+    """
+    Check if Vertex AI mode is enabled via environment variable.
+    
+    Returns:
+        True if GOOGLE_GENAI_USE_VERTEXAI is set to 'true', False otherwise
+    """
+    return os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
+
+
+def create_gemini_client():
+    """
+    Create Gemini client for AI Studio or Vertex AI.
+    
+    Supports two modes:
+    - AI Studio (default): Uses GOOGLE_API_KEY for authentication
+    - Vertex AI: Uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
+    
+    Environment variables for Vertex AI mode:
+    - GOOGLE_GENAI_USE_VERTEXAI: Set to 'true' to enable Vertex AI mode
+    - GOOGLE_CLOUD_PROJECT: Required GCP project ID
+    - GOOGLE_CLOUD_LOCATION: Optional region (default: us-central1)
+    - GOOGLE_VERTEX_BASE_URL: Optional custom API endpoint (for API gateway proxies)
+    - GOOGLE_APPLICATION_CREDENTIALS: Path to service account JSON (or use gcloud auth)
+    
+    Returns:
+        Gemini client instance (sync)
+        
+    Raises:
+        ValueError: If required environment variables are not set
+    """
+    if not HAS_GEMINI:
+        raise ImportError("google-genai not installed")
+    
+    use_vertex = is_vertex_ai_mode()
+    
+    if use_vertex:
+        # Vertex AI mode - uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        base_url = os.getenv("GOOGLE_VERTEX_BASE_URL")
+        
+        if not project:
+            raise ValueError(
+                "GOOGLE_CLOUD_PROJECT is required for Vertex AI mode. "
+                "Set GOOGLE_GENAI_USE_VERTEXAI=false to use AI Studio mode instead."
+            )
+        
+        # Build http_options only if custom base_url is specified
+        http_options = None
+        if base_url:
+            http_options = {"base_url": base_url}
+        
+        # Note: ADC handles authentication automatically
+        # via GOOGLE_APPLICATION_CREDENTIALS env var or gcloud auth
+        client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+            http_options=http_options
+        )
+    else:
+        # AI Studio mode - requires API key
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is required for AI Studio mode. "
+                "Set GOOGLE_GENAI_USE_VERTEXAI=true and configure GCP credentials for Vertex AI mode."
+            )
+        
+        client = genai.Client(api_key=api_key)
+    
+    return client
+
+
+def get_gemini_provider_name() -> str:
+    """
+    Get the Gemini provider name based on current mode.
+    
+    Returns:
+        Provider name string for display purposes
+    """
+    if is_vertex_ai_mode():
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "unknown")
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        return f"Google Gemini (Vertex AI: {project}/{location})"
+    else:
+        return "Google Gemini (AI Studio)"
+
 
 # JSON Schema for rule validation and LLM structured output
 RULE_SCHEMA = {
@@ -34,9 +141,18 @@ RULE_SCHEMA = {
     "required": ["id", "description", "severity", "category"]
 }
 
-RULES_ARRAY_SCHEMA = {
-    "type": "array",
-    "items": RULE_SCHEMA
+# Wrapper schema for structured output (used by both Gemini and OpenAI)
+# Note: additionalProperties is required by OpenAI strict mode, Gemini tolerates it
+RULES_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "rules": {
+            "type": "array",
+            "items": RULE_SCHEMA
+        }
+    },
+    "required": ["rules"],
+    "additionalProperties": False
 }
 
 
@@ -151,7 +267,7 @@ Each rule must have:
 
 IMPORTANT: All rule descriptions, violation examples, correction examples, and any other textual content MUST be written in {output_language}.
 
-Return a valid JSON array of the complete rules."""
+Return a valid JSON object with a "rules" property containing an array of the complete rules."""
     else:
         return f"""You are an audit rule expert. Create structured audit rules based on user's requirements.
 
@@ -175,17 +291,21 @@ Each rule must have:
 
 IMPORTANT: All rule descriptions, violation examples, correction examples, and any other textual content MUST be written in {output_language}.
 
-Return a valid JSON array of the complete rules."""
+Return a valid JSON object with a "rules" property containing an array of the complete rules."""
 
 
 def merge_rules_with_llm(base_rules: list, input_text: str, api_key: Optional[str] = None) -> list:
     """
     Use LLM to intelligently merge base rules with user requirements.
+    
+    Supports both AI Studio and Vertex AI modes for Gemini.
+    See create_gemini_client() for details on environment variables.
 
     Args:
         base_rules: Existing base rules (from default or previous iteration)
         input_text: User's new requirements or modification requests
-        api_key: API key for LLM service (Gemini or OpenAI)
+        api_key: API key for LLM service (Gemini AI Studio or OpenAI only, 
+                 Vertex AI uses ADC)
 
     Returns:
         Complete merged list of structured rule dictionaries
@@ -196,42 +316,60 @@ def merge_rules_with_llm(base_rules: list, input_text: str, api_key: Optional[st
     # Build unified prompt
     prompt = _build_prompt(base_rules, input_text, output_language)
     
+    # Determine Gemini availability based on mode
+    use_vertex = is_vertex_ai_mode()
+    gemini_available = False
+    
+    if HAS_GEMINI:
+        if use_vertex:
+            # Vertex AI mode - check for project configuration
+            gemini_available = bool(os.getenv("GOOGLE_CLOUD_PROJECT"))
+        else:
+            # AI Studio mode - check for API key
+            gemini_available = bool(api_key or os.getenv("GOOGLE_API_KEY"))
+    
     # Try Gemini first
-    google_key = api_key or os.getenv("GOOGLE_API_KEY")
-    if google_key:
+    if gemini_available:
         try:
-            from google import genai
-            from google.genai import types
-            
-            client = genai.Client(api_key=google_key)
+            client = create_gemini_client()
             # Use environment variable for model name, fallback to default
-            model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-3-flash")
+            model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-2.5-flash")
+            
+            provider_name = get_gemini_provider_name()
+            print(f"Using LLM: {provider_name} ({model_name})")
 
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=RULES_ARRAY_SCHEMA
+                    response_schema=RULES_RESPONSE_SCHEMA
                 )
             )
             # With structured output, response is guaranteed to be valid JSON
-            merged_rules = json.loads(response.text)
+            response_data = json.loads(response.text)
+            merged_rules = response_data["rules"]
             return merged_rules
 
         except ImportError:
             print("Warning: google-genai not installed. Trying OpenAI instead.", file=sys.stderr)
+        except ValueError as e:
+            # Configuration error from create_gemini_client
+            print(f"Warning: Gemini configuration error: {e}. Trying OpenAI instead.", file=sys.stderr)
         except Exception as e:
-            print(f"Warning: LLM merging failed: {e}. Trying fallback.", file=sys.stderr)
+            print(f"Warning: Gemini merging failed: {e}. Trying OpenAI instead.", file=sys.stderr)
 
     # Try OpenAI as fallback
     openai_key = api_key or os.getenv("OPENAI_API_KEY")
-    if openai_key:
+    if HAS_OPENAI and openai_key:
         try:
-            import openai
-            client = openai.OpenAI(api_key=openai_key)
+            base_url = os.getenv("OPENAI_BASE_URL")
+            client = openai.OpenAI(api_key=openai_key, base_url=base_url)
             # Use environment variable for model name, fallback to default
-            model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-5.2")
+            model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-4.1")
+            
+            provider_name = f"OpenAI ({base_url})" if base_url else "OpenAI"
+            print(f"Using LLM: {provider_name} ({model_name})")
 
             response = client.chat.completions.create(
                 model=model_name,
@@ -239,16 +377,9 @@ def merge_rules_with_llm(base_rules: list, input_text: str, api_key: Optional[st
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "audit_rules_array",
+                        "name": "audit_rules_response",
                         "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "rules": RULES_ARRAY_SCHEMA
-                            },
-                            "required": ["rules"],
-                            "additionalProperties": False
-                        }
+                        "schema": RULES_RESPONSE_SCHEMA
                     }
                 }
             )
@@ -260,7 +391,7 @@ def merge_rules_with_llm(base_rules: list, input_text: str, api_key: Optional[st
         except ImportError:
             print("Error: openai not installed.", file=sys.stderr)
         except Exception as e:
-            print(f"Error: LLM merging failed: {e}", file=sys.stderr)
+            print(f"Error: OpenAI merging failed: {e}", file=sys.stderr)
 
     # No fallback - LLM is required
     print("Error: Unable to use LLM for rule merging. Please ensure LLM dependencies are installed.", file=sys.stderr)
@@ -307,32 +438,44 @@ def main():
     args = parser.parse_args()
 
     # Validate LLM setup (always required now)
-    google_key = args.api_key or os.getenv("GOOGLE_API_KEY")
+    # Check for Gemini availability (AI Studio or Vertex AI)
+    use_vertex = is_vertex_ai_mode()
+    usable_gemini = False
+    
+    if HAS_GEMINI:
+        if use_vertex:
+            # Vertex AI mode - requires project configuration (ADC handles auth)
+            if os.getenv("GOOGLE_CLOUD_PROJECT"):
+                usable_gemini = True
+            elif not os.getenv("OPENAI_API_KEY"):
+                # Only error if no fallback available
+                print("Error: Vertex AI mode is enabled (GOOGLE_GENAI_USE_VERTEXAI=true) "
+                      "but GOOGLE_CLOUD_PROJECT is not set.", file=sys.stderr)
+                print("Either:", file=sys.stderr)
+                print("  1. Set GOOGLE_CLOUD_PROJECT to your GCP project ID", file=sys.stderr)
+                print("  2. Unset GOOGLE_GENAI_USE_VERTEXAI to use AI Studio mode", file=sys.stderr)
+                print("  3. Set OPENAI_API_KEY to use OpenAI instead", file=sys.stderr)
+                sys.exit(1)
+        else:
+            # AI Studio mode - requires API key
+            google_key = args.api_key or os.getenv("GOOGLE_API_KEY")
+            usable_gemini = bool(google_key)
+    
+    # Check for OpenAI availability
     openai_key = args.api_key or os.getenv("OPENAI_API_KEY")
-    has_gemini = False
-    has_openai = False
-    try:
-        from google import genai  # noqa: F401
-        has_gemini = True
-    except ImportError:
-        pass
-    try:
-        import openai  # noqa: F401
-        has_openai = True
-    except ImportError:
-        pass
-
-    usable_gemini = bool(google_key and has_gemini)
-    usable_openai = bool(openai_key and has_openai)
+    usable_openai = bool(HAS_OPENAI and openai_key)
 
     if not usable_gemini and not usable_openai:
-        if not (google_key or openai_key):
-            print("Error: LLM API key required. Set GOOGLE_API_KEY or OPENAI_API_KEY (or use --api-key).", file=sys.stderr)
-        else:
+        if not HAS_GEMINI and not HAS_OPENAI:
             print("Error: No supported LLM client installed.", file=sys.stderr)
-        print("Install one of:", file=sys.stderr)
-        print("  pip install google-genai", file=sys.stderr)
-        print("  pip install openai", file=sys.stderr)
+            print("Install one of:", file=sys.stderr)
+            print("  pip install google-genai", file=sys.stderr)
+            print("  pip install openai", file=sys.stderr)
+        else:
+            print("Error: No LLM credentials found.", file=sys.stderr)
+            print("For AI Studio: Set GOOGLE_API_KEY", file=sys.stderr)
+            print("For Vertex AI: Set GOOGLE_GENAI_USE_VERTEXAI=true and GOOGLE_CLOUD_PROJECT", file=sys.stderr)
+            print("For OpenAI: Set OPENAI_API_KEY", file=sys.stderr)
         sys.exit(1)
 
     # Load base rules
