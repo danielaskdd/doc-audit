@@ -715,11 +715,12 @@ def extract_para_id(para_element) -> str:
 
 def parse_styles_outline_levels(docx_path: str) -> dict:
     """
-    Parse styles.xml to extract outlineLvl definitions for each style.
-    
+    Parse styles.xml to extract outlineLvl definitions for each style,
+    following style inheritance chain (basedOn).
+
     Args:
         docx_path: Path to DOCX file
-        
+
     Returns:
         dict: styleId -> outlineLvl (0-8 for headings, 9 for body text)
     """
@@ -728,34 +729,71 @@ def parse_styles_outline_levels(docx_path: str) -> dict:
         from defusedxml import ElementTree as ET
     except ImportError:
         from xml.etree import ElementTree as ET
-    
-    styles_outline = {}
-    
+
+    styles_outline = {}  # styleId -> outlineLvl (directly defined)
+    style_based_on = {}  # styleId -> parent styleId
+
     try:
         with zipfile.ZipFile(docx_path, 'r') as zf:
             if 'word/styles.xml' not in zf.namelist():
                 return styles_outline
-            
+
             tree = ET.parse(zf.open('word/styles.xml'))
             root = tree.getroot()
-            
-            # Parse style definitions
-            for style in root.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}style'):
-                style_id = style.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId')
+
+            ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+
+            # First pass: collect outlineLvl and basedOn for all styles
+            for style in root.findall(f'.//{{{ns}}}style'):
+                style_id = style.get(f'{{{ns}}}styleId')
                 if not style_id:
                     continue
-                
+
+                # Check for basedOn (style inheritance)
+                based_on = style.find(f'{{{ns}}}basedOn')
+                if based_on is not None:
+                    parent_id = based_on.get(f'{{{ns}}}val')
+                    if parent_id:
+                        style_based_on[style_id] = parent_id
+
                 # Check for outlineLvl in style's pPr
-                pPr = style.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
+                pPr = style.find(f'{{{ns}}}pPr')
                 if pPr is not None:
-                    outline_lvl_elem = pPr.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}outlineLvl')
+                    outline_lvl_elem = pPr.find(f'{{{ns}}}outlineLvl')
                     if outline_lvl_elem is not None:
-                        level = int(outline_lvl_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'))
+                        level = int(outline_lvl_elem.get(f'{{{ns}}}val'))
+                        styles_outline[style_id] = level
+
+            # Second pass: resolve inheritance chain for styles without direct outlineLvl
+            def get_outline_level(style_id: str, visited: set = None) -> int:
+                if visited is None:
+                    visited = set()
+                if style_id in visited:
+                    return None  # Prevent circular references
+                visited.add(style_id)
+
+                # If this style directly defines outlineLvl, return it
+                if style_id in styles_outline:
+                    return styles_outline[style_id]
+
+                # Otherwise check parent style
+                if style_id in style_based_on:
+                    parent_id = style_based_on[style_id]
+                    return get_outline_level(parent_id, visited)
+
+                return None
+
+            # Fill in missing outlineLvl from inheritance chain
+            all_style_ids = set(styles_outline.keys()) | set(style_based_on.keys())
+            for style_id in all_style_ids:
+                if style_id not in styles_outline:
+                    level = get_outline_level(style_id)
+                    if level is not None:
                         styles_outline[style_id] = level
     except Exception:
         # Silently ignore parsing errors
         pass
-    
+
     return styles_outline
 
 
