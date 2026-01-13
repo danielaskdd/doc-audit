@@ -86,6 +86,10 @@ class TableExtractor:
             
             # Iterate actual <w:tc> elements (each physical cell appears once)
             for tc in tr.findall(qn('w:tc')):
+                # Reset numbering state when cell changes to prevent incorrect continuation
+                if numbering_resolver is not None:
+                    numbering_resolver.reset_tracking_state()
+                
                 tcPr = tc.find(qn('w:tcPr'))
                 
                 # Check gridSpan (horizontal merge)
