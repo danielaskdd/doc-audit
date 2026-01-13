@@ -103,57 +103,14 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
             continue
 
         # Handle multiple violations per block
-        entry_violations = entry.get('violations', [])
-        if entry_violations:
-            for v in entry_violations:
-                category = v.get('category', 'other')
-                rule_id = v.get('rule_id', '')
-
-                uuid_start = entry.get('uuid', '')
-                uuid_end = v.get('uuid_end', entry.get('uuid_end', ''))
-                source_id = f"{uuid_start}|{uuid_end}"
-                content = entry.get('p_content', '')
-
-                # Store source content only once per unique source_id
-                if source_id not in source_contents:
-                    source_contents[source_id] = content
-
-                violations.append({
-                    'uuid': uuid_start,
-                    'uuid_end': uuid_end,  # Required for apply_audit_edits.py
-                    'source_id': source_id,  # Reference to source_contents
-                    'heading': entry.get('p_heading', ''),
-                    'category': category,
-                    'rule_id': rule_id,
-                    'violation_text': v.get('violation_text', ''),
-                    'violation_reason': v.get('violation_reason', ''),
-                    'fix_action': v.get('fix_action', 'manual'),
-                    'revised_text': v.get('revised_text', '')
-                })
-
-                category_counts[category] += 1
-
-                # Collect unique rule information
-                if rule_id and rule_id not in rules:
-                    # Try to get rule info from rules file first
-                    if rule_id in rules_file_dict:
-                        rules[rule_id] = rules_file_dict[rule_id].copy()
-                    else:
-                        # Fallback to data from manifest
-                        rules[rule_id] = {
-                            'id': rule_id,
-                            'category': category,
-                            'severity': v.get('severity', 'medium'),
-                            'description': v.get('rule_description', '')
-                        }
-        else:
-            # Single violation (backward compatibility)
-            category = entry.get('category', entry.get('issue_type', 'other'))
-            rule_id = entry.get('rule_id', '')
+        # Process violations array (new format)
+        for v in entry.get('violations', []):
+            category = v.get('category', 'other')
+            rule_id = v.get('rule_id', '')
 
             uuid_start = entry.get('uuid', '')
-            uuid_end = entry.get('uuid_end', '')
-            source_id = f"{uuid_start} | {uuid_end}"
+            uuid_end = v.get('uuid_end', entry.get('uuid_end', ''))
+            source_id = f"{uuid_start}|{uuid_end}"
             content = entry.get('p_content', '')
 
             # Store source content only once per unique source_id
@@ -162,14 +119,15 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
 
             violations.append({
                 'uuid': uuid_start,
-                'uuid_end': uuid_end,
+                'uuid_end': uuid_end,  # Required for apply_audit_edits.py
                 'source_id': source_id,  # Reference to source_contents
                 'heading': entry.get('p_heading', ''),
                 'category': category,
                 'rule_id': rule_id,
-                'violation_text': entry.get('violation_text', ''),
-                'violation_reason': entry.get('violation_reason', ''),
-                'suggestion': entry.get('suggestion', '')
+                'violation_text': v.get('violation_text', ''),
+                'violation_reason': v.get('violation_reason', ''),
+                'fix_action': v.get('fix_action', 'manual'),
+                'revised_text': v.get('revised_text', '')
             })
 
             category_counts[category] += 1
@@ -184,8 +142,8 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
                     rules[rule_id] = {
                         'id': rule_id,
                         'category': category,
-                        'severity': entry.get('severity', 'medium'),
-                        'description': entry.get('rule_description', '')
+                        'severity': v.get('severity', 'medium'),
+                        'description': v.get('rule_description', '')
                     }
 
     return {
@@ -251,7 +209,7 @@ def generate_excel_report(data: dict, output_path: str) -> None:
         "违规原因",       # Violation Reason
         "操作建议",       # Operation Suggestion (fix_action)
         "违规原文",       # Violation Original Text
-        "订正或建议"      # Correction or Suggestion (revised_text/suggestion)
+        "订正或建议"      # Correction (revised_text)
     ]
 
     # Header styling
@@ -278,8 +236,7 @@ def generate_excel_report(data: dict, output_path: str) -> None:
 
     # Write violation data
     for row_idx, violation in enumerate(data['violations'], 2):
-        # Get the correction/suggestion (prefer revised_text, fallback to suggestion)
-        correction = violation.get('revised_text', '') or violation.get('suggestion', '')
+        correction = violation.get('revised_text', '')
 
         row_data = [
             row_idx - 1,                              # 序号 (1-based index)
