@@ -853,6 +853,35 @@ def save_manifest_entry(manifest_path: str, entry: dict):
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
+def iter_manifest_entries(manifest_path: str, ignore_errors: bool = False):
+    """
+    Iterate over JSONL entries in a manifest file with optional error tolerance.
+
+    Args:
+        manifest_path: Path to manifest JSONL file
+        ignore_errors: If True, skip malformed JSON lines with a warning
+    """
+    path = Path(manifest_path)
+    if not path.exists():
+        return
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for lineno, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as e:
+                if ignore_errors:
+                    print(
+                        f"Warning: Skipping malformed JSONL line {lineno} in {manifest_path}: {e}",
+                        file=sys.stderr
+                    )
+                    continue
+                raise
+
+
 def load_completed_uuids(manifest_path: str) -> set:
     """
     Load UUIDs of already-processed blocks from manifest.
@@ -864,17 +893,31 @@ def load_completed_uuids(manifest_path: str) -> set:
         Set of completed UUIDs
     """
     completed = set()
-    path = Path(manifest_path)
-
-    if path.exists():
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    entry = json.loads(line)
-                    completed.add(entry.get('uuid', ''))
+    for entry in iter_manifest_entries(manifest_path, ignore_errors=True):
+        # Skip metadata entries
+        if 'audited_at' in entry or entry.get('type') == 'meta':
+            continue
+        uuid = entry.get('uuid', '')
+        if uuid:
+            completed.add(uuid)
 
     return completed
+
+
+def load_manifest_metadata(manifest_path: str):
+    """
+    Load metadata entry from a manifest JSONL file if present.
+
+    Args:
+        manifest_path: Path to manifest JSONL file
+
+    Returns:
+        Metadata entry dict or None
+    """
+    for entry in iter_manifest_entries(manifest_path, ignore_errors=True):
+        if 'audited_at' in entry or entry.get('type') == 'meta':
+            return entry
+    return None
 
 
 def load_existing_entries_with_block_idx(manifest_path: str, uuid_to_block_idx: dict) -> list:
@@ -894,26 +937,24 @@ def load_existing_entries_with_block_idx(manifest_path: str, uuid_to_block_idx: 
     
     if not path.exists():
         return entries
-    
-    with open(path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entry = json.loads(line)
-                # Skip metadata entry
-                if 'audited_at' in entry or entry.get('type') == 'meta':
-                    continue
-                
-                # Look up block_idx from uuid
-                uuid = entry.get('uuid', '')
-                block_idx = uuid_to_block_idx.get(uuid, -1)
-                
-                if block_idx >= 0:
-                    entries.append((block_idx, entry))
-                else:
-                    # UUID not found in blocks - might be from different document
-                    print(f"Warning: UUID {uuid} not found in blocks, skipping", 
-                          file=sys.stderr)
+
+    for entry in iter_manifest_entries(manifest_path, ignore_errors=True):
+        # Skip metadata entry
+        if 'audited_at' in entry or entry.get('type') == 'meta':
+            continue
+
+        # Look up block_idx from uuid
+        uuid = entry.get('uuid', '')
+        if not uuid:
+            continue
+        block_idx = uuid_to_block_idx.get(uuid, -1)
+
+        if block_idx >= 0:
+            entries.append((block_idx, entry))
+        else:
+            # UUID not found in blocks - might be from different document
+            print(f"Warning: UUID {uuid} not found in blocks, skipping",
+                  file=sys.stderr)
     
     return entries
 
@@ -1374,9 +1415,54 @@ def main():
 
     # Handle resume
     completed_uuids = set()
-    if args.resume and Path(args.output).exists():
-        completed_uuids = load_completed_uuids(args.output)
-        print(f"Resuming: {len(completed_uuids)} blocks already processed")
+    output_path = Path(args.output)
+    backup_path = Path(str(args.output) + '.bak')
+    if args.resume:
+        if output_path.exists():
+            completed_uuids = load_completed_uuids(output_path)
+            print(f"Resuming: {len(completed_uuids)} blocks already processed")
+        elif backup_path.exists():
+            print(f"Resume requested but output missing; found backup: {backup_path}")
+            completed_uuids = load_completed_uuids(backup_path)
+
+            start_idx = args.start_block
+            end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
+            blocks_to_process = blocks[start_idx:end_idx + 1]
+            target_uuids = {
+                block.get('uuid', str(start_idx + i))
+                for i, block in enumerate(blocks_to_process)
+            }
+
+            if target_uuids and target_uuids.issubset(completed_uuids):
+                print("Backup appears complete for the requested range. Restoring sorted manifest and exiting.")
+                uuid_to_block_idx = {
+                    block.get('uuid', str(idx)): idx for idx, block in enumerate(blocks)
+                }
+                existing_entries = load_existing_entries_with_block_idx(backup_path, uuid_to_block_idx)
+                manifest_metadata = load_manifest_metadata(backup_path)
+                rewrite_manifest_sorted(args.output, manifest_metadata, existing_entries)
+                # Clean up backup after successful restore
+                if backup_path.exists():
+                    backup_path.unlink()
+                    print(f"Cleaned up backup file: {backup_path}")
+                print(f"Manifest restored from backup: {args.output}")
+                return
+
+            print("Backup is incomplete for the requested range. Continuing resume from backup.")
+            try:
+                backup_path.rename(output_path)
+            except OSError as e:
+                print(f"Warning: Could not rename backup to output ({e}); copying instead.", file=sys.stderr)
+                with open(backup_path, 'r', encoding='utf-8') as src, \
+                        open(output_path, 'w', encoding='utf-8') as dst:
+                    dst.write(src.read())
+                # Clean up backup after successful copy
+                if backup_path.exists():
+                    backup_path.unlink()
+            completed_uuids = load_completed_uuids(output_path)
+            print(f"Resuming: {len(completed_uuids)} blocks already processed")
+        else:
+            print("Resume requested but no existing output or backup found; starting fresh.")
     else:
         # Write metadata as first line for new manifest
         if metadata:
