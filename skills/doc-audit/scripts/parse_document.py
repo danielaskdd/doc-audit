@@ -36,6 +36,7 @@ MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragra
 TABLE_IDEAL_LENGTH = 3000  # Ideal target size for table chunks
 TABLE_MAX_LENGTH = 5000    # Maximum table size before splitting (triggers table splitting)
 TABLE_MIN_LAST_CHUNK_LENGTH = 1000  # Minimum last chunk size (merge with previous if smaller)
+TABLE_CHUNK_SUFFIX_LABEL = "表格片段"  # Label prefix for split table chunk headings
 
 
 def print_error(title: str, details: str, solution: str):
@@ -351,7 +352,7 @@ def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: lis
             if chunk['suffix_number'] is None:
                 chunk_heading = current_heading
             else:
-                chunk_heading = f"{current_heading} [{chunk['suffix_number']}]"
+                chunk_heading = f"{current_heading} [{TABLE_CHUNK_SUFFIX_LABEL}{chunk['suffix_number']}]"
             print(f"  Chunk {i+1}: heading=\"{chunk_heading}\", {len(chunk['rows'])} rows, {len(chunk_json)} chars", file=sys.stderr)
     
     return chunks
@@ -1034,7 +1035,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                         
                         # Generate heading using suffix_number from chunk
                         if chunk['suffix_number'] is not None:
-                            chunk_heading = f"{current_heading} [{chunk['suffix_number']}]"
+                            chunk_heading = f"{current_heading} [{TABLE_CHUNK_SUFFIX_LABEL}{chunk['suffix_number']}]"
                         else:
                             chunk_heading = current_heading
                         
