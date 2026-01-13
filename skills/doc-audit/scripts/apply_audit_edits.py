@@ -67,7 +67,6 @@ class EditItem:
     category: str                # Category
     rule_id: str                 # Rule ID
     heading: str = ''            # Violation heading/title
-    content: str = ''            # Original paragraph content
 
 @dataclass
 class EditResult:
@@ -203,7 +202,6 @@ class AuditEditApplier:
                     # Extract common fields for this paragraph
                     uuid = data.get('uuid', '')
                     heading = data.get('p_heading', '')  # Map from p_heading
-                    content = data.get('p_content', '')  # Map from p_content
                     
                     # Flatten violations array into separate EditItems
                     for v in violations:
@@ -226,8 +224,7 @@ class AuditEditApplier:
                             revised_text=v.get('revised_text', ''),
                             category=v.get('category', ''),
                             rule_id=v.get('rule_id', ''),
-                            heading=heading,
-                            content=content
+                            heading=heading
                         ))
                 else:
                     # Flat format (existing format for backward compatibility)
@@ -250,8 +247,7 @@ class AuditEditApplier:
                         revised_text=data.get('revised_text', ''),
                         category=data.get('category', ''),
                         rule_id=data.get('rule_id', ''),
-                        heading=data.get('heading', ''),
-                        content=data.get('content', '')
+                        heading=data.get('heading', '')
                     ))
         
         if not meta:
@@ -1377,6 +1373,7 @@ class AuditEditApplier:
             f.write('\n')
             
             # Write failed items with error information (matching HTML export field order)
+            # Note: content field removed - not needed for apply_audit_edits.py processing
             for result in failed_results:
                 item = result.item
                 data = {
@@ -1389,7 +1386,6 @@ class AuditEditApplier:
                     'uuid': item.uuid,
                     'uuid_end': item.uuid_end,  # Required for retry
                     'heading': item.heading,
-                    'content': item.content,
                     '_error': result.error_message  # Add error info for debugging
                 }
                 json.dump(data, f, ensure_ascii=False)

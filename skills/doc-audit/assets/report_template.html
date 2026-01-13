@@ -934,6 +934,7 @@
                 }
                 // Export with specified field order
                 // uuid_end is required by apply_audit_edits.py for range-restricted search
+                // Note: content field is intentionally omitted (not needed for apply_audit_edits.py)
                 const orderedViolation = {
                     category: v.category,
                     fix_action: v.fix_action,
@@ -943,8 +944,7 @@
                     rule_id: v.rule_id,
                     uuid: v.uuid,
                     uuid_end: v.uuid_end,
-                    heading: v.heading,
-                    content: v.content
+                    heading: v.heading
                 };
                 exportData.push(JSON.stringify(orderedViolation));
             });
