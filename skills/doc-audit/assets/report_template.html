@@ -393,6 +393,33 @@
             border-color: var(--primary);
         }
 
+        .source-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .source-row label {
+            display: inline;
+            margin-bottom: 0;
+        }
+
+        .source-id-link {
+            display: inline;
+            font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            color: var(--primary);
+            text-decoration: underline;
+            text-decoration-style: dotted;
+        }
+
+        .source-id-link:hover {
+            color: var(--primary-light);
+            text-decoration-style: solid;
+        }
+
         .violation-text {
             background: #fef2f2;
             padding: 1rem;
@@ -710,9 +737,8 @@
                         </div>
                     </div>
 
-                    <div class="issue-content">
-                        <label>原文内容</label>
-                        <div class="source-text" onclick="toggleExpand(this)">{{ v.content }}</div>
+                    <div class="issue-content source-row">
+                        <label>原文内容：</label><span class="source-id-link" onclick="showSourceModal('{{ v.source_id }}')">📄 ID {{ v.uuid[:8] }} - {{ v.uuid_end[-8:] }}</span>
                     </div>
 
                     {% if v.violation_text %}
@@ -782,12 +808,30 @@
         </div>
     </div>
 
+    <!-- Source Content Modal -->
+    <div class="modal-overlay" id="sourceModal" onclick="closeSourceModal(event)">
+        <div class="modal-content" style="max-width: 800px; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;" onclick="event.stopPropagation()">
+            <div class="modal-header" style="flex-shrink: 0;">
+                <div class="modal-title">
+                    <span style="font-size: 1.25rem; font-weight: 700; color: var(--primary);">📄 原文内容</span>
+                    <span id="source-modal-id" style="font-family: 'SF Mono', monospace; font-size: 0.7rem; color: var(--gray-400); margin-left: 0.5rem;"></span>
+                </div>
+                <button class="modal-close" onclick="closeSourceModal()">&times;</button>
+            </div>
+            <div class="modal-body" style="flex: 1; padding: 1.5rem; overflow: hidden; min-height: 0;">
+                <div class="source-text expanded" id="source-modal-content" style="max-height: calc(80vh - 120px); overflow-y: auto; cursor: default;"></div>
+                <style>#source-modal-content::after { display: none; }</style>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Data from Python
         const RULES = {{ rules | tojson }};
         const SOURCE_FILE = {{ source_file | tojson }};
         const SOURCE_HASH = {{ source_hash | tojson }};
         const VIOLATIONS = {{ violations | tojson }};
+        const SOURCE_CONTENTS = {{ source_contents | tojson }};
         
         let currentCategoryFilter = 'all';
         let currentStatusFilter = 'all';
@@ -1016,9 +1060,29 @@
             }
         }
 
+        function showSourceModal(sourceId) {
+            const content = SOURCE_CONTENTS[sourceId];
+            if (content === undefined) {
+                console.error('Source content not found:', sourceId);
+                return;
+            }
+
+            document.getElementById('source-modal-id').textContent = sourceId;
+            document.getElementById('source-modal-content').textContent = content;
+
+            document.getElementById('sourceModal').classList.add('active');
+        }
+
+        function closeSourceModal(event) {
+            if (!event || event.target.id === 'sourceModal' || event.target.classList.contains('modal-close')) {
+                document.getElementById('sourceModal').classList.remove('active');
+            }
+        }
+
         document.addEventListener('keydown', function(event) {
             if (event.key === 'Escape') {
                 closeModal();
+                closeSourceModal();
             }
         });
 

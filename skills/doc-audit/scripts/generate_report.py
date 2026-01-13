@@ -5,13 +5,11 @@ ABOUTME: Includes statistics, issue details, and source tracing
 """
 
 import argparse
-import html
 import json
 import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 try:
     from jinja2 import Environment
@@ -94,6 +92,8 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
     violations = []
     category_counts = Counter()
     rules = {}
+    # Store unique source contents with source_id as key (uuid|uuid_end)
+    source_contents = {}
 
     if rules_file_dict is None:
         rules_file_dict = {}
@@ -109,11 +109,20 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
                 category = v.get('category', 'other')
                 rule_id = v.get('rule_id', '')
 
+                uuid_start = entry.get('uuid', '')
+                uuid_end = v.get('uuid_end', entry.get('uuid_end', ''))
+                source_id = f"{uuid_start}|{uuid_end}"
+                content = entry.get('p_content', '')
+
+                # Store source content only once per unique source_id
+                if source_id not in source_contents:
+                    source_contents[source_id] = content
+
                 violations.append({
-                    'uuid': entry.get('uuid', ''),
-                    'uuid_end': v.get('uuid_end', entry.get('uuid_end', '')),  # Required for apply_audit_edits.py
+                    'uuid': uuid_start,
+                    'uuid_end': uuid_end,  # Required for apply_audit_edits.py
+                    'source_id': source_id,  # Reference to source_contents
                     'heading': entry.get('p_heading', ''),
-                    'content': entry.get('p_content', ''),
                     'category': category,
                     'rule_id': rule_id,
                     'violation_text': v.get('violation_text', ''),
@@ -142,10 +151,20 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
             category = entry.get('category', entry.get('issue_type', 'other'))
             rule_id = entry.get('rule_id', '')
 
+            uuid_start = entry.get('uuid', '')
+            uuid_end = entry.get('uuid_end', '')
+            source_id = f"{uuid_start} | {uuid_end}"
+            content = entry.get('p_content', '')
+
+            # Store source content only once per unique source_id
+            if source_id not in source_contents:
+                source_contents[source_id] = content
+
             violations.append({
-                'uuid': entry.get('uuid', ''),
+                'uuid': uuid_start,
+                'uuid_end': uuid_end,
+                'source_id': source_id,  # Reference to source_contents
                 'heading': entry.get('p_heading', ''),
-                'content': entry.get('p_content', ''),
                 'category': category,
                 'rule_id': rule_id,
                 'violation_text': entry.get('violation_text', ''),
@@ -176,13 +195,14 @@ def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
         'violations': violations,
         'category_counts': dict(category_counts),
         'max_category_count': max(category_counts.values()) if category_counts else 0,
-        'rules': rules
+        'rules': rules,
+        'source_contents': source_contents  # Deduplicated source texts
     }
 
 
-def render_report(data: dict, template_path: Optional[str] = None, trusted_html: bool = False) -> str:
+def render_report(data: dict, template_path: str, trusted_html: bool = False) -> str:
     """
-    Render HTML report from data.
+    Render HTML report from data using Jinja2 template.
 
     Args:
         data: Report data dictionary
@@ -192,11 +212,6 @@ def render_report(data: dict, template_path: Optional[str] = None, trusted_html:
     Returns:
         Rendered HTML string
     """
-    if Environment is None:
-        # Fallback without Jinja2
-        return render_report_simple(data, trusted_html=trusted_html)
-
-    # Load template (required)
     if not template_path:
         raise ValueError("Template path is required.")
     template_file = Path(template_path)
@@ -207,61 +222,6 @@ def render_report(data: dict, template_path: Optional[str] = None, trusted_html:
     env = Environment(autoescape=not trusted_html)
     template = env.from_string(template_str)
     return template.render(**data)
-
-
-def render_report_simple(data: dict, trusted_html: bool = False) -> str:
-    """
-    Render a simple HTML report without Jinja2.
-
-    Args:
-        data: Report data dictionary
-
-    Returns:
-        Rendered HTML string
-    """
-    def maybe_escape(value: str) -> str:
-        if trusted_html:
-            return value
-        return html.escape(value, quote=True)
-
-    violations_html = ""
-    for v in data['violations']:
-        heading = maybe_escape(str(v['heading']))
-        category = maybe_escape(str(v['category']))
-        violation_reason = maybe_escape(str(v['violation_reason']))
-        content = maybe_escape(str(v['content'])[:200])
-        suggestion = maybe_escape(str(v['suggestion']))
-        violations_html += f"""
-        <div style="border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-left: 4px solid #2563eb;">
-            <h4>{heading}</h4>
-            <p><strong>Category:</strong> {category}</p>
-            <p><strong>Reason:</strong> {violation_reason}</p>
-            <p><strong>Source:</strong> {content}...</p>
-            {f"<p><strong>Suggestion:</strong> {suggestion}</p>" if v['suggestion'] else ""}
-        </div>
-        """
-
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>Document Audit Report</title>
-    <style>
-        body {{ font-family: sans-serif; padding: 20px; }}
-        h1 {{ color: #333; }}
-        .stat {{ display: inline-block; margin: 10px; padding: 10px 20px; background: #f5f5f5; }}
-    </style>
-</head>
-<body>
-    <h1>Document Audit Report</h1>
-    <p>Generated: {data['generated_at']}</p>
-    <div>
-        <div class="stat">Total Blocks: {data['total_blocks']}</div>
-        <div class="stat">Issues Found: {data['violation_count']}</div>
-    </div>
-    <h2>Issues</h2>
-    {violations_html if violations_html else "<p>No issues found.</p>"}
-</body>
-</html>"""
 
 
 def generate_excel_report(data: dict, output_path: str) -> None:
