@@ -94,17 +94,18 @@ This creates:
    - Headings longer than 200 characters will be truncated with a warning
 
 4. **Avoid excessively long sections** under a single heading
-   - Ideal: ≤5,000 characters per section
-   - Maximum: 8,000 characters (hard limit)
-   - If content exceeds 8,000 chars, the script attempts to split at short paragraphs (≤100 chars)
+   - Ideal: ≤5,000 tokens per section
+   - Maximum: 8,000 tokens (hard limit)
+   - If content exceeds 8,000 tokens, the script attempts to split at short paragraphs (≤100 chars)
    - **Solution**: Add sub-headings to break up long sections
+   - **Note**: Token estimation uses ~0.7 tokens/Chinese char, ~0.35 tokens/English char
 
 5. **Include short paragraphs** (≤100 characters) in long sections
    - These serve as natural split points when automatic splitting is needed
    - Examples: "概述", "背景说明", "详细内容", "示例" etc.
 
 6. **Keep tables manageable** in size
-   - Tables exceeding ~5,000 characters (JSON representation) will be automatically split
+   - Tables exceeding ~5,000 tokens (JSON representation) will be automatically split
    - For large tables, enable **Repeat Header Rows** in Word:
      - Select header row(s) → Table Tools → Layout → Repeat Header Rows
      - This sets `w:tblHeader` attribute, allowing split table chunks to include headers

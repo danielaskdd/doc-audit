@@ -7,6 +7,7 @@ ABOUTME: Extracts automatic numbering, splits by headings, converts tables to JS
 import argparse
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,18 +26,57 @@ except ImportError:
     sys.exit(1)
 
 
-# Constants for content validation
-MAX_HEADING_LENGTH = 200      # Maximum heading length in characters
-IDEAL_BLOCK_CONTENT_LENGTH = 5000  # Ideal target size for balanced splitting
-MAX_BLOCK_CONTENT_LENGTH = 8000  # Maximum block content length in characters (hard limit)
-MIN_BLOCK_CONTENT_LENGTH = 500  # Minimum block content length (triggers merging)
-MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs
+# Constants for content validation (character-based for UI/display)
+MAX_HEADING_LENGTH = 200      # Maximum heading length in characters (UI constraint)
+MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs (characters)
 
-# Constants for table splitting
-TABLE_IDEAL_LENGTH = 3000  # Ideal target size for table chunks
-TABLE_MAX_LENGTH = 5000    # Maximum table size before splitting (triggers table splitting)
-TABLE_MIN_LAST_CHUNK_LENGTH = 1000  # Minimum last chunk size (merge with previous if smaller)
+# Constants for content splitting (token-based for LLM context management)
+# Token estimation: Chinese ~0.7 tokens/char, English ~0.35 tokens/char
+IDEAL_BLOCK_CONTENT_TOKENS = 5000  # Ideal target size for balanced splitting (tokens)
+MAX_BLOCK_CONTENT_TOKENS = 8000    # Maximum block content (tokens, hard limit)
+MIN_BLOCK_CONTENT_TOKENS = 500     # Minimum block content (tokens, triggers merging)
+
+# Constants for table splitting (token-based)
+TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
+TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens)
+TABLE_MIN_LAST_CHUNK_TOKENS = 1000  # Minimum last chunk size (tokens, merge with previous if smaller)
 TABLE_CHUNK_SUFFIX_LABEL = "表格片段"  # Label prefix for split table chunk headings
+
+
+def estimate_tokens(text: str) -> int:
+    """
+    Estimate token count for LLM context management.
+    
+    Uses a weighted formula based on character types:
+    - Chinese characters: ~0.7 tokens per character (subword tokenization)
+    - Other characters (English, numbers, symbols): ~0.35 tokens per character (~3 chars/token)
+    
+    Includes 5% buffer and safety offset for special formatting and system prompt overhead.
+    
+    Args:
+        text: Input text to estimate tokens for
+        
+    Returns:
+        int: Estimated token count
+    """
+    if not text:
+        return 0
+    
+    # Count Chinese characters (CJK Unified Ideographs range)
+    chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
+    
+    # Count other characters (English, numbers, symbols, whitespace)
+    other_count = len(text) - chinese_count
+    
+    # Weighted estimation based on modern tokenizer characteristics
+    # Chinese coefficient: 0.7 (typical for GPT-4o/DeepSeek/Llama3)
+    # English coefficient: 0.35 (~3 characters per token)
+    base_estimate = (chinese_count * 0.7) + (other_count * 0.35)
+    
+    # Add 5% buffer + safety offset for formatting overhead
+    final_tokens = int(base_estimate * 1.05) + 2
+    
+    return final_tokens
 
 
 def print_error(title: str, details: str, solution: str):
@@ -105,23 +145,24 @@ def validate_heading_length(heading_text: str, para_id: str):
         sys.exit(1)
 
 
-def validate_table_length(table_json: str, block_heading: str):
+def validate_table_tokens(table_json: str, block_heading: str):
     """
-    Validate that table JSON does not exceed MAX_BLOCK_CONTENT_LENGTH.
+    Validate that table JSON does not exceed MAX_BLOCK_CONTENT_TOKENS.
     
     Args:
         table_json: The JSON representation of the table
         block_heading: The heading of the block containing this table
         
     Exits:
-        sys.exit(1) if table exceeds maximum length
+        sys.exit(1) if table exceeds maximum token limit
     """
-    if len(table_json) > MAX_BLOCK_CONTENT_LENGTH:
+    table_tokens = estimate_tokens(table_json)
+    if table_tokens > MAX_BLOCK_CONTENT_TOKENS:
         print_error(
-            f"Table too large ({len(table_json)} characters, max {MAX_BLOCK_CONTENT_LENGTH})",
+            f"Table too large (~{table_tokens} tokens, max {MAX_BLOCK_CONTENT_TOKENS})",
             f"A table in the document is too large for LLM processing.\n\n"
             f"Location: Under heading \"{block_heading}\"\n"
-            f"Table size: {len(table_json)} characters\n\n"
+            f"Table size: ~{table_tokens} tokens ({len(table_json)} characters)\n\n"
             "Large tables can cause issues with automated auditing.",
             "  1. Open the document in Microsoft Word\n"
             f"  2. Locate the table under heading \"{block_heading}\"\n"
@@ -187,10 +228,10 @@ def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_ind
     Split large table into chunks at row boundaries.
     
     Splitting Strategy:
-    1. Only split if table JSON exceeds TABLE_MAX_LENGTH (5000 chars)
-    2. Calculate target chunks based on TABLE_IDEAL_LENGTH (3000 chars)
+    1. Only split if table JSON exceeds TABLE_MAX_TOKENS (5000 tokens)
+    2. Calculate target chunks based on TABLE_IDEAL_TOKENS (3000 tokens)
     3. Split at row boundaries to achieve balanced chunk sizes
-    4. Avoid very small last chunk: if last chunk < 1000 chars, merge with previous
+    4. Avoid very small last chunk: if last chunk < 1000 tokens, merge with previous
     5. Extract first valid paraId for each chunk as UUID
     
     Output Strategy:
@@ -218,11 +259,11 @@ def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_ind
     """
     import math
     
-    # Calculate total JSON length
+    # Calculate total JSON token count
     total_json = json.dumps(table_rows, ensure_ascii=False)
-    total_length = len(total_json)
+    total_tokens = estimate_tokens(total_json)
     
-    if total_length <= TABLE_MAX_LENGTH:
+    if total_tokens <= TABLE_MAX_TOKENS:
         # No splitting needed
         uuid = find_first_valid_para_id(para_ids)
         return [{
@@ -235,8 +276,8 @@ def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_ind
         }]
     
     # Need to split - calculate target number of chunks
-    target_chunks = math.ceil(total_length / TABLE_IDEAL_LENGTH)
-    min_chunks_needed = math.ceil(total_length / TABLE_MAX_LENGTH)
+    target_chunks = math.ceil(total_tokens / TABLE_IDEAL_TOKENS)
+    min_chunks_needed = math.ceil(total_tokens / TABLE_MAX_TOKENS)
     target_chunks = max(target_chunks, min_chunks_needed)
     
     # Split at row boundaries
@@ -284,17 +325,19 @@ def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_ind
     if len(chunks) >= 2:
         last_chunk = chunks[-1]
         last_chunk_json = json.dumps(last_chunk['rows'], ensure_ascii=False)
+        last_chunk_tokens = estimate_tokens(last_chunk_json)
         
-        if len(last_chunk_json) < TABLE_MIN_LAST_CHUNK_LENGTH:
+        if last_chunk_tokens < TABLE_MIN_LAST_CHUNK_TOKENS:
             # Try to merge with previous chunk
             prev_chunk = chunks[-2]
             
             # Calculate combined size
             combined_rows = prev_chunk['rows'] + last_chunk['rows']
             combined_json = json.dumps(combined_rows, ensure_ascii=False)
+            combined_tokens = estimate_tokens(combined_json)
             
             # Only merge if combined size doesn't exceed max limit
-            if len(combined_json) <= TABLE_MAX_LENGTH:
+            if combined_tokens <= TABLE_MAX_TOKENS:
                 # Merge the chunks
                 merged_para_ids = prev_chunk['para_ids'] + last_chunk['para_ids']
                 merged_para_ids_end = prev_chunk['para_ids_end'] + last_chunk['para_ids_end']
@@ -309,8 +352,8 @@ def split_table(table_rows: list, para_ids: list, para_ids_end: list, header_ind
                 chunks.pop()  # Remove the last chunk
                 
                 if debug:
-                    print(f"[DEBUG] Merged small last chunk ({len(last_chunk_json)} chars) with previous chunk", file=sys.stderr)
-                    print(f"  Combined size: {len(combined_json)} chars", file=sys.stderr)
+                    print(f"[DEBUG] Merged small last chunk (~{last_chunk_tokens} tokens) with previous chunk", file=sys.stderr)
+                    print(f"  Combined size: ~{combined_tokens} tokens", file=sys.stderr)
     
     return chunks
 
@@ -360,12 +403,12 @@ def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: lis
 
 def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     """
-    Merge blocks that are smaller than MIN_BLOCK_CONTENT_LENGTH with adjacent blocks.
+    Merge blocks that are smaller than MIN_BLOCK_CONTENT_TOKENS with adjacent blocks.
     
     Strategy:
-    1. Identify blocks smaller than MIN_BLOCK_CONTENT_LENGTH
+    1. Identify blocks smaller than MIN_BLOCK_CONTENT_TOKENS
     2. Try to merge with next block (small block's heading becomes next block's heading)
-    3. If merging with next block would exceed MAX_BLOCK_CONTENT_LENGTH, try previous block
+    3. If merging with next block would exceed MAX_BLOCK_CONTENT_TOKENS, try previous block
     4. Only keep small block separate if both merge directions exceed limit
     
     Args:
@@ -384,23 +427,23 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     
     while i < len(blocks):
         current_block = blocks[i]
-        current_length = len(current_block['content'])
+        current_tokens = estimate_tokens(current_block['content'])
         
         # Check if current block is too small and needs merging
-        if current_length < MIN_BLOCK_CONTENT_LENGTH and current_length > 0:
+        if current_tokens < MIN_BLOCK_CONTENT_TOKENS and current_tokens > 0:
             merged = False
             
             # Try merging with next block first
             if i + 1 < len(blocks):
                 next_block = blocks[i + 1]
-                next_length = len(next_block['content'])
-                combined_length = current_length + next_length + 1  # +1 for newline
+                # Estimate combined token count
+                merged_content = current_block['content'] + "\n" + next_block['content']
+                combined_tokens = estimate_tokens(merged_content)
                 
-                if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
+                if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
                     # Merge current into next block
                     # Current block's heading becomes the new heading
                     # UUID range: current's uuid to next's uuid_end
-                    merged_content = current_block['content'] + "\n" + next_block['content']
                     merged_block = {
                         "uuid": current_block['uuid'],  # Use current block's UUID
                         "uuid_end": next_block.get('uuid_end', next_block['uuid']),  # Use next block's end UUID
@@ -419,14 +462,14 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
             # If can't merge with next, try merging with previous
             if not merged and len(merged_blocks) > 0:
                 prev_block = merged_blocks[-1]
-                prev_length = len(prev_block['content'])
-                combined_length = prev_length + current_length + 1  # +1 for newline
+                # Estimate combined token count
+                merged_content = prev_block['content'] + "\n" + current_block['content']
+                combined_tokens = estimate_tokens(merged_content)
                 
-                if combined_length <= MAX_BLOCK_CONTENT_LENGTH:
+                if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
                     # Merge current into previous block
                     # Previous block remains the heading
                     # UUID range: prev's uuid to current's uuid_end
-                    merged_content = prev_block['content'] + "\n" + current_block['content']
                     merged_blocks[-1] = {
                         "uuid": prev_block['uuid'],  # Keep previous UUID
                         "uuid_end": current_block.get('uuid_end', current_block['uuid']),  # Use current block's end UUID
@@ -458,9 +501,9 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     Split a long text block into smaller blocks using anchor paragraphs.
     
     Strategy (improved for balanced splitting):
-    1. Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_LENGTH
-    2. Ensure minimum blocks needed to stay under MAX_BLOCK_CONTENT_LENGTH
-    3. Find all candidate anchor paragraphs (<= MAX_ANCHOR_CANDIDATE_LENGTH)
+    1. Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_TOKENS
+    2. Ensure minimum blocks needed to stay under MAX_BLOCK_CONTENT_TOKENS
+    3. Find all candidate anchor paragraphs (<= MAX_ANCHOR_CANDIDATE_LENGTH chars)
     4. Select anchors closest to ideal split positions for balanced distribution
     5. Create blocks using selected anchors as new headings
     
@@ -487,11 +530,11 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         effective_heading = paragraphs[0]['_chunk_heading']
         table_header = paragraphs[0].get('_table_header')
     
-    # Calculate total content length
+    # Calculate total content token count
     total_content = "\n".join(p['text'] for p in paragraphs)
-    total_length = len(total_content)
+    total_tokens = estimate_tokens(total_content)
     
-    if total_length <= MAX_BLOCK_CONTENT_LENGTH:
+    if total_tokens <= MAX_BLOCK_CONTENT_TOKENS:
         # Within limit, return as single block
         # Use first paragraph's para_id as UUID
         # For uuid_end: use para_id_end if last element is a table, otherwise para_id
@@ -514,38 +557,39 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         return [block]
     
     # Content exceeds limit, need to split
-    # Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_LENGTH
-    target_blocks = math.ceil(total_length / IDEAL_BLOCK_CONTENT_LENGTH)
+    # Calculate target number of blocks based on IDEAL_BLOCK_CONTENT_TOKENS
+    target_blocks = math.ceil(total_tokens / IDEAL_BLOCK_CONTENT_TOKENS)
     
-    # Ensure we have enough blocks to stay under MAX_BLOCK_CONTENT_LENGTH
-    min_blocks_needed = math.ceil(total_length / MAX_BLOCK_CONTENT_LENGTH)
+    # Ensure we have enough blocks to stay under MAX_BLOCK_CONTENT_TOKENS
+    min_blocks_needed = math.ceil(total_tokens / MAX_BLOCK_CONTENT_TOKENS)
     target_blocks = max(target_blocks, min_blocks_needed)
     
-    # Calculate ideal size per block
-    target_size = total_length / target_blocks
+    # Calculate ideal token size per block
+    target_size = total_tokens / target_blocks
     
     # Find candidate anchors (short paragraphs, excluding tables and empty placeholders)
+    # Use character length for anchor candidate selection (UI/readability constraint)
     candidates = []
-    cumulative_length = 0
+    cumulative_tokens = 0
     for idx, para in enumerate(paragraphs):
         if not para.get('is_table', False) and 0 < len(para['text']) <= MAX_ANCHOR_CANDIDATE_LENGTH:
             candidates.append({
                 'index': idx,
                 'text': para['text'],
                 'para_id': para['para_id'],
-                'position': cumulative_length
+                'position': cumulative_tokens
             })
-        cumulative_length += len(para['text']) + 1  # +1 for newline
+        cumulative_tokens += estimate_tokens(para['text'])
     
     if not candidates:
         # No suitable anchor found
         preview = block_heading[:80] + "..." if len(block_heading) > 80 else block_heading
         print_error(
             f"Cannot split long block (no suitable anchor paragraphs found)",
-            f"A text block is too long ({total_length} characters, max {MAX_BLOCK_CONTENT_LENGTH})\n"
+            f"A text block is too long (~{total_tokens} tokens, max {MAX_BLOCK_CONTENT_TOKENS})\n"
             f"but no paragraphs <= {MAX_ANCHOR_CANDIDATE_LENGTH} characters were found to use as split points.\n\n"
             f"Location: Under heading \"{preview}\"\n"
-            f"Block size: {total_length} characters\n"
+            f"Block size: ~{total_tokens} tokens ({len(total_content)} characters)\n"
             f"Number of paragraphs: {len(paragraphs)}\n"
             f"Calculated target blocks: {target_blocks}",
             "  1. Open the document in Microsoft Word\n"
@@ -564,7 +608,7 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
         if not remaining_candidates:
             break
         
-        # Calculate ideal position for this split
+        # Calculate ideal position for this split (in tokens)
         ideal_position = i * target_size
         
         # Find candidate closest to ideal position
@@ -629,11 +673,12 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
             "_paragraphs": final_paragraphs  # Keep original paragraphs for potential re-splitting
         })
     
-    # Post-split validation: Check if any block still exceeds MAX_BLOCK_CONTENT_LENGTH
+    # Post-split validation: Check if any block still exceeds MAX_BLOCK_CONTENT_TOKENS
     # If so, recursively split that block (handles sparse anchor scenarios)
     validated_blocks = []
     for block in result_blocks:
-        if len(block['content']) > MAX_BLOCK_CONTENT_LENGTH:
+        block_tokens = estimate_tokens(block['content'])
+        if block_tokens > MAX_BLOCK_CONTENT_TOKENS:
             # This block is still too large - need to recursively split it
             # Use the preserved paragraph structure
             block_paragraphs = block.get('_paragraphs', [])
@@ -643,9 +688,9 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
                 preview = block['heading'][:80] + "..." if len(block['heading']) > 80 else block['heading']
                 print_error(
                     f"Cannot re-split oversized block (internal error)",
-                    f"A block exceeded MAX_BLOCK_CONTENT_LENGTH but paragraph metadata was lost.\n\n"
+                    f"A block exceeded MAX_BLOCK_CONTENT_TOKENS but paragraph metadata was lost.\n\n"
                     f"Location: Under heading \"{preview}\"\n"
-                    f"Block size: {len(block['content'])} characters",
+                    f"Block size: ~{block_tokens} tokens ({len(block['content'])} characters)",
                     "This is an internal error. Please report this issue."
                 )
                 sys.exit(1)
@@ -670,9 +715,9 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     # Output debug information if enabled and split occurred (after merging)
     if debug and len(final_blocks) > 1:
         print(f"\n[DEBUG] Block split: \"{block_heading}\"", file=sys.stderr)
-        print(f"  Original length: {total_length} characters", file=sys.stderr)
-        final_block_lengths = [len(block['content']) for block in final_blocks]
-        print(f"  Final result: {len(final_blocks)} blocks: {final_block_lengths} characters", file=sys.stderr)
+        print(f"  Original size: ~{total_tokens} tokens ({len(total_content)} characters)", file=sys.stderr)
+        final_block_tokens = [estimate_tokens(block['content']) for block in final_blocks]
+        print(f"  Final result: {len(final_blocks)} blocks: ~{final_block_tokens} tokens", file=sys.stderr)
         if merge_count > 0:
             print(f"  ({merge_count} small block(s) merged)", file=sys.stderr)
     
@@ -997,11 +1042,12 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             para_ids_end = table_metadata['para_ids_end']  # Last paraId in each cell
             header_indices = table_metadata['header_indices']
             
-            # Convert table to JSON to check length
+            # Convert table to JSON and estimate token count
             table_json = json.dumps(table_rows, ensure_ascii=False)
+            table_tokens = estimate_tokens(table_json)
             
             # Check if table needs splitting
-            if len(table_json) > TABLE_MAX_LENGTH:
+            if table_tokens > TABLE_MAX_TOKENS:
                 # Table exceeds limit - split it
                 # Pass table_split_counter to ensure sequential numbering across multiple tables
                 table_chunks = split_table_with_heading(table_rows, para_ids, para_ids_end, header_indices, current_heading, table_split_counter, debug)
