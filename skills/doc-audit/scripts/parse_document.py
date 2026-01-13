@@ -907,7 +907,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     
     blocks = []
     current_heading = "Preface/Uncategorized"
-    current_heading_stack = []
+    current_heading_stack = {}  # {level: heading_text} - Use dict to correctly track heading hierarchy
     current_parent_headings = []  # Parent headings for current block
     current_paragraphs = []  # Track paragraphs with metadata for splitting
     has_body_content = False  # Track if current block has body content (non-heading paragraphs/tables)
@@ -998,12 +998,17 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 # (when current_paragraphs just had this heading added as its first element)
                 if len(current_paragraphs) == 1:
                     current_heading = truncated_text
-                    # Parent headings = all headings in stack before this heading (at higher levels)
-                    current_parent_headings = current_heading_stack[:max(level - 1, 0)]
+                    # Parent headings = all headings from levels strictly less than current level
+                    # Sort by level to maintain hierarchy order
+                    current_parent_headings = [
+                        current_heading_stack[lvl]
+                        for lvl in sorted(current_heading_stack.keys())
+                        if lvl < level
+                    ]
                 
-                # Update heading stack
-                current_heading_stack = current_heading_stack[:max(level - 1, 0)]
-                current_heading_stack.append(truncated_text)
+                # Update heading stack: remove current level and all lower levels, then add current
+                current_heading_stack = {k: v for k, v in current_heading_stack.items() if k < level}
+                current_heading_stack[level] = truncated_text
             else:
                 # Regular paragraph content
                 para_id = extract_para_id(element)
