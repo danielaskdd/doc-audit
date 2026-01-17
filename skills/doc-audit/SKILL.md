@@ -1,13 +1,13 @@
 ---
 name: doc-audit
-description: Intelligent document audit system for compliance review, legal or technical document verification, and engineering document validation using LLM
+description: Intelligent document audit system for syntax and semantic verification, legal or technical document compliance review using LLM (exclusive .docx support).
 type: active
 version: 1.0.0
 ---
 
 # Document Audit Skill
 
-**This is an ACTIVE skill** - Uses Python scripts with python-docx to parse DOCX documents and LLM to perform intelligent auditing.
+**This is an ACTIVE skill** - Uses Python scripts with python-docx to parse DOCX documents and LLM to perform intelligent auditing. Only supports .docx format (not .doc, .pdf, or other formats)
 
 ## When to Use This Skill
 
@@ -512,9 +512,3 @@ doc-audit/
 <browser_download_folder>/
 └── <docname>_audit_export.jsonl          # Exported control file (from HTML report)
 ```
-
-## Limitations
-
-- Only supports .docx format (not .doc, .pdf, or other formats)
-- Each text block is audited independently - no cross-reference validation
-- LLM quality depends on chosen model and rule clarity

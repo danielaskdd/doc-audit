@@ -4,6 +4,15 @@ This document provides detailed documentation for advanced tools that are typica
 
 > **Note:** All script examples below use `$DOC_AUDIT_SKILL_PATH` environment variable, which is automatically set by `source .claude-work/doc-audit/env.sh`. Always run `source .claude-work/doc-audit/env.sh` before executing any scripts.
 
+## Table of Contents
+
+1. [Parse Rules](#parse-rules)
+2. [Workflow Script](#workflow-script)
+3. [Parse Document](#parse-document)
+4. [Run Audit](#run-audit)
+5. [Generate Report](#generate-report)
+6. [Apply Audit Edits](#apply-audit-edits)
+
 ---
 
 ## Parse Rules
