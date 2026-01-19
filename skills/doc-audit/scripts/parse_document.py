@@ -32,14 +32,14 @@ MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragra
 
 # Constants for content splitting (token-based for LLM context management)
 # Token estimation: Chinese ~0.7 tokens/char, English ~0.35 tokens/char
-IDEAL_BLOCK_CONTENT_TOKENS = 5000  # Ideal target size for balanced splitting (tokens)
+IDEAL_BLOCK_CONTENT_TOKENS = 6000  # Ideal target size for balanced splitting (tokens)
 MAX_BLOCK_CONTENT_TOKENS = 8000    # Maximum block content (tokens, hard limit)
-MIN_BLOCK_CONTENT_TOKENS = 500     # Minimum block content (tokens, triggers merging)
+MIN_BLOCK_CONTENT_TOKENS = int((MAX_BLOCK_CONTENT_TOKENS - IDEAL_BLOCK_CONTENT_TOKENS)* 0.8)  # Minimum size for merging small blocks
 
 # Constants for table splitting (token-based)
 TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
-TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens)
-TABLE_MIN_LAST_CHUNK_TOKENS = 1000  # Minimum last chunk size (tokens, merge with previous if smaller)
+TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens), must smaller than IDEAL_BLOCK_CONTENT_TOKENS
+TABLE_MIN_LAST_CHUNK_TOKENS = int((TABLE_MAX_TOKENS - TABLE_IDEAL_TOKENS) * 0.8)  # Minimum size for last chunk to avoid tiny fragments
 TABLE_CHUNK_SUFFIX_LABEL = "表格片段"  # Label prefix for split table chunk headings
 
 
@@ -403,7 +403,7 @@ def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: lis
 
 def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     """
-    Merge blocks that are smaller than MIN_BLOCK_CONTENT_TOKENS with adjacent blocks.
+    Try to merge blocks that are smaller than MIN_BLOCK_CONTENT_TOKENS with adjacent blocks.
     
     Strategy:
     1. Identify blocks smaller than MIN_BLOCK_CONTENT_TOKENS
