@@ -512,6 +512,74 @@ class TestMergeSmallBlocks:
         # BBB should still exist
         middle_blocks = [b for b in merged if b.get('table_chunk_role') == 'middle']
         assert len(middle_blocks) == 1
+    
+    def test_bottom_up_merging_order(self):
+        """
+        Verify bottom-up merging: deepest level blocks merge first among themselves,
+        then get absorbed by higher levels, then higher levels merge.
+        
+        Scenario:
+        A(level=1) + B(level=3) + C(level=3) + D(level=2) + E(level=1)
+        
+        Expected flow (bottom-up):
+        1. Level 3 phase: B and C should merge first (same level, adjacent)
+        2. Level 2 phase: D can absorb BC (cross-level)
+        3. Level 1 phase: A and E may merge if both still below IDEAL
+        
+        Key assertion: B and C must merge together before being absorbed by upper levels
+        """
+        small_content = generate_long_text(IDEAL_BLOCK_CONTENT_TOKENS // 4)
+        
+        blocks = [
+            create_block("AAA", "Chapter 1", small_content, level=1),
+            create_block("BBB", "Sub-sub 1", small_content, level=3),
+            create_block("CCC", "Sub-sub 2", small_content, level=3),
+            create_block("DDD", "Subsection", small_content, level=2),
+            create_block("EEE", "Chapter 2", small_content, level=1),
+        ]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        # Should have performed merges
+        assert count > 0
+        
+        # The key is that B and C should NOT remain as separate blocks
+        # If there are level 3 blocks left, there should be at most 1 (the merged BC)
+        level_3_blocks = [b for b in merged if b['level'] == 3]
+        assert len(level_3_blocks) <= 1
+        
+        # Should result in fewer blocks than we started with
+        assert len(merged) < len(blocks)
+    
+    def test_below_ideal_triggers_merge(self):
+        """
+        Verify that blocks below IDEAL_BLOCK_CONTENT_TOKENS (not just MIN) can merge.
+        
+        This tests the new merging threshold change from MIN to IDEAL.
+        """
+        # Create content slightly above MIN but below IDEAL
+        medium_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS + 500)
+        
+        blocks = [
+            create_block("AAA", "Section 1", medium_content, level=1),
+            create_block("BBB", "Section 2", medium_content, level=1),
+        ]
+        
+        # Verify our test setup: blocks should be above MIN but below IDEAL
+        assert estimate_tokens(medium_content) > MIN_BLOCK_CONTENT_TOKENS
+        assert estimate_tokens(medium_content) < IDEAL_BLOCK_CONTENT_TOKENS
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        # With new threshold (< IDEAL), these should merge if combined size <= MAX
+        combined_size = estimate_tokens(medium_content) * 2
+        if combined_size <= MAX_BLOCK_CONTENT_TOKENS:
+            # Should merge
+            assert count > 0
+            assert len(merged) == 1
+        else:
+            # Too large to merge
+            assert len(merged) == 2
 
 
 # ============================================================

@@ -34,7 +34,6 @@ MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragra
 # Token estimation: Chinese ~0.7 tokens/char, English ~0.35 tokens/char
 IDEAL_BLOCK_CONTENT_TOKENS = 6000  # Ideal target size for balanced splitting (tokens)
 MAX_BLOCK_CONTENT_TOKENS = 8000    # Maximum block content (tokens, hard limit)
-MIN_BLOCK_CONTENT_TOKENS = int((MAX_BLOCK_CONTENT_TOKENS - IDEAL_BLOCK_CONTENT_TOKENS)* 0.8)  # Minimum size for merging small blocks
 
 # Constants for table splitting (token-based)
 TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
@@ -48,8 +47,9 @@ def estimate_tokens(text: str) -> int:
     Estimate token count for LLM context management.
     
     Uses a weighted formula based on character types:
-    - Chinese characters: ~0.7 tokens per character (subword tokenization)
-    - Other characters (English, numbers, symbols): ~0.35 tokens per character (~3 chars/token)
+    - Chinese characters: ~0.75 tokens per character (subword tokenization)
+    - JSON structural characters (brackets, quotes, commas): ~1 tokens per character
+    - Other characters (English, numbers, symbols): ~0.4 tokens per character (~3 chars/token)
     
     Includes 5% buffer and safety offset for special formatting and system prompt overhead.
     
@@ -65,13 +65,18 @@ def estimate_tokens(text: str) -> int:
     # Count Chinese characters (CJK Unified Ideographs range)
     chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
     
+    # Count JSON structural characters that commonly occupy individual tokens
+    # Includes: brackets [], quotes "", commas, braces {}
+    json_chars_count = len(re.findall(r'[\[\]",{}]', text))
+    
     # Count other characters (English, numbers, symbols, whitespace)
-    other_count = len(text) - chinese_count
+    other_count = len(text) - chinese_count - json_chars_count
     
     # Weighted estimation based on modern tokenizer characteristics
     # Chinese coefficient: 0.7 (typical for GPT-4o/DeepSeek/Llama3)
-    # English coefficient: 0.35 (~3 characters per token)
-    base_estimate = (chinese_count * 0.7) + (other_count * 0.35)
+    # JSON structural chars coefficient: 0.8 (brackets/quotes often individual tokens)
+    # English/other coefficient: 0.35 (~3 characters per token)
+    base_estimate = (chinese_count * 0.75) + (json_chars_count * 1) + (other_count * 0.4)
     
     # Add 5% buffer + safety offset for formatting overhead
     final_tokens = int(base_estimate * 1.05) + 2
@@ -403,24 +408,25 @@ def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: lis
 
 def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     """
-    Merge small blocks (<MIN_BLOCK_CONTENT_TOKENS) with adjacent blocks following level-aware rules.
+    Merge blocks below IDEAL_BLOCK_CONTENT_TOKENS following bottom-up, level-aware strategy.
     
-    Strategy:
-    1. Process blocks sequentially, attempting to merge small blocks with adjacent blocks
-    2. Same-level adjacent blocks have priority for merging
-    3. Cross-level merging: high-level (smaller number) can absorb adjacent low-level (larger number)
-    4. Table chunk role restrictions:
+    Strategy (bottom-up approach):
+    1. Process levels from deepest (largest number) to shallowest (level 1)
+    2. For each level:
+       - Phase A: Same-level merging - merge adjacent blocks of same level
+       - Phase B: Cross-level absorption - allow higher levels to absorb current level
+    3. Table chunk role restrictions:
        - 'middle': cannot merge with any block
        - 'first': can only merge forward (with next block)
        - 'last': can only merge backward (with previous block)
        - 'none': no restrictions
-    5. Stop merging a block once it exceeds IDEAL_BLOCK_CONTENT_TOKENS
-    6. Reject merge if combined size > MAX_BLOCK_CONTENT_TOKENS
-    7. Merged block's level = level of the block whose heading is kept
+    4. Stop merging a block once it reaches IDEAL_BLOCK_CONTENT_TOKENS (locked)
+    5. Reject merge if combined size > MAX_BLOCK_CONTENT_TOKENS
+    6. Merged block's level = level of the block whose heading is kept
     
     Args:
         blocks: List of block dictionaries with 'level' and 'table_chunk_role' fields
-        debug: If True, return merge count for debug reporting
+        debug: If True, output debug information and return merge count
         
     Returns:
         Tuple of (merged_blocks, merge_count)
@@ -431,151 +437,263 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     merged_count = 0
     result = blocks.copy()
     
-    # Mark blocks that should not be merged further (exceeded IDEAL size)
-    locked = [False] * len(result)
+    # Find all unique levels and sort from deepest to shallowest
+    levels = sorted(set(block.get('level', 1) for block in result), reverse=True)
     
-    # Iteratively try to merge small blocks until no more merges possible
-    changed = True
-    while changed:
-        changed = False
-        i = 0
-        new_result = []
-        new_locked = []
+    if debug:
+        print(f"\n[DEBUG] merge_small_blocks: Processing {len(result)} blocks across levels {levels}", file=sys.stderr)
+    
+    # Process each level from deepest to shallowest
+    for current_level in levels:
+        if debug:
+            print(f"[DEBUG] Processing level {current_level}", file=sys.stderr)
         
-        while i < len(result):
-            current_block = result[i]
-            current_locked = locked[i]
-            current_tokens = estimate_tokens(current_block['content'])
-            current_level = current_block.get('level', 1)
-            current_role = current_block.get('table_chunk_role', 'none')
+        # Phase A: Same-level merging
+        changed = True
+        iteration = 0
+        while changed:
+            iteration += 1
+            changed = False
+            i = 0
+            new_result = []
             
-            # Check if current block is small and not locked
-            is_small = current_tokens < MIN_BLOCK_CONTENT_TOKENS and current_tokens > 0
-            
-            if is_small and not current_locked:
-                merged = False
+            while i < len(result):
+                current_block = result[i]
+                current_tokens = estimate_tokens(current_block['content'])
+                block_level = current_block.get('level', 1)
+                current_role = current_block.get('table_chunk_role', 'none')
                 
-                # Check table chunk role restrictions
-                can_merge_forward = current_role in ['none', 'first', 'last']
-                can_merge_backward = current_role in ['none', 'last']  # first cannot merge backward
+                # Only process blocks of current level that are below IDEAL and not locked
+                is_below_ideal = current_tokens < IDEAL_BLOCK_CONTENT_TOKENS and current_tokens > 0
+                is_current_level = block_level == current_level
                 
-                # Try merging with next block (forward merge)
-                if can_merge_forward and i + 1 < len(result):
-                    next_block = result[i + 1]
-                    next_level = next_block.get('level', 1)
-                    next_role = next_block.get('table_chunk_role', 'none')
+                if is_below_ideal and is_current_level:
+                    merged = False
                     
-                    # Check if next block allows backward merge
-                    next_can_merge_backward = next_role in ['none', 'last']
+                    # Check table chunk role restrictions
+                    can_merge_forward = current_role in ['none', 'first']
+                    can_merge_backward = current_role in ['none', 'last']
                     
-                    # Check level compatibility: same level OR current is higher level (smaller number)
-                    level_compatible = (current_level == next_level) or (current_level < next_level)
-                    
-                    if next_can_merge_backward and level_compatible:
-                        # Calculate combined size
-                        merged_content = current_block['content'] + "\n\n" + next_block['content']
-                        combined_tokens = estimate_tokens(merged_content)
+                    # Try forward merge with next block (only same level in Phase A)
+                    if can_merge_forward and i + 1 < len(result):
+                        next_block = result[i + 1]
+                        next_level = next_block.get('level', 1)
+                        next_role = next_block.get('table_chunk_role', 'none')
+                        next_can_merge_backward = next_role in ['none', 'last']
                         
-                        # Check if merge is allowed
-                        if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
-                            # Merge current into next block
-                            # Keep current block's heading and level (current absorbs next)
-                            merged_block = {
-                                "uuid": current_block['uuid'],
-                                "uuid_end": next_block.get('uuid_end', next_block['uuid']),
-                                "heading": current_block['heading'],
-                                "content": merged_content,
-                                "type": "text",
-                                "parent_headings": current_block['parent_headings'],
-                                "level": current_level,  # Use current block's level
-                                "table_chunk_role": "none"  # Merged blocks lose table chunk status
-                            }
+                        # Phase A: Only merge same-level blocks
+                        if next_level == current_level and next_can_merge_backward:
+                            merged_content = current_block['content'] + "\n\n" + next_block['content']
+                            combined_tokens = estimate_tokens(merged_content)
                             
-                            # Preserve table_header if either block has it
-                            if "table_header" in current_block:
-                                merged_block["table_header"] = current_block["table_header"]
-                            elif "table_header" in next_block:
-                                merged_block["table_header"] = next_block["table_header"]
-                            
-                            # Check if merged block should be locked
-                            merged_locked = combined_tokens >= IDEAL_BLOCK_CONTENT_TOKENS
-                            
-                            new_result.append(merged_block)
-                            new_locked.append(merged_locked)
-                            
-                            merged = True
-                            merged_count += 1
-                            changed = True
-                            i += 2  # Skip both blocks
-                            continue
-                
-                # If forward merge failed or not allowed, try backward merge with previous
-                if not merged and can_merge_backward and len(new_result) > 0:
-                    prev_block = new_result[-1]
-                    prev_locked = new_locked[-1]
-                    prev_level = prev_block.get('level', 1)
-                    prev_role = prev_block.get('table_chunk_role', 'none')
+                            if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                                merged_block = {
+                                    "uuid": current_block['uuid'],
+                                    "uuid_end": next_block.get('uuid_end', next_block['uuid']),
+                                    "heading": current_block['heading'],
+                                    "content": merged_content,
+                                    "type": "text",
+                                    "parent_headings": current_block['parent_headings'],
+                                    "level": current_level,
+                                    "table_chunk_role": "none"
+                                }
+                                
+                                if "table_header" in current_block:
+                                    merged_block["table_header"] = current_block["table_header"]
+                                elif "table_header" in next_block:
+                                    merged_block["table_header"] = next_block["table_header"]
+                                
+                                new_result.append(merged_block)
+                                merged = True
+                                merged_count += 1
+                                changed = True
+                                i += 2
+                                continue
                     
-                    # Check if previous block allows forward merge
-                    prev_can_merge_forward = prev_role in ['none', 'first', 'last']
-                    
-                    # Check level compatibility: same level OR prev is higher level (smaller number)
-                    level_compatible = (prev_level == current_level) or (prev_level < current_level)
-                    
-                    # Don't merge if previous block is locked
-                    if not prev_locked and prev_can_merge_forward and level_compatible:
-                        # Calculate combined size
-                        merged_content = prev_block['content'] + "\n\n" + current_block['content']
-                        combined_tokens = estimate_tokens(merged_content)
+                    # Try backward merge with previous (only same level in Phase A)
+                    if not merged and can_merge_backward and len(new_result) > 0:
+                        prev_block = new_result[-1]
+                        prev_level = prev_block.get('level', 1)
+                        prev_role = prev_block.get('table_chunk_role', 'none')
+                        prev_tokens = estimate_tokens(prev_block['content'])
+                        prev_can_merge_forward = prev_role in ['none', 'first']
+                        prev_below_ideal = prev_tokens < IDEAL_BLOCK_CONTENT_TOKENS
                         
-                        # Check if merge is allowed
-                        if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
-                            # Merge current into previous block
-                            # Keep previous block's heading and level (previous absorbs current)
-                            merged_block = {
-                                "uuid": prev_block['uuid'],
-                                "uuid_end": current_block.get('uuid_end', current_block['uuid']),
-                                "heading": prev_block['heading'],
-                                "content": merged_content,
-                                "type": "text",
-                                "parent_headings": prev_block['parent_headings'],
-                                "level": prev_level,  # Use previous block's level
-                                "table_chunk_role": "none"  # Merged blocks lose table chunk status
-                            }
+                        # Phase A: Only merge same-level blocks, and prev must be below IDEAL
+                        if prev_level == current_level and prev_can_merge_forward and prev_below_ideal:
+                            merged_content = prev_block['content'] + "\n\n" + current_block['content']
+                            combined_tokens = estimate_tokens(merged_content)
                             
-                            # Preserve table_header if either block has it
-                            if "table_header" in prev_block:
-                                merged_block["table_header"] = prev_block["table_header"]
-                            elif "table_header" in current_block:
-                                merged_block["table_header"] = current_block["table_header"]
-                            
-                            # Check if merged block should be locked
-                            merged_locked = combined_tokens >= IDEAL_BLOCK_CONTENT_TOKENS
-                            
-                            # Replace previous block with merged block
-                            new_result[-1] = merged_block
-                            new_locked[-1] = merged_locked
-                            
-                            merged = True
-                            merged_count += 1
-                            changed = True
-                            i += 1
-                            continue
-                
-                # If neither merge direction worked, keep block as-is
-                if not merged:
+                            if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                                merged_block = {
+                                    "uuid": prev_block['uuid'],
+                                    "uuid_end": current_block.get('uuid_end', current_block['uuid']),
+                                    "heading": prev_block['heading'],
+                                    "content": merged_content,
+                                    "type": "text",
+                                    "parent_headings": prev_block['parent_headings'],
+                                    "level": current_level,
+                                    "table_chunk_role": "none"
+                                }
+                                
+                                if "table_header" in prev_block:
+                                    merged_block["table_header"] = prev_block["table_header"]
+                                elif "table_header" in current_block:
+                                    merged_block["table_header"] = current_block["table_header"]
+                                
+                                new_result[-1] = merged_block
+                                merged = True
+                                merged_count += 1
+                                changed = True
+                                i += 1
+                                continue
+                    
+                    # No merge happened, keep block
+                    if not merged:
+                        new_result.append(current_block)
+                        i += 1
+                else:
+                    # Not current level or already above IDEAL, keep as-is
                     new_result.append(current_block)
-                    new_locked.append(current_locked)
                     i += 1
-            else:
-                # Block is not small or is locked, keep as-is
-                new_result.append(current_block)
-                new_locked.append(current_locked)
-                i += 1
+            
+            result = new_result
+            
+            if debug and changed:
+                print(f"  Phase A iteration {iteration}: {merged_count} total merges", file=sys.stderr)
         
-        # Update for next iteration
-        result = new_result
-        locked = new_locked
+        # Phase B: Cross-level absorption (allow higher levels to absorb current level)
+        changed = True
+        iteration = 0
+        while changed:
+            iteration += 1
+            changed = False
+            i = 0
+            new_result = []
+            
+            while i < len(result):
+                current_block = result[i]
+                current_tokens = estimate_tokens(current_block['content'])
+                block_level = current_block.get('level', 1)
+                current_role = current_block.get('table_chunk_role', 'none')
+                
+                # Only process blocks of current level that are below IDEAL
+                is_below_ideal = current_tokens < IDEAL_BLOCK_CONTENT_TOKENS and current_tokens > 0
+                is_current_level = block_level == current_level
+                
+                if is_below_ideal and is_current_level:
+                    merged = False
+                    
+                    can_merge_forward = current_role in ['none', 'first', 'last']
+                    can_merge_backward = current_role in ['none', 'last']
+                    
+                    # Try forward merge (current can absorb deeper levels)
+                    if can_merge_forward and i + 1 < len(result):
+                        next_block = result[i + 1]
+                        next_level = next_block.get('level', 1)
+                        next_role = next_block.get('table_chunk_role', 'none')
+                        next_can_merge_backward = next_role in ['none', 'last']
+                        
+                        # Phase B: current level can absorb deeper levels (larger numbers)
+                        if next_level > current_level and next_can_merge_backward:
+                            merged_content = current_block['content'] + "\n\n" + next_block['content']
+                            combined_tokens = estimate_tokens(merged_content)
+                            
+                            if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                                merged_block = {
+                                    "uuid": current_block['uuid'],
+                                    "uuid_end": next_block.get('uuid_end', next_block['uuid']),
+                                    "heading": current_block['heading'],
+                                    "content": merged_content,
+                                    "type": "text",
+                                    "parent_headings": current_block['parent_headings'],
+                                    "level": current_level,
+                                    "table_chunk_role": "none"
+                                }
+                                
+                                if "table_header" in current_block:
+                                    merged_block["table_header"] = current_block["table_header"]
+                                elif "table_header" in next_block:
+                                    merged_block["table_header"] = next_block["table_header"]
+                                
+                                new_result.append(merged_block)
+                                merged = True
+                                merged_count += 1
+                                changed = True
+                                i += 2
+                                continue
+                    
+                    # Try backward merge (higher level can absorb current)
+                    if not merged and can_merge_backward and len(new_result) > 0:
+                        prev_block = new_result[-1]
+                        prev_level = prev_block.get('level', 1)
+                        prev_role = prev_block.get('table_chunk_role', 'none')
+                        prev_tokens = estimate_tokens(prev_block['content'])
+                        prev_can_merge_forward = prev_role in ['none', 'first', 'last']
+                        prev_below_ideal = prev_tokens < IDEAL_BLOCK_CONTENT_TOKENS
+                        
+                        # Phase B: higher level (smaller number) can absorb current level
+                        if prev_level < current_level and prev_can_merge_forward and prev_below_ideal:
+                            merged_content = prev_block['content'] + "\n\n" + current_block['content']
+                            combined_tokens = estimate_tokens(merged_content)
+                            
+                            if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                                merged_block = {
+                                    "uuid": prev_block['uuid'],
+                                    "uuid_end": current_block.get('uuid_end', current_block['uuid']),
+                                    "heading": prev_block['heading'],
+                                    "content": merged_content,
+                                    "type": "text",
+                                    "parent_headings": prev_block['parent_headings'],
+                                    "level": prev_level,
+                                    "table_chunk_role": "none"
+                                }
+                                
+                                if "table_header" in prev_block:
+                                    merged_block["table_header"] = prev_block["table_header"]
+                                elif "table_header" in current_block:
+                                    merged_block["table_header"] = current_block["table_header"]
+                                
+                                new_result[-1] = merged_block
+                                merged = True
+                                merged_count += 1
+                                changed = True
+                                i += 1
+                                continue
+                    
+                    if not merged:
+                        new_result.append(current_block)
+                        i += 1
+                else:
+                    new_result.append(current_block)
+                    i += 1
+            
+            result = new_result
+            
+            if debug and changed:
+                print(f"  Phase B iteration {iteration}: {merged_count} total merges", file=sys.stderr)
+    
+    if debug:
+        print(f"[DEBUG] merge_small_blocks complete: {len(result)} blocks, {merged_count} total merges", file=sys.stderr)
+    
+        # Check for oversized blocks and print debug information
+        oversized_blocks = []
+        for idx, block in enumerate(result):
+            block_tokens = estimate_tokens(block['content'])
+            if block_tokens > 0:  # MAX_BLOCK_CONTENT_TOKENS:
+                oversized_blocks.append({
+                    'index': idx,
+                    'heading': block.get('heading', '(no heading)'),
+                    'level': block.get('level', 'N/A'),
+                    'tokens': block_tokens,
+                    'has_table_header': 'table_header' in block,
+                    'content_preview': block['content'][:200]
+                })
+        
+        if oversized_blocks:
+            print(f"\n[WARNING] Found {len(oversized_blocks)} oversized blocks after merging:", file=sys.stderr)
+            for info in oversized_blocks:
+                print(f"  Block #{info['index']}: level={info['level']}, tokens={info['tokens']}, heading=\"{info['heading']}\"", file=sys.stderr)
     
     return result, merged_count
 
@@ -1077,7 +1195,6 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 
                 # Convert 0-based to 1-based level
                 level = outline_level + 1
-                current_heading_level = level  # Update current heading level
                 
                 # Truncate heading if needed before storing
                 truncated_text = truncate_heading(full_text, heading_para_id)
@@ -1093,6 +1210,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 # (when current_paragraphs just had this heading added as its first element)
                 if len(current_paragraphs) == 1:
                     current_heading = truncated_text
+                    current_heading_level = level  # Only set level when setting heading
                     # Parent headings = all headings from levels strictly less than current level
                     # Sort by level to maintain hierarchy order
                     current_parent_headings = [
