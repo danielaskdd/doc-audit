@@ -1397,7 +1397,7 @@ class AuditEditApplier:
 # Main Function
 # ============================================================
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Apply audit results to Word document"
     )
@@ -1469,11 +1469,11 @@ def main():
             print(f"  → Command: python {sys.argv[0]} {fail_file} --skip-hash")
             print(f"{'=' * 50}")
             
-        sys.exit(0 if fail_count == 0 else 1)
+        return 0
         
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

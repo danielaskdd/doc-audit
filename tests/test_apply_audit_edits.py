@@ -17,9 +17,10 @@ import pytest  # noqa: E402
 from lxml import etree  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
+import apply_audit_edits as apply_module  # noqa: E402  # type: ignore[import-not-found]
 from apply_audit_edits import (  # noqa: E402  # type: ignore[import-not-found]
     AuditEditApplier, NS, DRAWING_PATTERN,
-    strip_auto_numbering
+    strip_auto_numbering, EditItem, EditResult
 )
 
 
@@ -223,6 +224,29 @@ def create_mock_applier():
         applier.next_comment_id = 0
         applier.comments = []
         return applier
+
+
+def create_edit_item(
+    uuid: str = "AAA",
+    uuid_end: str = "BBB",
+    violation_text: str = "Bad text",
+    violation_reason: str = "Reason",
+    fix_action: str = "replace",
+    revised_text: str = "Good text",
+    category: str = "semantic",
+    rule_id: str = "R001"
+) -> EditItem:
+    """Create a minimal EditItem for CLI tests."""
+    return EditItem(
+        uuid=uuid,
+        uuid_end=uuid_end,
+        violation_text=violation_text,
+        violation_reason=violation_reason,
+        fix_action=fix_action,
+        revised_text=revised_text,
+        category=category,
+        rule_id=rule_id
+    )
 
 
 # ============================================================
@@ -1479,6 +1503,45 @@ class TestIterParagraphsInRange:
         paras = list(applier._iter_paragraphs_in_range(detached_para, 'BBB'))
         
         assert len(paras) == 0
+
+
+# ============================================================
+# Tests: main exit code behavior
+# ============================================================
+
+class TestMainExitCodeBehavior:
+    """Tests for main() exit codes on warnings/failures."""
+    
+    class DummyApplier:
+        results = []
+        
+        def __init__(self, jsonl_file, output_path=None, author=None, initials=None, skip_hash=False, verbose=False):
+            self.source_path = Path(jsonl_file)
+            self.output_path = Path(output_path) if output_path else Path("out.docx")
+            self.edit_items = [1, 2]
+        
+        def apply(self):
+            return self.__class__.results
+        
+        def save(self, dry_run=False):
+            return None
+        
+        def save_failed_items(self):
+            return None
+    
+    def test_main_returns_zero_with_failures(self, monkeypatch):
+        """main() should return 0 even when warnings or failures exist."""
+        item = create_edit_item()
+        self.DummyApplier.results = [
+            EditResult(True, item, "fallback", warning=True),
+            EditResult(False, item, "failed"),
+        ]
+        
+        monkeypatch.setattr(apply_module, "AuditEditApplier", self.DummyApplier)
+        monkeypatch.setattr(sys, "argv", ["apply_audit_edits.py", "input.jsonl", "--dry-run"])
+        
+        exit_code = apply_module.main()
+        assert exit_code == 0
 
 
 # ============================================================
