@@ -32,14 +32,14 @@ MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragra
 
 # Constants for content splitting (token-based for LLM context management)
 # Token estimation: Chinese ~0.7 tokens/char, English ~0.35 tokens/char
-IDEAL_BLOCK_CONTENT_TOKENS = 5000  # Ideal target size for balanced splitting (tokens)
+IDEAL_BLOCK_CONTENT_TOKENS = 6000  # Ideal target size for balanced splitting (tokens)
 MAX_BLOCK_CONTENT_TOKENS = 8000    # Maximum block content (tokens, hard limit)
-MIN_BLOCK_CONTENT_TOKENS = 500     # Minimum block content (tokens, triggers merging)
+MIN_BLOCK_CONTENT_TOKENS = int((MAX_BLOCK_CONTENT_TOKENS - IDEAL_BLOCK_CONTENT_TOKENS)* 0.8)  # Minimum size for merging small blocks
 
 # Constants for table splitting (token-based)
 TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
-TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens)
-TABLE_MIN_LAST_CHUNK_TOKENS = 1000  # Minimum last chunk size (tokens, merge with previous if smaller)
+TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens), must smaller than IDEAL_BLOCK_CONTENT_TOKENS
+TABLE_MIN_LAST_CHUNK_TOKENS = int((TABLE_MAX_TOKENS - TABLE_IDEAL_TOKENS) * 0.8)  # Minimum size for last chunk to avoid tiny fragments
 TABLE_CHUNK_SUFFIX_LABEL = "表格片段"  # Label prefix for split table chunk headings
 
 
@@ -403,16 +403,23 @@ def split_table_with_heading(table_rows: list, para_ids: list, para_ids_end: lis
 
 def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     """
-    Merge blocks that are smaller than MIN_BLOCK_CONTENT_TOKENS with adjacent blocks.
+    Merge small blocks (<MIN_BLOCK_CONTENT_TOKENS) with adjacent blocks following level-aware rules.
     
     Strategy:
-    1. Identify blocks smaller than MIN_BLOCK_CONTENT_TOKENS
-    2. Try to merge with next block (small block's heading becomes next block's heading)
-    3. If merging with next block would exceed MAX_BLOCK_CONTENT_TOKENS, try previous block
-    4. Only keep small block separate if both merge directions exceed limit
+    1. Process blocks sequentially, attempting to merge small blocks with adjacent blocks
+    2. Same-level adjacent blocks have priority for merging
+    3. Cross-level merging: high-level (smaller number) can absorb adjacent low-level (larger number)
+    4. Table chunk role restrictions:
+       - 'middle': cannot merge with any block
+       - 'first': can only merge forward (with next block)
+       - 'last': can only merge backward (with previous block)
+       - 'none': no restrictions
+    5. Stop merging a block once it exceeds IDEAL_BLOCK_CONTENT_TOKENS
+    6. Reject merge if combined size > MAX_BLOCK_CONTENT_TOKENS
+    7. Merged block's level = level of the block whose heading is kept
     
     Args:
-        blocks: List of block dictionaries
+        blocks: List of block dictionaries with 'level' and 'table_chunk_role' fields
         debug: If True, return merge count for debug reporting
         
     Returns:
@@ -421,82 +428,159 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
     if len(blocks) <= 1:
         return blocks, 0
     
-    merged_blocks = []
-    i = 0
     merged_count = 0
+    result = blocks.copy()
     
-    while i < len(blocks):
-        current_block = blocks[i]
-        current_tokens = estimate_tokens(current_block['content'])
+    # Mark blocks that should not be merged further (exceeded IDEAL size)
+    locked = [False] * len(result)
+    
+    # Iteratively try to merge small blocks until no more merges possible
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        new_result = []
+        new_locked = []
         
-        # Check if current block is too small and needs merging
-        if current_tokens < MIN_BLOCK_CONTENT_TOKENS and current_tokens > 0:
-            merged = False
+        while i < len(result):
+            current_block = result[i]
+            current_locked = locked[i]
+            current_tokens = estimate_tokens(current_block['content'])
+            current_level = current_block.get('level', 1)
+            current_role = current_block.get('table_chunk_role', 'none')
             
-            # Try merging with next block first
-            if i + 1 < len(blocks):
-                next_block = blocks[i + 1]
-                # Estimate combined token count
-                merged_content = current_block['content'] + "\n" + next_block['content']
-                combined_tokens = estimate_tokens(merged_content)
-                
-                if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
-                    # Merge current into next block
-                    # Current block's heading becomes the new heading
-                    # UUID range: current's uuid to next's uuid_end
-                    merged_block = {
-                        "uuid": current_block['uuid'],  # Use current block's UUID
-                        "uuid_end": next_block.get('uuid_end', next_block['uuid']),  # Use next block's end UUID
-                        "heading": current_block['heading'],  # Use current block's heading
-                        "content": merged_content,
-                        "type": "text",
-                        "parent_headings": current_block['parent_headings']
-                    }
-                    merged_blocks.append(merged_block)
-                    
-                    merged = True
-                    merged_count += 1
-                    i += 2  # Skip both current and next block
-                    continue
+            # Check if current block is small and not locked
+            is_small = current_tokens < MIN_BLOCK_CONTENT_TOKENS and current_tokens > 0
             
-            # If can't merge with next, try merging with previous
-            if not merged and len(merged_blocks) > 0:
-                prev_block = merged_blocks[-1]
-                # Estimate combined token count
-                merged_content = prev_block['content'] + "\n" + current_block['content']
-                combined_tokens = estimate_tokens(merged_content)
+            if is_small and not current_locked:
+                merged = False
                 
-                if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
-                    # Merge current into previous block
-                    # Previous block remains the heading
-                    # UUID range: prev's uuid to current's uuid_end
-                    merged_blocks[-1] = {
-                        "uuid": prev_block['uuid'],  # Keep previous UUID
-                        "uuid_end": current_block.get('uuid_end', current_block['uuid']),  # Use current block's end UUID
-                        "heading": prev_block['heading'],  # Keep previous heading
-                        "content": merged_content,
-                        "type": "text",
-                        "parent_headings": prev_block['parent_headings']
-                    }
+                # Check table chunk role restrictions
+                can_merge_forward = current_role in ['none', 'first', 'last']
+                can_merge_backward = current_role in ['none', 'last']  # first cannot merge backward
+                
+                # Try merging with next block (forward merge)
+                if can_merge_forward and i + 1 < len(result):
+                    next_block = result[i + 1]
+                    next_level = next_block.get('level', 1)
+                    next_role = next_block.get('table_chunk_role', 'none')
                     
-                    merged = True
-                    merged_count += 1
+                    # Check if next block allows backward merge
+                    next_can_merge_backward = next_role in ['none', 'last']
+                    
+                    # Check level compatibility: same level OR current is higher level (smaller number)
+                    level_compatible = (current_level == next_level) or (current_level < next_level)
+                    
+                    if next_can_merge_backward and level_compatible:
+                        # Calculate combined size
+                        merged_content = current_block['content'] + "\n\n" + next_block['content']
+                        combined_tokens = estimate_tokens(merged_content)
+                        
+                        # Check if merge is allowed
+                        if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                            # Merge current into next block
+                            # Keep current block's heading and level (current absorbs next)
+                            merged_block = {
+                                "uuid": current_block['uuid'],
+                                "uuid_end": next_block.get('uuid_end', next_block['uuid']),
+                                "heading": current_block['heading'],
+                                "content": merged_content,
+                                "type": "text",
+                                "parent_headings": current_block['parent_headings'],
+                                "level": current_level,  # Use current block's level
+                                "table_chunk_role": "none"  # Merged blocks lose table chunk status
+                            }
+                            
+                            # Preserve table_header if either block has it
+                            if "table_header" in current_block:
+                                merged_block["table_header"] = current_block["table_header"]
+                            elif "table_header" in next_block:
+                                merged_block["table_header"] = next_block["table_header"]
+                            
+                            # Check if merged block should be locked
+                            merged_locked = combined_tokens >= IDEAL_BLOCK_CONTENT_TOKENS
+                            
+                            new_result.append(merged_block)
+                            new_locked.append(merged_locked)
+                            
+                            merged = True
+                            merged_count += 1
+                            changed = True
+                            i += 2  # Skip both blocks
+                            continue
+                
+                # If forward merge failed or not allowed, try backward merge with previous
+                if not merged and can_merge_backward and len(new_result) > 0:
+                    prev_block = new_result[-1]
+                    prev_locked = new_locked[-1]
+                    prev_level = prev_block.get('level', 1)
+                    prev_role = prev_block.get('table_chunk_role', 'none')
+                    
+                    # Check if previous block allows forward merge
+                    prev_can_merge_forward = prev_role in ['none', 'first', 'last']
+                    
+                    # Check level compatibility: same level OR prev is higher level (smaller number)
+                    level_compatible = (prev_level == current_level) or (prev_level < current_level)
+                    
+                    # Don't merge if previous block is locked
+                    if not prev_locked and prev_can_merge_forward and level_compatible:
+                        # Calculate combined size
+                        merged_content = prev_block['content'] + "\n\n" + current_block['content']
+                        combined_tokens = estimate_tokens(merged_content)
+                        
+                        # Check if merge is allowed
+                        if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                            # Merge current into previous block
+                            # Keep previous block's heading and level (previous absorbs current)
+                            merged_block = {
+                                "uuid": prev_block['uuid'],
+                                "uuid_end": current_block.get('uuid_end', current_block['uuid']),
+                                "heading": prev_block['heading'],
+                                "content": merged_content,
+                                "type": "text",
+                                "parent_headings": prev_block['parent_headings'],
+                                "level": prev_level,  # Use previous block's level
+                                "table_chunk_role": "none"  # Merged blocks lose table chunk status
+                            }
+                            
+                            # Preserve table_header if either block has it
+                            if "table_header" in prev_block:
+                                merged_block["table_header"] = prev_block["table_header"]
+                            elif "table_header" in current_block:
+                                merged_block["table_header"] = current_block["table_header"]
+                            
+                            # Check if merged block should be locked
+                            merged_locked = combined_tokens >= IDEAL_BLOCK_CONTENT_TOKENS
+                            
+                            # Replace previous block with merged block
+                            new_result[-1] = merged_block
+                            new_locked[-1] = merged_locked
+                            
+                            merged = True
+                            merged_count += 1
+                            changed = True
+                            i += 1
+                            continue
+                
+                # If neither merge direction worked, keep block as-is
+                if not merged:
+                    new_result.append(current_block)
+                    new_locked.append(current_locked)
                     i += 1
-                    continue
-            
-            # If neither merge direction works, keep the small block as-is
-            if not merged:
-                merged_blocks.append(current_block)
+            else:
+                # Block is not small or is locked, keep as-is
+                new_result.append(current_block)
+                new_locked.append(current_locked)
                 i += 1
-        else:
-            # Block is within acceptable size range, keep as-is
-            merged_blocks.append(current_block)
-            i += 1
+        
+        # Update for next iteration
+        result = new_result
+        locked = new_locked
     
-    return merged_blocks, merged_count
+    return result, merged_count
 
 
-def split_long_block(block_heading: str, paragraphs: list, parent_headings: list, debug: bool = False) -> list:
+def split_long_block(block_heading: str, paragraphs: list, parent_headings: list, block_level: int, debug: bool = False) -> list:
     """
     Split a long text block into smaller blocks using anchor paragraphs.
     
@@ -507,14 +591,22 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
     4. Select anchors closest to ideal split positions for balanced distribution
     5. Create blocks using selected anchors as new headings
     
+    Important: Tables are NOT split by this function.
+    - Tables are already split at row boundaries by split_table() if needed (TABLE_MAX_TOKENS limit)
+    - Table paragraphs (is_table=True) are excluded from anchor candidate selection
+    - Table content remains intact and is not re-split into smaller table chunks
+    - If a block contains both text and table chunks exceeding the limit, only text
+      paragraphs are used as split points; table chunks stay complete
+    
     Args:
         block_heading: Original heading text
         paragraphs: List of dicts with 'text', 'para_id', and 'is_table' keys
         parent_headings: Parent heading stack
+        block_level: Heading level of this block (1=Heading 1, 2=Heading 2, etc.)
         debug: If True, output debug information when splitting occurs
         
     Returns:
-        List of block dictionaries (may be split into multiple blocks)
+        List of block dictionaries (may be split into multiple blocks), each with 'level' field
         
     Exits:
         sys.exit(1) if no suitable anchor found and content exceeds limit
@@ -547,7 +639,8 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
             "heading": effective_heading,
             "content": total_content,
             "type": "text",
-            "parent_headings": parent_headings
+            "parent_headings": parent_headings,
+            "level": block_level  # Add level to block
         }
         
         # Add table_header if present
@@ -701,6 +794,7 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
                 block['heading'],
                 block_paragraphs,
                 block['parent_headings'],
+                block_level,
                 debug
             )
             validated_blocks.extend(sub_blocks)
@@ -709,19 +803,18 @@ def split_long_block(block_heading: str, paragraphs: list, parent_headings: list
             block.pop('_paragraphs', None)
             validated_blocks.append(block)
     
-    # Merge small blocks with adjacent blocks to avoid fragmentation
-    final_blocks, merge_count = merge_small_blocks(validated_blocks, debug)
+    # Add level to all blocks
+    for block in validated_blocks:
+        block['level'] = block_level
     
-    # Output debug information if enabled and split occurred (after merging)
-    if debug and len(final_blocks) > 1:
+    # Output debug information if enabled and split occurred
+    if debug and len(validated_blocks) > 1:
         print(f"\n[DEBUG] Block split: \"{block_heading}\"", file=sys.stderr)
         print(f"  Original size: ~{total_tokens} tokens ({len(total_content)} characters)", file=sys.stderr)
-        final_block_tokens = [estimate_tokens(block['content']) for block in final_blocks]
-        print(f"  Final result: {len(final_blocks)} blocks: ~{final_block_tokens} tokens", file=sys.stderr)
-        if merge_count > 0:
-            print(f"  ({merge_count} small block(s) merged)", file=sys.stderr)
+        block_tokens = [estimate_tokens(block['content']) for block in validated_blocks]
+        print(f"  Final result: {len(validated_blocks)} blocks: ~{block_tokens} tokens", file=sys.stderr)
     
-    return final_blocks
+    return validated_blocks
 
 
 def extract_para_id(para_element) -> str:
@@ -907,6 +1000,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     
     blocks = []
     current_heading = "Preface/Uncategorized"
+    current_heading_level = 1  # Default level for "Preface/Uncategorized"
     current_heading_stack = {}  # {level: heading_text} - Use dict to correctly track heading hierarchy
     current_parent_headings = []  # Parent headings for current block
     current_paragraphs = []  # Track paragraphs with metadata for splitting
@@ -973,7 +1067,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 # Only save previous block if it has body content
                 if has_body_content and current_paragraphs:
                     # Split long blocks if needed
-                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
+                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
                     blocks.extend(split_blocks)
                     
                     # Reset for new block
@@ -983,6 +1077,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                 
                 # Convert 0-based to 1-based level
                 level = outline_level + 1
+                current_heading_level = level  # Update current heading level
                 
                 # Truncate heading if needed before storing
                 truncated_text = truncate_heading(full_text, heading_para_id)
@@ -1079,7 +1174,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                     else:
                         # Middle or last chunk: save current block first
                         if current_paragraphs:
-                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
+                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
                             blocks.extend(split_blocks)
                             current_paragraphs = []
                             has_body_content = False
@@ -1093,13 +1188,26 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                         # Build block for this table chunk
                         # Get uuid_end from last valid paraId in chunk (use para_ids_end for last cell's last paragraph)
                         chunk_uuid_end = find_last_valid_para_id(chunk['para_ids_end'])
+                        
+                        # Determine table_chunk_role based on chunk position
+                        if chunk['is_first'] and chunk['is_last']:
+                            table_chunk_role = "none"  # Not split
+                        elif chunk['is_first']:
+                            table_chunk_role = "first"
+                        elif chunk['is_last']:
+                            table_chunk_role = "last"
+                        else:
+                            table_chunk_role = "middle"
+                        
                         chunk_block = {
                             "uuid": chunk['uuid'],
                             "uuid_end": chunk_uuid_end,
                             "heading": chunk_heading,
                             "content": f"<table>{chunk_json}</table>",
                             "type": "text",
-                            "parent_headings": current_parent_headings
+                            "parent_headings": current_parent_headings,
+                            "level": current_heading_level,
+                            "table_chunk_role": table_chunk_role
                         }
                         
                         # Add table_header field if headers exist and this isn't the first chunk
@@ -1146,10 +1254,24 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     # Save final block with splitting if needed
     if current_paragraphs:
         # Split long blocks if needed
-        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, debug)
+        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
         blocks.extend(split_blocks)
     
-    return blocks
+    # Add table_chunk_role="none" to all blocks that don't have it (non-table or unsplit table blocks)
+    for block in blocks:
+        if 'table_chunk_role' not in block:
+            block['table_chunk_role'] = "none"
+    
+    # Perform small block merging (unified merging after all splits)
+    if debug:
+        print(f"\n[DEBUG] Before merging: {len(blocks)} blocks", file=sys.stderr)
+    
+    merged_blocks, merge_count = merge_small_blocks(blocks, debug)
+    
+    if debug and merge_count > 0:
+        print(f"[DEBUG] After merging: {len(merged_blocks)} blocks ({merge_count} merges performed)", file=sys.stderr)
+    
+    return merged_blocks
 
 
 def calculate_file_hash(file_path: str) -> str:
