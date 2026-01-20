@@ -31,9 +31,9 @@ MAX_HEADING_LENGTH = 200      # Maximum heading length in characters (UI constra
 MAX_ANCHOR_CANDIDATE_LENGTH = 100  # Maximum length for candidate anchor paragraphs (characters)
 
 # Constants for content splitting (token-based for LLM context management)
-# Token estimation: Chinese ~0.7 tokens/char, English ~0.35 tokens/char
 IDEAL_BLOCK_CONTENT_TOKENS = 6000  # Ideal target size for balanced splitting (tokens)
 MAX_BLOCK_CONTENT_TOKENS = 8000    # Maximum block content (tokens, hard limit)
+SMALL_TAIL_THRESHOLD = (MAX_BLOCK_CONTENT_TOKENS - IDEAL_BLOCK_CONTENT_TOKENS) // 2  # Threshold for tail absorption (1000 tokens)
 
 # Constants for table splitting (token-based)
 TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
@@ -553,7 +553,78 @@ def merge_small_blocks(blocks: list, debug: bool = False) -> tuple:
                         new_result.append(current_block)
                         i += 1
                 else:
-                    # Not current level or already above IDEAL, keep as-is
+                    # Current block is at or above IDEAL, or not current level
+                    # Check for tail absorption: if remaining same-level blocks are small enough, absorb them all
+                    if is_current_level and current_tokens >= IDEAL_BLOCK_CONTENT_TOKENS:
+                        # Calculate total size of remaining same-level blocks
+                        remaining_same_level_tokens = 0
+                        remaining_end_idx = i + 1
+                        
+                        for j in range(i + 1, len(result)):
+                            next_block = result[j]
+                            next_level = next_block.get('level', 1)
+                            
+                            # Stop when we encounter a different level
+                            if next_level != current_level:
+                                break
+                            
+                            # Check if this block can be absorbed (table_chunk_role constraints)
+                            next_role = next_block.get('table_chunk_role', 'none')
+                            if next_role == 'middle':
+                                # Middle chunks cannot be absorbed - stop here
+                                break
+                            
+                            remaining_same_level_tokens += estimate_tokens(next_block['content'])
+                            remaining_end_idx = j + 1
+                        
+                        # If remaining same-level blocks are small enough, absorb them all
+                        if remaining_same_level_tokens > 0 and remaining_same_level_tokens < SMALL_TAIL_THRESHOLD:
+                            # Check if combined size doesn't exceed MAX
+                            combined_tokens = current_tokens + remaining_same_level_tokens
+                            
+                            if combined_tokens <= MAX_BLOCK_CONTENT_TOKENS:
+                                # Absorb all remaining same-level blocks
+                                absorbed_content = current_block['content']
+                                last_uuid_end = current_block.get('uuid_end', current_block['uuid'])
+                                has_table_header = "table_header" in current_block
+                                table_header_value = current_block.get("table_header")
+                                
+                                for j in range(i + 1, remaining_end_idx):
+                                    next_block = result[j]
+                                    absorbed_content += "\n\n" + next_block['content']
+                                    last_uuid_end = next_block.get('uuid_end', next_block['uuid'])
+                                    
+                                    if not has_table_header and "table_header" in next_block:
+                                        has_table_header = True
+                                        table_header_value = next_block["table_header"]
+                                
+                                # Create merged block
+                                merged_block = {
+                                    "uuid": current_block['uuid'],
+                                    "uuid_end": last_uuid_end,
+                                    "heading": current_block['heading'],
+                                    "content": absorbed_content,
+                                    "type": "text",
+                                    "parent_headings": current_block['parent_headings'],
+                                    "level": current_level,
+                                    "table_chunk_role": "none"
+                                }
+                                
+                                if has_table_header:
+                                    merged_block["table_header"] = table_header_value
+                                
+                                new_result.append(merged_block)
+                                merged_count += remaining_end_idx - i - 1
+                                changed = True
+                                i = remaining_end_idx
+                                
+                                if debug:
+                                    num_absorbed = remaining_end_idx - i - 1
+                                    print(f"  Tail absorption: block at IDEAL ({current_tokens} tokens) absorbed {num_absorbed} small tail blocks ({remaining_same_level_tokens} tokens)", file=sys.stderr)
+                                
+                                continue
+                    
+                    # No tail absorption, keep block as-is
                     new_result.append(current_block)
                     i += 1
             

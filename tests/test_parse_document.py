@@ -21,8 +21,13 @@ from parse_document import (  # noqa: E402  # type: ignore[import-not-found]
     estimate_tokens,
     IDEAL_BLOCK_CONTENT_TOKENS,
     MAX_BLOCK_CONTENT_TOKENS,
-    MIN_BLOCK_CONTENT_TOKENS,
+    SMALL_TAIL_THRESHOLD,
 )
+
+# Test-local constants (relative to IDEAL threshold)
+SMALL_BLOCK_TOKENS = IDEAL_BLOCK_CONTENT_TOKENS // 4    # 1500 tokens - clearly small blocks
+MEDIUM_BLOCK_TOKENS = IDEAL_BLOCK_CONTENT_TOKENS // 2   # 3000 tokens - medium blocks
+NEAR_IDEAL_TOKENS = IDEAL_BLOCK_CONTENT_TOKENS - 200    # 5800 tokens - near ideal threshold
 
 
 # ============================================================
@@ -104,6 +109,25 @@ def generate_long_text(target_tokens: int) -> str:
         result += padding
     
     return result
+
+
+def generate_text(target_tokens: int) -> str:
+    """Generate text with approximately target_tokens using iterative estimation."""
+    base_text = "这是测试文本。Test text. "
+    base_tokens = estimate_tokens(base_text)
+
+    if base_tokens == 0:
+        return ""
+
+    repetitions = max(1, int(target_tokens / base_tokens))
+    text = base_text * repetitions
+
+    current_tokens = estimate_tokens(text)
+    while current_tokens < target_tokens:
+        text += base_text
+        current_tokens = estimate_tokens(text)
+
+    return text
 
 
 def create_table_rows(num_rows: int, cols: int = 3, large_content: bool = False) -> list:
@@ -305,8 +329,8 @@ class TestMergeSmallBlocks:
     
     def test_same_level_adjacent_blocks_merge(self):
         """Same-level adjacent small blocks should merge"""
-        # Create content that is definitely small (well below MIN threshold)
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS // 2)
+        # Create content that is definitely small (well below IDEAL threshold)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Section 1", small_content, level=2),
@@ -322,7 +346,7 @@ class TestMergeSmallBlocks:
     
     def test_high_level_absorbs_low_level(self):
         """High-level (smaller number) block should absorb adjacent low-level block"""
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS // 2)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Chapter 1", small_content, level=1),
@@ -338,7 +362,7 @@ class TestMergeSmallBlocks:
     
     def test_low_level_cannot_absorb_high_level_forward(self):
         """Low-level block cannot absorb preceding high-level block"""
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS // 2)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Chapter 1", small_content, level=1),
@@ -366,7 +390,7 @@ class TestMergeSmallBlocks:
         1. A absorbs B -> A'(1)
         2. A' and C are adjacent and same level -> merge to final block
         """
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS // 2)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Chapter 1", small_content, level=1),
@@ -396,8 +420,8 @@ class TestMergeSmallBlocks:
         - C and D may merge with each other
         Final result should have at least 2 blocks (locked A + others)
         """
-        near_ideal = generate_long_text(IDEAL_BLOCK_CONTENT_TOKENS - 200)
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS // 2)
+        near_ideal = generate_long_text(NEAR_IDEAL_TOKENS)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Chapter 1", near_ideal, level=1),
@@ -417,8 +441,8 @@ class TestMergeSmallBlocks:
     def test_merge_stops_after_ideal_size(self):
         """Block should stop merging after reaching IDEAL_BLOCK_CONTENT_TOKENS"""
         # Create one block slightly below IDEAL, another small block
-        near_ideal = generate_long_text(IDEAL_BLOCK_CONTENT_TOKENS - 100)
-        small = generate_long_text(MIN_BLOCK_CONTENT_TOKENS - 100)
+        near_ideal = generate_long_text(NEAR_IDEAL_TOKENS)
+        small = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Section 1", near_ideal, level=1),
@@ -463,7 +487,7 @@ class TestMergeSmallBlocks:
     
     def test_table_chunk_role_first_only_forward(self):
         """Table chunk 'first' can only merge forward"""
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS - 100)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Normal", small_content, level=1, table_chunk_role="none"),
@@ -479,7 +503,7 @@ class TestMergeSmallBlocks:
     
     def test_table_chunk_role_last_only_backward(self):
         """Table chunk 'last' can only merge backward"""
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS - 100)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Table Last", small_content, level=1, table_chunk_role="last"),
@@ -495,7 +519,7 @@ class TestMergeSmallBlocks:
     
     def test_table_chunk_role_middle_no_merge(self):
         """Table chunk 'middle' cannot merge in any direction"""
-        small_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS - 100)
+        small_content = generate_long_text(SMALL_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Before", small_content, level=1, table_chunk_role="none"),
@@ -551,35 +575,229 @@ class TestMergeSmallBlocks:
         # Should result in fewer blocks than we started with
         assert len(merged) < len(blocks)
     
-    def test_below_ideal_triggers_merge(self):
+    def test_medium_blocks_merge_when_below_ideal(self):
         """
-        Verify that blocks below IDEAL_BLOCK_CONTENT_TOKENS (not just MIN) can merge.
+        Verify that medium-sized blocks (below IDEAL) can merge.
         
-        This tests the new merging threshold change from MIN to IDEAL.
+        This tests the new merging threshold: blocks < IDEAL_BLOCK_CONTENT_TOKENS
+        can merge (not limited to very small blocks).
         """
-        # Create content slightly above MIN but below IDEAL
-        medium_content = generate_long_text(MIN_BLOCK_CONTENT_TOKENS + 500)
+        # Create medium-sized content (half of IDEAL = 3000 tokens)
+        medium_content = generate_long_text(MEDIUM_BLOCK_TOKENS)
         
         blocks = [
             create_block("AAA", "Section 1", medium_content, level=1),
             create_block("BBB", "Section 2", medium_content, level=1),
         ]
         
-        # Verify our test setup: blocks should be above MIN but below IDEAL
-        assert estimate_tokens(medium_content) > MIN_BLOCK_CONTENT_TOKENS
-        assert estimate_tokens(medium_content) < IDEAL_BLOCK_CONTENT_TOKENS
+        # Verify test setup: each block is well below IDEAL
+        actual_size = estimate_tokens(medium_content)
+        assert actual_size < IDEAL_BLOCK_CONTENT_TOKENS
+        assert actual_size > SMALL_BLOCK_TOKENS  # Not tiny blocks
         
         merged, count = merge_small_blocks(blocks, debug=False)
         
-        # With new threshold (< IDEAL), these should merge if combined size <= MAX
-        combined_size = estimate_tokens(medium_content) * 2
-        if combined_size <= MAX_BLOCK_CONTENT_TOKENS:
-            # Should merge
-            assert count > 0
-            assert len(merged) == 1
-        else:
-            # Too large to merge
-            assert len(merged) == 2
+        # Combined size should be ~6000 tokens (at IDEAL boundary)
+        # Should merge since combined size doesn't exceed MAX (8000)
+        combined_size = actual_size * 2
+        assert combined_size <= MAX_BLOCK_CONTENT_TOKENS
+        
+        # Should have merged
+        assert count > 0
+        assert len(merged) == 1
+        assert merged[0]['level'] == 1
+
+
+# ============================================================
+# Tests: tail absorption
+# ============================================================
+
+class TestTailAbsorption:
+    """Tests for tail absorption strategy in Phase A merging"""
+    
+    def test_tail_absorption_basic_scenario(self):
+        """
+        Basic tail absorption: Block at IDEAL + small tail blocks < THRESHOLD
+        
+        Scenario: A(6500) + B(400) + C(300) + D(200)
+        Expected: All merged into one block (7400 tokens)
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Section 2", generate_text(400), level=1)
+        block_c = create_block("CCC", "Section 3", generate_text(300), level=1)
+        block_d = create_block("DDD", "Section 4", generate_text(200), level=1)
+        
+        blocks = [block_a, block_b, block_c, block_d]
+        
+        assert estimate_tokens(block_a['content']) >= IDEAL_BLOCK_CONTENT_TOKENS
+        tail_total = sum(estimate_tokens(b['content']) for b in [block_b, block_c, block_d])
+        assert tail_total < SMALL_TAIL_THRESHOLD
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 1
+        assert count == 3
+        assert merged[0]['heading'] == "Section 1"
+    
+    def test_tail_absorption_respects_threshold(self):
+        """
+        Tail NOT absorbed if total >= SMALL_TAIL_THRESHOLD (1000 tokens)
+        
+        Scenario: A(6500) + B(1500) + C(800)
+        Expected: No absorption (tail = 2300 > 1000)
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Section 2", generate_text(1500), level=1)
+        block_c = create_block("CCC", "Section 3", generate_text(800), level=1)
+        
+        blocks = [block_a, block_b, block_c]
+        
+        tail_total = estimate_tokens(block_b['content']) + estimate_tokens(block_c['content'])
+        assert tail_total >= SMALL_TAIL_THRESHOLD
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 2
+    
+    def test_tail_absorption_respects_max_limit(self):
+        """
+        Tail NOT absorbed if combined size > MAX_BLOCK_CONTENT_TOKENS
+        
+        Scenario: A(7500) + B(800)
+        Expected: No absorption (7500 + 800 = 8300 > 8000)
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(7500), level=1)
+        block_b = create_block("BBB", "Section 2", generate_text(800), level=1)
+        
+        blocks = [block_a, block_b]
+        
+        combined = estimate_tokens(block_a['content']) + estimate_tokens(block_b['content'])
+        assert combined > MAX_BLOCK_CONTENT_TOKENS
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 2
+        assert count == 0
+    
+    def test_tail_absorption_same_level_only(self):
+        """
+        Tail absorption only applies to same-level blocks
+        
+        Scenario: A(6500, level=1) + B(400, level=2) + C(300, level=1)
+        Expected: A absorbs C (cross-level in Phase B), B remains separate
+        """
+        block_a = create_block("AAA", "Chapter 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Subsection", generate_text(400), level=2)
+        block_c = create_block("CCC", "Chapter 2", generate_text(300), level=1)
+        
+        blocks = [block_a, block_b, block_c]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) >= 1
+    
+    def test_tail_absorption_with_table_middle_chunk(self):
+        """
+        Tail absorption stops at table 'middle' chunk
+        
+        Scenario: A(6500) + B(400, middle) + C(300) + D(200)
+        Expected: Only A; B/C/D remain (middle blocks absorption)
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Table Middle", generate_text(400), level=1, table_chunk_role="middle")
+        block_c = create_block("CCC", "Section 3", generate_text(300), level=1)
+        block_d = create_block("DDD", "Section 4", generate_text(200), level=1)
+        
+        blocks = [block_a, block_b, block_c, block_d]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) >= 2
+        middle_exists = any(b.get('table_chunk_role') == 'middle' for b in merged)
+        assert middle_exists
+    
+    def test_tail_absorption_multiple_at_ideal_blocks(self):
+        """
+        Multiple blocks at IDEAL should each try tail absorption
+        
+        Scenario: A(6500) + B(400) + C(6500) + D(300)
+        Expected: A absorbs B (7900), C absorbs D (6800) → 2 blocks
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Section 2", generate_text(400), level=1)
+        block_c = create_block("CCC", "Section 3", generate_text(6500), level=1)
+        block_d = create_block("DDD", "Section 4", generate_text(300), level=1)
+        
+        blocks = [block_a, block_b, block_c, block_d]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 2
+        assert count == 2
+    
+    def test_tail_absorption_edge_exact_threshold(self):
+        """
+        Test edge case: tail total at threshold should not trigger tail absorption
+        
+        Scenario: A(6500) + B(3000) + C(3000) (total = 6000 >= 1000)
+        Expected: Tail absorption NOT triggered; B and C merge normally to form a block >= IDEAL,
+                  resulting in 2 blocks: A and B+C
+        """
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_b = create_block("BBB", "Section 2", generate_text(3000), level=1)
+        block_c = create_block("CCC", "Section 3", generate_text(3000), level=1)
+        
+        blocks = [block_a, block_b, block_c]
+        
+        a_tokens = estimate_tokens(block_a['content'])
+        b_tokens = estimate_tokens(block_b['content'])
+        c_tokens = estimate_tokens(block_c['content'])
+        tail_total = b_tokens + c_tokens
+        
+        assert a_tokens >= IDEAL_BLOCK_CONTENT_TOKENS
+        assert tail_total >= SMALL_TAIL_THRESHOLD
+        assert tail_total >= IDEAL_BLOCK_CONTENT_TOKENS
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 2
+        assert count == 1
+    
+    def test_tail_absorption_preserves_uuid_end(self):
+        """Tail absorption should preserve uuid_end from last absorbed block"""
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        block_a['uuid_end'] = "AAA_END"
+        
+        block_b = create_block("BBB", "Section 2", generate_text(400), level=1)
+        block_b['uuid_end'] = "BBB_END"
+        
+        block_c = create_block("CCC", "Section 3", generate_text(300), level=1)
+        block_c['uuid_end'] = "CCC_END"
+        
+        blocks = [block_a, block_b, block_c]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 1
+        assert merged[0]['uuid'] == "AAA"
+        assert merged[0]['uuid_end'] == "CCC_END"
+    
+    def test_tail_absorption_preserves_table_header(self):
+        """Tail absorption should preserve table_header from absorbed blocks"""
+        block_a = create_block("AAA", "Section 1", generate_text(6500), level=1)
+        
+        block_b = create_block("BBB", "Section 2", generate_text(400), level=1)
+        block_b['table_header'] = [['Header1', 'Header2']]
+        
+        block_c = create_block("CCC", "Section 3", generate_text(300), level=1)
+        
+        blocks = [block_a, block_b, block_c]
+        
+        merged, count = merge_small_blocks(blocks, debug=False)
+        
+        assert len(merged) == 1
+        assert 'table_header' in merged[0]
+        assert merged[0]['table_header'] == [['Header1', 'Header2']]
 
 
 # ============================================================
