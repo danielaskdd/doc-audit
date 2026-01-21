@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ABOUTME: Extracts tables from DOCX with proper merged cell handling
-ABOUTME: Outputs 2D array with content in first cell of merged region
+ABOUTME: Vertically merged cells: content repeated in all rows with shared paraId
+ABOUTME: Horizontally merged cells: content in first cell only
 """
 
 from docx.table import Table
@@ -18,8 +19,8 @@ class TableExtractor:
     
     Output format:
     - 2D list of strings
-    - Merged cell content in top-left position only
-    - Other positions in merged region are empty strings
+    - Vertically merged cells: content repeated in all rows, all rows use the same paraId (from start cell)
+    - Horizontally merged cells: content in left-most position only, other positions empty
     """
     
     @staticmethod
@@ -42,6 +43,10 @@ class TableExtractor:
         """
         Extract table to 2D string array with metadata (paraIds, header info).
         
+        Vertical merge behavior:
+        - All rows in a vertically merged region share the same content
+        - All rows use the paraId from the merge start cell (for precise edit targeting)
+        
         Args:
             table: python-docx Table object
             numbering_resolver: Optional NumberingResolver for extracting numbering
@@ -50,7 +55,9 @@ class TableExtractor:
             Dict with:
             - rows: 2D list of cell text strings
             - para_ids: 2D list of paraIds (first paraId in each cell, or None)
+                        For vertically merged cells, all rows share the start cell's paraId
             - para_ids_end: 2D list of paraIds (last paraId in each cell, or None)
+                            For vertically merged cells, all rows share the start cell's paraId
             - header_indices: List of row indices marked as table headers
         """
         tbl = table._tbl
@@ -77,6 +84,7 @@ class TableExtractor:
         grid = []
         para_ids_grid = []
         para_ids_end_grid = []  # Track last paraId in each cell
+        vmerge_content = {}  # Track vertical merge by column: {col: {'text': str, 'para_id': str, 'para_id_end': str}}
         
         for tr in tbl.findall(qn('w:tr')):
             row_data = [''] * num_cols  # Pre-fill with empty strings
@@ -100,17 +108,25 @@ class TableExtractor:
                         grid_span = int(gs.get(qn('w:val')))
                 
                 # Check vMerge (vertical merge)
+                vmerge_elem = None
                 vmerge_val = None
                 if tcPr is not None:
-                    vm = tcPr.find(qn('w:vMerge'))
-                    if vm is not None:
-                        vmerge_val = vm.get(qn('w:val'))  # 'restart' or None (means 'continue')
+                    vmerge_elem = tcPr.find(qn('w:vMerge'))
+                    if vmerge_elem is not None:
+                        vmerge_val = vmerge_elem.get(qn('w:val'))  # 'restart' or None (means 'continue')
                 
-                # Only extract text if NOT a vMerge continuation
+                # Determine vMerge status
+                is_vmerge_restart = (vmerge_elem is not None and vmerge_val == 'restart')
+                is_vmerge_continue = (vmerge_elem is not None and vmerge_val in (None, 'continue'))
+                is_normal_cell = (vmerge_elem is None)
+                
                 cell_text = ''
                 cell_para_id = None
                 cell_para_id_end = None  # Track last paraId in cell
-                if vmerge_val != 'continue' and not (vmerge_val is None and tcPr is not None and tcPr.find(qn('w:vMerge')) is not None):
+                
+                # Handle different vMerge cases
+                if is_vmerge_restart or is_normal_cell:
+                    # Extract content for restart or normal cells
                     # Get cell text with numbering support
                     if numbering_resolver is not None:
                         # Extract text with numbering labels
@@ -197,6 +213,32 @@ class TableExtractor:
                             if para_text:
                                 para_texts.append(para_text.strip())
                         cell_text = '\n'.join(para_texts).replace('\x07', '')
+                    
+                    # Store content and paraIds for vMerge restart
+                    if is_vmerge_restart:
+                        vmerge_content[grid_col] = {
+                            'text': cell_text,
+                            'para_id': cell_para_id,
+                            'para_id_end': cell_para_id_end
+                        }
+                    elif is_normal_cell:
+                        # For normal cells: if empty and we have active vMerge, copy all from start
+                        # If non-empty, this ends the vMerge region
+                        if not cell_text and grid_col in vmerge_content:
+                            # Empty cell in vMerge region - copy content and paraIds from start
+                            cell_text = vmerge_content[grid_col]['text']
+                            cell_para_id = vmerge_content[grid_col]['para_id']
+                            cell_para_id_end = vmerge_content[grid_col]['para_id_end']
+                        elif cell_text:
+                            # Non-empty cell - this ends the vMerge for this column
+                            vmerge_content.pop(grid_col, None)
+                
+                elif is_vmerge_continue:
+                    # Copy content and paraIds from previous merge start
+                    if grid_col in vmerge_content:
+                        cell_text = vmerge_content[grid_col]['text']
+                        cell_para_id = vmerge_content[grid_col]['para_id']
+                        cell_para_id_end = vmerge_content[grid_col]['para_id_end']
                 
                 # Place content at starting grid position only
                 if grid_col < num_cols:
