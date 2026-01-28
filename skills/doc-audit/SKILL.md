@@ -247,22 +247,25 @@ Execute LLM-based audit on each text block against audit rules. **Use this audit
 - Custom model selection (`--model`)
 - Adjusting parallelism (`--workers`)
 
+⚠️ **Resume Critical Note**: When resuming an interrupted audit, you **MUST** specify the correct `--output` path pointing to the existing manifest file (e.g., `.claude-work/doc-audit/<docname>_manifest.jsonl`). If omitted, the script defaults to `manifest.jsonl` in the current directory, which effectively restarts the audit from scratch.
+
 ```bash
 # Basic usage
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
-  --document blocks.jsonl \
-  --rules rules.json
+  --document .claude-work/doc-audit/<docname>_blocks.jsonl \
+  --rules .claude-work/doc-audit/default_rules.json
 
-# Resume from interruption
+# Resume from interruption (MUST specify the same output file as the original run)
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
-  --document blocks.jsonl \
-  --rules rules.json \
+  --document .claude-work/doc-audit/<docname>_blocks.jsonl \
+  --rules .claude-work/doc-audit/default_rules.json \
+  --output .claude-work/doc-audit/<docname>_manifest.jsonl \
   --resume
 
 # Increase parallelism for faster processing
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
-  --document blocks.jsonl \
-  --rules rules.json \
+  --document .claude-work/doc-audit/<docname>_blocks.jsonl \
+  --rules .claude-work/doc-audit/default_rules.json \
   --workers 12
 ```
 
