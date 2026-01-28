@@ -377,6 +377,25 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --rules custom_rules.json \
   --model gemini-2.5-flash
 
+# Force Gemini provider (even if OPENAI_API_KEY is also set)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider gemini
+
+# Force OpenAI provider (even if GOOGLE_API_KEY is also set)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider openai
+
+# Combine provider and model selection
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider openai \
+  --model gpt-5.2
+
 # Process specific block range
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document blocks.jsonl \
@@ -404,6 +423,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | `--document` / `-d` | path | Yes | Path to document blocks file (JSONL or JSON from `parse_document.py`) |
 | `--rules` / `-r` | path | Yes | Path to audit rules JSON file |
 | `--output` / `-o` | path | No | Output manifest file path (default: `manifest.jsonl`) |
+| `--provider` | choice | No | Force LLM provider: `auto` (default), `gemini`, `openai` |
 | `--model` | text | No | LLM model: `auto` (default), `gemini-2.5-flash`, `gpt-5.2`, etc. |
 | `--workers` | int | No | Number of parallel workers for concurrent API calls (default: 8) |
 | `--rate-limit` | float | No | Seconds to wait between API calls per worker (default: 0.05) |
@@ -412,12 +432,65 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | `--resume` | flag | No | Resume from previous run (skip already-processed blocks) |
 | `--dry-run` | flag | No | Print prompts without calling LLM (for debugging) |
 
+### Provider Selection (`--provider`)
+
+The `--provider` parameter allows you to explicitly specify which LLM provider to use, which is useful when you have both Gemini and OpenAI credentials configured.
+
+**Behavior:**
+
+| `--provider` | `--model` | Result |
+|--------------|-----------|--------|
+| `auto` (default) | `auto` | Auto-detect: Gemini (if configured) > OpenAI |
+| `auto` | `gemini-2.5-flash` | Use Gemini with specified model |
+| `auto` | `gpt-5.2` | Use OpenAI with specified model |
+| `gemini` | any value | **Force Gemini** (validates credentials) |
+| `openai` | any value | **Force OpenAI** (validates credentials) |
+
+**Credential Validation:**
+
+When you explicitly specify a provider, the script validates that the required credentials are present:
+
+- `--provider gemini` checks for:
+  - AI Studio mode: `GOOGLE_API_KEY`
+  - Vertex AI mode: `GOOGLE_CLOUD_PROJECT`
+  
+- `--provider openai` checks for:
+  - `OPENAI_API_KEY`
+
+If credentials are missing, you'll get a clear error message with hints on how to fix it.
+
+**Use Cases:**
+
+```bash
+# Scenario: Both GOOGLE_API_KEY and OPENAI_API_KEY are set
+# Want to use OpenAI instead of default Gemini
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider openai
+
+# Scenario: Testing different providers for comparison
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider gemini \
+  --output manifest_gemini.jsonl
+
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document blocks.jsonl \
+  --rules rules.json \
+  --provider openai \
+  --output manifest_openai.jsonl
+```
+
 ### Model Selection (`--model`)
 
 - `auto` (default): Auto-select based on available credentials (Gemini preferred if configured)
 - `gemini-2.5-flash`, `gemini-3-flash`: Use Google Gemini (via AI Studio or Vertex AI)
 - `gpt-5.2`, `gpt-4o`, `gpt-4o-mini`: Use OpenAI (requires `OPENAI_API_KEY`)
 - Model defaults are configured in `.claude-work/doc-audit/env.sh`
+
+**Note:** When `--provider` is specified, it overrides the provider inference from `--model`. For example, `--provider gemini --model gpt-5.2` will use Gemini (the model name is treated as a custom model identifier).
 
 ### Google Gemini Configuration
 

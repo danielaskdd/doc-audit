@@ -23,9 +23,9 @@ mkdir -p "$WORK_DIR/logs"
 echo "   ✓ Directory created: $DOC_AUDIT_DIR/"
 
 # Copy default resources to working directory
-cp "$SKILL_PATH/assets/default_rules.json" "$DOC_AUDIT_DIR/"
+cp -y "$SKILL_PATH/assets/default_rules.json" "$DOC_AUDIT_DIR/"
 echo "   ✓ Copied default_rules.json to working directory"
-cp "$SKILL_PATH/assets/report_template.html" "$DOC_AUDIT_DIR/"
+cp -y "$SKILL_PATH/assets/report_template.html" "$DOC_AUDIT_DIR/"
 echo "   ✓ Copied report_template.html to working directory"
 echo
 

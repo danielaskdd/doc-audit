@@ -412,6 +412,7 @@ async def audit_block_with_retry(
 # JSON Schema for LLM structured output
 AUDIT_RESULT_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "is_violation": {
             "type": "boolean",
@@ -422,6 +423,7 @@ AUDIT_RESULT_SCHEMA = {
             "description": "List of violations found",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "rule_id": {
                         "type": "string",
@@ -1256,6 +1258,13 @@ def main():
         help="Output manifest file path (default: manifest.jsonl)"
     )
     parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["auto", "gemini", "openai"],
+        default="auto",
+        help="Force LLM provider: gemini, openai, or auto (default: auto)"
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="auto",
@@ -1327,7 +1336,52 @@ def main():
     # Check if Vertex AI mode is enabled
     use_vertex = is_vertex_ai_mode()
 
-    if model_name == "auto":
+    # Validate credentials when provider is explicitly specified
+    if args.provider == "gemini":
+        if not HAS_GEMINI:
+            print("Error: google-genai library not installed", file=sys.stderr)
+            print("Install with: pip install google-genai", file=sys.stderr)
+            sys.exit(1)
+        
+        # Check credentials based on Vertex AI mode
+        if use_vertex:
+            if not os.getenv("GOOGLE_CLOUD_PROJECT"):
+                print("Error: --provider=gemini requires GOOGLE_CLOUD_PROJECT for Vertex AI mode", file=sys.stderr)
+                print("Hint: Set GOOGLE_GENAI_USE_VERTEXAI=false to use AI Studio mode", file=sys.stderr)
+                sys.exit(1)
+        else:
+            if not os.getenv("GOOGLE_API_KEY"):
+                print("Error: --provider=gemini requires GOOGLE_API_KEY for AI Studio mode", file=sys.stderr)
+                print("Hint: Set GOOGLE_GENAI_USE_VERTEXAI=true to use Vertex AI mode", file=sys.stderr)
+                sys.exit(1)
+        
+        # Force Gemini usage
+        use_gemini = True
+        if model_name == "auto":
+            model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-2.5-flash")
+        try:
+            client = create_gemini_client(use_async=True)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    
+    elif args.provider == "openai":
+        if not HAS_OPENAI:
+            print("Error: openai library not installed", file=sys.stderr)
+            print("Install with: pip install openai", file=sys.stderr)
+            sys.exit(1)
+        
+        if not os.getenv("OPENAI_API_KEY"):
+            print("Error: --provider=openai requires OPENAI_API_KEY", file=sys.stderr)
+            sys.exit(1)
+        
+        # Force OpenAI usage
+        use_gemini = False
+        if model_name == "auto":
+            model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-4.1")
+        client = create_openai_client(use_async=True)
+    
+    elif model_name == "auto":
         # Auto-detect: check Gemini credentials first (AI Studio or Vertex AI)
         gemini_available = False
         if HAS_GEMINI:
