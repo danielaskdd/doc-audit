@@ -188,16 +188,9 @@ def load_base_rules(base_rules_path: Optional[str] = None) -> list:
         List of rule dictionaries
     """
     if base_rules_path is None:
-        # Auto-detect default_rules.json
-        # Priority: 1) .claude-work/doc-audit/default_rules.json, 2) skill's assets/default_rules.json
-        work_dir_rules = Path.cwd() / ".claude-work" / "doc-audit" / "default_rules.json"
+        # Use default_rules.json from skill's assets directory
         script_dir = Path(__file__).parent
-        skill_rules = script_dir.parent / "assets" / "default_rules.json"
-        
-        if work_dir_rules.exists():
-            base_rules_path = work_dir_rules
-        else:
-            base_rules_path = skill_rules
+        base_rules_path = script_dir.parent / "assets" / "default_rules.json"
     
     path = Path(base_rules_path)
     if not path.exists():

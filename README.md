@@ -69,9 +69,8 @@ source .claude-work/doc-audit/env.sh
 
 This creates:
 - `.claude-work/venv/` - Python virtual environment with all dependencies
-- `.claude-work/doc-audit/` - Working directory for audit files
-- `.claude-work/doc-audit/default_rules.json` - Default audit rules
-- `.claude-work/doc-audit/workflow.sh` - Convenience workflow script
+- `.claude-work/doc-audit/` - Working directory for intermediate audit files
+- `.claude-work/doc-audit/env.sh` - Environment activation script
 
 ## Word Document Best Practices
 

@@ -28,6 +28,7 @@ doc-audit/
 │       ├── LICENSE.txt          # MIT License
 │       ├── scripts/             # Core audit scripts
 │       │   ├── setup_project_env.sh    # Environment initialization
+│       │   ├── workflow.sh             # Complete audit workflow script
 │       │   ├── parse_rules.py          # LLM-based rule generation
 │       │   ├── parse_document.py       # DOCX parsing with numbering
 │       │   ├── run_audit.py            # LLM audit execution
@@ -75,8 +76,6 @@ This creates:
 - `.claude-work/venv/` - Python virtual environment
 - `.claude-work/doc-audit/` - Working directory for audit files
 - `.claude-work/doc-audit/env.sh` - Environment activation script
-- `.claude-work/doc-audit/workflow.sh` - Convenience workflow script
-- `.claude-work/doc-audit/default_rules.json` - Default audit rules
 
 ### Environment Variables
 
@@ -98,15 +97,18 @@ export AUDIT_LANGUAGE="Chinese"       # Default: Chinese
 ### Complete Audit Workflow (Recommended)
 
 ```bash
-# Activate environment first
+# First time: use relative path (auto-initializes working directory)
+skills/doc-audit/scripts/workflow.sh document.docx
+
+# After setup: can use $DOC_AUDIT_SKILL_PATH
 source .claude-work/doc-audit/env.sh
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx
 
-# Audit with default rules
-./.claude-work/doc-audit/workflow.sh document.docx
-
-# Audit with custom rules
-./.claude-work/doc-audit/workflow.sh document.docx custom_rules.json
+# With custom rules
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r custom_rules.json
 ```
+
+**Note**: workflow.sh automatically runs setup if the working directory doesn't exist.
 
 Output: `<document_directory>/<docname>_audit_report.html`
 
@@ -131,7 +133,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 
 # Generate HTML report
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
+  --template $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   --rules rules.json \
   --output audit_report.html
 
