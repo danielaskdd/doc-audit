@@ -540,8 +540,8 @@ def format_block_for_prompt(block: dict) -> str:
     Returns:
         Formatted string
     """
-    heading = block.get('heading', 'Unknown')
-    content = block.get('content', '')
+    heading = block.get('heading', 'Unknown').strip()
+    content = block.get('content', '').strip()
     block_type = block.get('type', 'text')
     parent_headings = block.get('parent_headings', [])
 
@@ -549,7 +549,7 @@ def format_block_for_prompt(block: dict) -> str:
     # Context hierarchy: 1  header1 → 1.2  header2 → 1.2.2  header3
     context = ""
     if parent_headings:
-        context = f"Context hierarchy: {' → '.join(parent_headings)}\n"
+        context = f"Section hierarchy context: {' → '.join(h.strip() for h in parent_headings)}  → {heading}"
 
     if block_type == 'table':
         # Format table as readable text
@@ -672,7 +672,7 @@ def build_user_prompt(block: dict) -> str:
         User prompt string
     """
     block_text = format_block_for_prompt(block)
-    return f"""Analyze the following text block for rule violations:
+    return f"""Analyze the following content with section context for rule violations:
 
 {block_text}"""
 
@@ -723,91 +723,6 @@ async def audit_block_openai_async(block: dict, system_prompt: str, model_name: 
     user_prompt = build_user_prompt(block)
 
     response = await client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.2,
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "audit_result",
-                "strict": True,
-                "schema": AUDIT_RESULT_SCHEMA
-            }
-        }
-    )
-
-    # With structured output, response is guaranteed to be valid JSON
-    result = json.loads(response.choices[0].message.content)
-    return result
-
-
-def audit_block_gemini(block: dict, system_prompt: str, model_name: str = None, client = None) -> dict:
-    """
-    Audit a text block using Google Gemini with strict JSON mode (sync version).
-    
-    Supports both AI Studio and Vertex AI modes based on environment configuration.
-    See create_gemini_client() for details on environment variables.
-
-    Args:
-        block: Text block to audit
-        system_prompt: Cached system prompt with rules and instructions
-        model_name: Gemini model to use (uses DOC_AUDIT_GEMINI_MODEL env var if None)
-        client: Gemini client instance (creates one using create_gemini_client if None)
-
-    Returns:
-        Audit result dictionary
-    """
-    if model_name is None:
-        model_name = os.getenv("DOC_AUDIT_GEMINI_MODEL", "gemini-2.5-flash")
-    
-    if client is None:
-        client = create_gemini_client(use_async=False)
-    
-    user_prompt = build_user_prompt(block)
-
-    response = client.models.generate_content(
-        model=model_name,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_schema=AUDIT_RESULT_SCHEMA
-        )
-    )
-    
-    # With structured output, response is guaranteed to be valid JSON
-    result = json.loads(response.text)
-    return result
-
-
-def audit_block_openai(block: dict, system_prompt: str, model_name: str = None, client = None) -> dict:
-    """
-    Audit a text block using OpenAI with strict JSON mode (sync version).
-    
-    Supports custom base URL via OPENAI_BASE_URL environment variable.
-    See create_openai_client() for details.
-
-    Args:
-        block: Text block to audit
-        system_prompt: Cached system prompt with rules and instructions
-        model_name: OpenAI model to use (uses DOC_AUDIT_OPENAI_MODEL env var if None)
-        client: OpenAI client instance (creates one using create_openai_client if None)
-
-    Returns:
-        Audit result dictionary
-    """
-    if model_name is None:
-        model_name = os.getenv("DOC_AUDIT_OPENAI_MODEL", "gpt-5.2")
-    
-    if client is None:
-        client = create_openai_client(use_async=False)
-    
-    user_prompt = build_user_prompt(block)
-
-    response = client.chat.completions.create(
         model=model_name,
         messages=[
             {"role": "system", "content": system_prompt},
