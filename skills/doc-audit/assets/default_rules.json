@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "description": "Default audit rules for document verification",
-  "total_rules": 8,
+  "type": "block_level",
   "rules": [
     {
       "id": "R001",
@@ -9,8 +9,8 @@
       "severity": "medium",
       "category": "grammar",
       "examples": {
-        "violation": "内部协调和作机制",
-        "correction": "内部协调合作机制"
+        "violation_text": "内部协调和作机制",
+        "revised_text": "内部协调合作机制"
       }
     },
     {
@@ -19,8 +19,8 @@
       "severity": "medium",
       "category": "grammar",
       "examples": {
-        "violation": "自动化控制系统具有极强的强壮性（Robustness）",
-        "correction": "自动化控制系统具有极强的鲁棒性（Robustness）"
+        "violation_text": "自动化控制系统具有极强的强壮性（Robustness）",
+        "revised_text": "自动化控制系统具有极强的鲁棒性（Robustness）"
       }
     },
     {
@@ -29,8 +29,8 @@
       "severity": "high",
       "category": "consistency",
       "examples": {
-        "violation": "甲方通知乙方其应支付费用，我方须在30天内完成，否则它将失效。",
-        "correction": "甲方通知乙方，乙方应支付费用；乙方须在30天内完成支付，否则本通知将失效。"
+        "violation_text": "甲方通知乙方其应支付费用，我方须在30天内完成，否则它将失效。",
+        "revised_text": "甲方通知乙方，乙方应支付费用；乙方须在30天内完成支付，否则本通知将失效。"
       }
     },
     {
@@ -39,8 +39,8 @@
       "severity": "low",
       "category": "consistency",
       "examples": {
-        "violation": "必须在项目截止日期前一个月提交验收报告。",
-        "correction": "乙方必须在项目截止日期前一个月提交验收报告。"
+        "violation_text": "必须在项目截止日期前一个月提交验收报告。",
+        "revised_text": "乙方必须在项目截止日期前一个月提交验收报告。"
       }
     },
     {
@@ -49,8 +49,8 @@
       "severity": "medium",
       "category": "time",
       "examples": {
-        "violation": "交付物应在签署协议后立即提供。",
-        "correction": "交付物应在协议签署之日起15个工作日内提供。"
+        "violation_text": "交付物应在签署协议后立即提供。",
+        "revised_text": "交付物应在协议签署之日起15个工作日内提供。"
       }
     },
     {
@@ -59,8 +59,8 @@
       "severity": "high",
       "category": "money",
       "examples": {
-        "violation": "违约金总额为5万元。",
-        "correction": "违约金总额为人民币5万元。"
+        "violation_text": "违约金总额为5万元。",
+        "revised_text": "违约金总额为人民币5万元。"
       }
     },
     {
@@ -69,8 +69,8 @@
       "severity": "high",
       "category": "calculation",
       "examples": {
-        "violation": "一年12月，每月25天，每天10小时，年工作时长为3600小时。",
-        "correction": "一年12月，每月25天，每天10小时，年工作时长为3000小时。"
+        "violation_text": "一年12月，每月25天，每天10小时，年工作时长为3600小时。",
+        "revised_text": "一年12月，每月25天，每天10小时，年工作时长为3000小时。"
       }
     },
     {
@@ -79,8 +79,8 @@
       "severity": "high",
       "category": "logic",
       "examples": {
-        "violation": "技术要求：内容容量256MB；投标相应：内容容量512MB；偏离结论：无偏离。",
-        "correction": "偏离结论：正偏离."
+        "violation_text": "技术要求：内容容量256MB；投标相应：内容容量512MB；偏离结论：无偏离。",
+        "revised_text": "偏离结论：正偏离."
       }
     }
   ]

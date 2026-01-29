@@ -39,23 +39,21 @@ This creates:
 
 ### Phase 1: Rule Selection
 
-**Decision Point:** Does user specify custom audit requirements?
+**Decision Point:** What audit rules does the user want?
 
 **Path A: Use Default Rules (Simple)**
 
 - User only requests "audit [filename]" without specific requirements
-- **Skip rule generation** - use `.claude-work/doc-audit/default_rules.json` (copied from `assets/default_rules.json` during enviroment setup)
+- **Skip rule generation** - use `.claude-work/doc-audit/default_rules.json` (copied from `assets/default_rules.json` during environment setup)
 - Proceed immediately to Phase 2
 
 **Path B: Custom Rules (Iterative)**
 
 1. **Analyze Requirements** - Agent converts user's needs into clear criteria
 
-2. **Generate Rules** - Invoke `parse_rules.py` to generate customized rules by merging them with the default rules
+2. **Generate Rules** - Invoke `parse_rules.py` to generate customized rules from user requirements
 
-   ⚠️ **CRITICAL**: Do NOT use the `--no-base` flag unless the user explicitly requests to exclude default rules. The default behavior is to merge user requirements WITH base rules.
-
-3. **User Confirmation** - ⚠️ **MANDATORY STEP - DO NOT SKIP**:
+3. **User Confirmation**:
 
    After generating rules, you **MUST**:
    - Use `read_file` to read the generated rules file (`.claude-work/doc-audit/<docname>_custom_rules.json`)
@@ -67,10 +65,36 @@ This creates:
      ...
      Total: N rules
      ```
-   - Ask user explicitly: "请审阅以上规则。是否批准继续审计？或需要修改规则？" (Please review the rules above. Approve to continue audit? Or need modifications?)
+   - Ask user explicitly: Please review the rules above. Approve to continue audit? Or need modifications?
    - **DO NOT proceed to Phase 2 until user explicitly confirms approval**
 
-4. **Iterate if Needed** - If user requests changes, refine rules using `parse_rules.py` again, then return to step 3 for re-confirmation
+4. **Iterate if Needed**:
+
+   - Upon receiving a user request to amend any rules, invoke parse_rules.py with the user's input and specify the generated rules file using the `--base-rules` flag.
+
+**Path C: Use Additional Rule Sets (Multi-Rules)**
+
+When user requests using specific rule file(s) (e.g., "use bidding_rules to audit"):
+
+1. **Find Rule Files** - Search in this order:
+   - `skills/doc-audit/assets/<filename>.json` - Predefined rule sets
+   - `.claude-work/doc-audit/<filename>.json` - Working directory
+   - Current directory - User-provided files
+   - Absolute/relative paths - As specified by user
+
+2. **Determine Merge Mode**:
+   - **Default behavior (Merge)**: Automatically include `default_rules.json` + user-specified rules
+     - User says: "use bidding rules", "add 招标规则", "also check with X"
+     - Example: `./workflow.sh doc.docx -r bidding_rules.json`
+
+   - **Exclude default rules**: Only when user explicitly says "only/just/仅用/只使用"
+     - User says: "only use bidding rules", "just use X, no default rules", "仅使用招标规则"
+     - Example: `./workflow.sh doc.docx --rules-only -r bidding_rules.json`
+
+3. **Verify and Proceed**:
+   - Confirm all rule files are found
+   - Show user which rules will be used
+   - Proceed to Phase 2
 
 ### Phase 2: Parse and Audit
 
@@ -181,17 +205,23 @@ source ./.claude-work/doc-audit/env.sh
 
 ### 2. Generate Customized Rules (Iterative)
 
-Intelligently merge base rules with user requirements using LLM.
+Use LLM to generate audit rules from user requirements. Can start from scratch or build upon existing rulesets.
 
-⚠️ **CRITICAL**: Do NOT use `--no-base` flag unless user explicitly requests to exclude default rules. Default behavior merges with base rules.
+**Default Behavior**: Creates new rules without loading default rules. To extend default rules, explicitly specify `--base-rules`.
 
 ```bash
-# Initial generation (merges with default rules)
+# Generate rules from scratch (most common)
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --input "Check for ambiguous payment terms and missing signatures" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
 
-# Iterative refinement (continues from previous output)
+# Extend default rules (when user wants to add to defaults)
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
+  --base-rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  --input "Add rule for checking ambiguous references" \
+  --output .claude-work/doc-audit/mydoc_custom_rules.json
+
+# Iterative refinement (modify existing custom rules)
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
   --input "Remove R009, make signature rule more specific" \
@@ -202,20 +232,32 @@ python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
 
 ### 3. Workflow Script (Recommended for Normal Audit Workflow)
 
-`workflow.sh` runs the complete audit pipeline: parse → audit → report. **This is the recommended way to perform audits instead of involving each tool separately  .**
+`workflow.sh` runs the complete audit pipeline: parse → audit → report. **This is the recommended way to perform audits instead of involving each tool separately.**
 
 ```bash
-# Use default rules
+# Use default rules only
 ./.claude-work/doc-audit/workflow.sh document.docx
 
-# Use custom rules
-./.claude-work/doc-audit/workflow.sh document.docx custom_rules.json
+# Use default rules + additional rule set (auto-merge)
+./.claude-work/doc-audit/workflow.sh document.docx -r bidding_rules.json
+
+# Use default rules + multiple additional rule sets (auto-merge)
+./.claude-work/doc-audit/workflow.sh document.docx -r bidding_rules.json -r contract_rules.json
+
+# Use only specified rules (exclude default rules)
+./.claude-work/doc-audit/workflow.sh document.docx --rules-only -r custom_rules.json
 ```
+
+**Rule File Search Order**:
+1. `.claude-work/doc-audit/` - Working directory
+2. `skills/doc-audit/assets/` - Predefined rule sets
+3. Current directory
+4. Absolute/relative paths as specified
 
 **What it does**:
 
 1. Parse document → `<docname>_blocks.jsonl`
-2. Run audit → `<docname>_manifest.jsonl`
+2. Run audit with merged rules → `<docname>_manifest.jsonl`
 3. Generate reports → `<document_name>_audit_report.html` and `<document_name>_audit_report.xlsx` (saved alongside source document)
 
 **Note**: If workflow fails, use individual tools (Parse, Audit, Report) to debug or continue manually.
@@ -250,10 +292,16 @@ Execute LLM-based audit on each text block against audit rules. **Use this audit
 ⚠️ **Resume Critical Note**: When resuming an interrupted audit, you **MUST** specify the correct `--output` path pointing to the existing manifest file (e.g., `.claude-work/doc-audit/<docname>_manifest.jsonl`). If omitted, the script defaults to `manifest.jsonl` in the current directory, which effectively restarts the audit from scratch.
 
 ```bash
-# Basic usage
+# Basic usage with default rules
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/<docname>_blocks.jsonl \
   --rules .claude-work/doc-audit/default_rules.json
+
+# Use multiple rule files (auto-merge)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/<docname>_blocks.jsonl \
+  -r .claude-work/doc-audit/default_rules.json \
+  -r skills/doc-audit/assets/bidding_rules.json
 
 # Resume from interruption (MUST specify the same output file as the original run)
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
@@ -283,11 +331,19 @@ Generate interactive HTML audit report from manifest. **Use this report script i
 - Excel export for spreadsheet review (`--excel`)
 
 ```bash
-# Basic usage
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
+# Basic usage with single rule file
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  --manifest manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --rules rules.json \
   --output audit_report.html
+
+# Use multiple rule files (auto-merge)
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -r default_rules.json -r bidding_rules.json \
+  -o audit_report.html
 ```
 
 **Key features**: Interactive filters, issue blocking, export to JSONL, rule details in modals.
