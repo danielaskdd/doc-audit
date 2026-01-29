@@ -78,6 +78,28 @@ def load_rules(file_path: str) -> dict:
     return rules_dict
 
 
+def merge_rules(rule_files: list) -> dict:
+    """
+    Load and merge rules from multiple JSON files.
+    Later files override earlier ones for duplicate rule IDs.
+    
+    Args:
+        rule_files: List of paths to rules JSON files
+        
+    Returns:
+        Dictionary mapping rule_id to rule details
+    """
+    merged = {}
+    for file_path in rule_files:
+        file_path_obj = Path(file_path)
+        if file_path_obj.exists():
+            rules = load_rules(file_path)
+            merged.update(rules)  # Later files override
+        else:
+            print(f"Warning: Rules file not found: {file_path}", file=sys.stderr)
+    return merged
+
+
 def generate_report_data(manifest: list, rules_file_dict: dict = None) -> dict:
     """
     Generate report data from manifest.
@@ -271,8 +293,9 @@ def main():
         description="Generate HTML audit report from manifest"
     )
     parser.add_argument(
-        "manifest",
+        "--manifest", "-m",
         type=str,
+        required=True,
         help="Path to audit manifest JSONL file"
     )
     parser.add_argument(
@@ -300,7 +323,10 @@ def main():
     parser.add_argument(
         "--rules", "-r",
         type=str,
-        help="Path to rules JSON file (optional, for loading rule descriptions)"
+        action='extend',
+        nargs='+',
+        default=[],
+        help="Path to audit rules JSON file(s). Can be specified multiple times to merge rules."
     )
     parser.add_argument(
         "--excel",
@@ -321,16 +347,12 @@ def main():
         print(f"Error: Template file not found: {args.template}", file=sys.stderr)
         sys.exit(1)
 
-    # Load rules if provided
+    # Load and merge rules if provided
     rules_dict = {}
     if args.rules:
-        rules_path = Path(args.rules)
-        if rules_path.exists():
-            print(f"Loading rules: {args.rules}")
-            rules_dict = load_rules(args.rules)
-            print(f"Loaded {len(rules_dict)} rules")
-        else:
-            print(f"Warning: Rules file not found: {args.rules}", file=sys.stderr)
+        print(f"Loading rules from {len(args.rules)} file(s)...")
+        rules_dict = merge_rules(args.rules)
+        print(f"Loaded {len(rules_dict)} unique rules")
 
     # Load and process manifest
     print(f"Loading manifest: {args.manifest}")

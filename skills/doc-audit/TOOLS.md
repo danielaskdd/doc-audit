@@ -18,32 +18,32 @@ This document provides detailed documentation for advanced tools that are typica
 ## Parse Rules
 
 Parse natural language audit criteria into structured JSON rules using LLM. This tool is typically used to:
-- **Create custom rules**: Convert user requirements into structured audit rules
-- **Extend base rules**: Add new rules while preserving existing ones
+- **Create custom rules**: Convert user requirements into structured audit rules from scratch
+- **Extend base rules**: Add new rules to existing rulesets while preserving them
 - **Modify rules**: Update specific rules by explicit request
 
-**DEFAULT BEHAVIOR**: Always merges with base rules unless user explicitly requests otherwise.
+**DEFAULT BEHAVIOR**: Starts from scratch unless `--base-rules` is specified. Default rules are NOT automatically loaded.
 
 ### Usage Examples
 
 **Common Usage Patterns:**
 
 ```bash
-# ✅ RECOMMENDED: Initial generation (automatically merges with default rules)
-# Use when: User wants custom requirements PLUS default rules
-# Tip: Use document name prefix for better organization
+# ✅ Create rules from scratch (generates only user-requested rules)
+# Use when: User wants custom requirements WITHOUT default rules
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --input "Check for ambiguous payment terms and missing signatures" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
 
-# ✅ RECOMMENDED: Iterative refinement (continues from previous output)
-# Use when: User wants to modify/add/remove specific rules
+# ✅ Create rules based on default rules (adds to or modifies defaults)
+# Use when: User wants to extend or modify default rules
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
-  --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
+  --base-rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
   --input "Add rule for checking ambiguous references" \
   --output .claude-work/doc-audit/mydoc_custom_rules.json
 
-# ✅ Further iteration
+# ✅ Iterative refinement (continues from previous output)
+# Use when: User wants to modify/add/remove specific rules from existing set
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --base-rules .claude-work/doc-audit/mydoc_custom_rules.json \
   --input "Remove R009, make signature rule more specific" \
@@ -54,15 +54,11 @@ python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --file requirements.txt \
   --output custom_rules.json
 
-# ⚠️ ONLY use --no-base when user EXPLICITLY requests to exclude default rules
-# Example user requests that warrant --no-base:
-#   - "Only check for X and Y, don't include any default rules"
-#   - "Start from scratch without default rules"
-#   - "I only want these specific rules, no others"
+# Read requirements from file and extend defaults
 python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
-  --no-base \
-  --input "Check for missing section numbers and inconsistent terminology" \
-  --output .claude-work/doc-audit/mydoc_custom_rules.json
+  --base-rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  --file requirements.txt \
+  --output custom_rules.json
 ```
 
 ### Decision Guide
@@ -71,10 +67,9 @@ When to use each parameter:
 
 | User Request | Recommended Usage |
 |--------------|-------------------|
-| "Check for A, B, C" | ✅ Default (merges with base rules) |
-| "Add rule for X" | ✅ Use `--base-rules` with previous output |
-| "ONLY check for A, no other rules" | ⚠️ Use `--no-base` |
-| "Don't include default/standard rules" | ⚠️ Use `--no-base` |
+| "Check for A, B, C" | ✅ Default (starts from scratch) |
+| "Add these to default rules" | ✅ Use `--base-rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json` |
+| "Modify existing rules" | ✅ Use `--base-rules` with the existing rules file |
 
 ### Naming Best Practice
 
@@ -88,12 +83,11 @@ When auditing multiple documents, use document name prefixes for custom rules to
 |-----------|------|----------|-------------|
 | `--input` / `-i` | text | No* | Natural language audit criteria text |
 | `--file` / `-f` | path | No* | File containing audit criteria |
-| `--base-rules` | path | No | Base rules file to merge with (default: auto-detect) |
+| `--base-rules` | path | No | Base rules file to merge with. If not specified, starts from scratch. |
 | `--output` / `-o` | path | No | Output JSON file path (default: `rules.json`) |
-| `--no-base` | flag | No | Don't load base rules (start from scratch) |
 | `--api-key` | text | No | API key for LLM service (uses env vars by default) |
 
-\* Either `--input` or `--file` is required unless base rules are available
+\* Either `--input` or `--file` is required (LLM will generate rules based on input)
 
 ### LLM Configuration
 
@@ -365,10 +359,21 @@ Execute LLM-based audit on each text block against audit rules. This tool is aut
 ### Usage Examples
 
 ```bash
-# Basic usage with auto model selection
+# Basic usage with single rule file
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/blocks.jsonl \
   --rules .claude-work/doc-audit/default_rules.json
+
+# Use multiple rule files (auto-merge, checks for duplicate IDs)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/blocks.jsonl \
+  -r .claude-work/doc-audit/default_rules.json \
+  -r skills/doc-audit/assets/bidding_rules.json
+
+# Another way to specify multiple files
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/blocks.jsonl \
+  --rules rules1.json rules2.json rules3.json
 
 # Specify model explicitly
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
@@ -420,7 +425,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `--document` / `-d` | path | Yes | Path to document blocks file (JSONL or JSON from `parse_document.py`) |
-| `--rules` / `-r` | path | Yes | Path to audit rules JSON file |
+| `--rules` / `-r` | path | Yes | Path to audit rules JSON file(s). Can be specified multiple times to merge rules. |
 | `--output` / `-o` | path | No | Output manifest file path (default: `manifest.jsonl`) |
 | `--provider` | choice | No | Force LLM provider: `auto` (default), `gemini`, `openai` |
 | `--model` | text | No | LLM model: `auto` (default), `gemini-2.5-flash`, `gpt-5.2`, etc. |
@@ -753,36 +758,55 @@ Create HTML audit report from audit manifest with statistics and traceability. T
 ### Usage Examples
 
 ```bash
-# Basic usage
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
+# Basic usage with single rule file
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  --manifest manifest.jsonl \
   --template .claude-work/doc-audit/report_template.html \
   --rules .claude-work/doc-audit/default_rules.json \
   --output audit_report.html
 
+# Use multiple rule files (auto-merge, later files override earlier ones)
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -r .claude-work/doc-audit/default_rules.json \
+  -r skills/doc-audit/assets/bidding_rules.json \
+  -o audit_report.html
+
+# Another way to specify multiple files
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  --rules rules1.json rules2.json rules3.json \
+  -o audit_report.html
 
 # No rule descriptions in report (not recommended)
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
-  --output audit_report.html
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -o audit_report.html
 
 # Also output JSON data
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
-  --rules rules.json \
-  --output report.html \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -r rules.json \
+  -o report.html \
   --json
 
 # Also output Excel report
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
-  --rules rules.json \
-  --output report.html \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -r rules.json \
+  -o report.html \
   --excel
 
 # For trusted HTML content (disables escaping, not recommended)
-python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
-  --output report.html \
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  -m manifest.jsonl \
+  -t .claude-work/doc-audit/report_template.html \
+  -o report.html \
   --trusted-html
 ```
 
@@ -790,10 +814,10 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py manifest.jsonl \
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `manifest` | path | Yes | Path to audit manifest JSONL file (from `run_audit.py`) |
+| `--manifest` / `-m` | path | Yes | Path to audit manifest JSONL file (from `run_audit.py`) |
 | `--output` / `-o` | path | No | Output HTML file path (default: `audit_report.html`) |
 | `--template` / `-t` | path | Yes | Path to Jinja2 HTML template |
-| `--rules` / `-r` | path | No | Path to rules JSON file (optional, recommended for displaying full rule details in modal popups) |
+| `--rules` / `-r` | path | No | Path to audit rules JSON file(s). Can be specified multiple times to merge rules. Later files override earlier ones for duplicate rule IDs. Recommended for displaying full rule details in modal popups. |
 | `--trusted-html` | flag | No | Disable HTML escaping (only for trusted inputs) |
 | `--json` | flag | No | Also output report data as JSON (same name with `.json` extension) |
 | `--excel` | flag | No | Also output report as Excel file (same name with `.xlsx` extension). Requires `openpyxl` package. |

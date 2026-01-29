@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "description": "Additional audit rules for bidding document verification",
+  "type": "block_level",
+  "rules": [
+    {
+      "id": "B001",
+      "description": "招标技术要求DSP和FPGA加载方式必须自此上电自动加载和JTAG加载调试。检查应标内容中是否存在与此要求矛盾的地方，漏掉JTAG加载方式属违反规则。发现问题返回建议即可，不需要修改原文。",
+      "severity": "medium",
+      "category": "consistency"
+    },
+    {
+      "id": "B002",
+      "description": "招标技术要求“信息处理组件”的MTBF（平均故障间隔时间）不能小于7000h， 自主飞可靠度不能小于 0.9999。检查应标内容中是否在与此要求矛盾的地方。发现问题返回建议即可，不需要修改原文。",
+      "severity": "high",
+      "category": "consistency"
+    },
+    {
+      "id": "B003",
+      "description": "招标技术要求所有器件的还阴适应要求必须满足：a)工作环境温度范围：-45°C ～ +70°C；b)贮存环境温度范围：-55°C ～ +70°C；c)海拔高度范围：0 ～ 12000m。检查应标内容中是否在与此要求矛盾的地方。发现问题返回建议即可，不需要修改原文。",
+      "severity": "high",
+      "category": "consistency"
+    }
+  ]
+}

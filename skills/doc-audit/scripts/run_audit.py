@@ -517,6 +517,43 @@ def load_rules(file_path: str) -> list:
         raise ValueError(f"Unknown rules format in {file_path}")
 
 
+def merge_rules(rule_files: list) -> list:
+    """
+    Load and merge rules from multiple JSON files.
+    Checks for duplicate rule IDs and exits if found.
+    
+    Args:
+        rule_files: List of paths to rules JSON files
+        
+    Returns:
+        Merged list of rule dictionaries
+        
+    Exits:
+        If duplicate rule IDs are found
+    """
+    merged_rules = []
+    seen_ids = {}  # rule_id -> source_file
+    
+    for file_path in rule_files:
+        rules = load_rules(file_path)
+        for rule in rules:
+            rule_id = rule.get('id', '')
+            if not rule_id:
+                print(f"Warning: Rule without ID found in {file_path}, skipping", file=sys.stderr)
+                continue
+            
+            if rule_id in seen_ids:
+                print(f"Error: Duplicate rule ID '{rule_id}' found.", file=sys.stderr)
+                print(f"  First occurrence: {seen_ids[rule_id]}", file=sys.stderr)
+                print(f"  Duplicate in: {file_path}", file=sys.stderr)
+                sys.exit(1)
+            
+            seen_ids[rule_id] = file_path
+            merged_rules.append(rule)
+    
+    return merged_rules
+
+
 def build_rule_category_map(rules: list) -> dict:
     """
     Build a mapping from rule_id to category.
@@ -1163,8 +1200,10 @@ def main():
     parser.add_argument(
         "--rules", "-r",
         type=str,
+        action='extend',
+        nargs='+',
         required=True,
-        help="Path to audit rules JSON file"
+        help="Path to audit rules JSON file(s). Multiple files will be merged."
     )
     parser.add_argument(
         "--output", "-o",
@@ -1378,9 +1417,12 @@ def main():
         print(f"Source file: {metadata.get('source_file', 'Unknown')}")
         print(f"File hash: {metadata.get('source_hash', 'Unknown')[:20]}...")
 
-    print(f"Loading rules from: {args.rules}")
-    rules = load_rules(args.rules)
-    print(f"Loaded {len(rules)} rules")
+    # Load and merge rules from multiple files
+    print(f"Loading rules from {len(args.rules)} file(s):")
+    for rule_file in args.rules:
+        print(f"  - {rule_file}")
+    rules = merge_rules(args.rules)
+    print(f"Loaded {len(rules)} rules in total")
 
     # Handle resume
     completed_uuids = set()
