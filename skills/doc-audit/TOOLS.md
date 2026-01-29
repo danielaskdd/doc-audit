@@ -165,7 +165,6 @@ The generated `rules.json` file has this structure:
 ```json
 {
   "version": "1.0",
-  "total_rules": 5,
   "rules": [
     {
       "id": "R001",

@@ -1,7 +1,6 @@
 {
   "version": "1.0",
   "description": "Default audit rules for document verification",
-  "total_rules": 8,
   "rules": [
     {
       "id": "R001",
