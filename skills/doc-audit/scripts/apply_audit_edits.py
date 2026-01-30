@@ -80,14 +80,39 @@ class EditResult:
 # Helper Functions
 # ============================================================
 
+def sanitize_xml_string(text: str) -> str:
+    """
+    Remove control characters that are illegal in XML 1.0.
+
+    XML 1.0 allows: #x9 (tab), #xA (LF), #xD (CR), and #x20-#xD7FF, #xE000-#xFFFD, #x10000-#x10FFFF
+    This function removes all other control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F).
+
+    Args:
+        text: Text that may contain control characters
+
+    Returns:
+        Sanitized text safe for XML
+    """
+    if not text:
+        return text
+    # Build a translation table to remove illegal control characters
+    # Keep: \t (0x09), \n (0x0A), \r (0x0D)
+    # Remove: 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F
+    illegal_chars = ''.join(
+        chr(c) for c in range(0x20)
+        if c not in (0x09, 0x0A, 0x0D)
+    )
+    return text.translate(str.maketrans('', '', illegal_chars))
+
+
 def format_text_preview(text: str, max_len: int = 30) -> str:
     """
     Format text for log output: remove newlines and truncate.
-    
+
     Args:
         text: Text to format
         max_len: Maximum length before truncation
-    
+
     Returns:
         Clean, truncated text with "..." suffix if truncated
     """
@@ -565,7 +590,8 @@ class AuditEditApplier:
     # ==================== XML Helpers ====================
     
     def _escape_xml(self, text: str) -> str:
-        """Escape XML special characters"""
+        """Escape XML special characters and remove illegal control characters"""
+        text = sanitize_xml_string(text)
         return (text
             .replace('&', '&amp;')
             .replace('<', '&lt;')
@@ -1118,7 +1144,7 @@ class AuditEditApplier:
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
             r = etree.SubElement(p, f'{{{NS["w"]}}}r')
             t = etree.SubElement(r, f'{{{NS["w"]}}}t')
-            t.text = comment['text']
+            t.text = sanitize_xml_string(comment['text'])
         
         # Save via OPC
         blob = etree.tostring(

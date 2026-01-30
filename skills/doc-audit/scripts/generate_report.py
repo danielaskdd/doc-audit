@@ -27,6 +27,30 @@ except ImportError:
     EXCEL_AVAILABLE = False
 
 
+def sanitize_excel_string(text: str) -> str:
+    """
+    Remove control characters that are illegal in Excel/XML.
+
+    Excel uses XML internally, which only allows:
+    #x9 (tab), #xA (LF), #xD (CR), and #x20-#xD7FF, #xE000-#xFFFD, #x10000-#x10FFFF
+
+    Args:
+        text: Text that may contain control characters
+
+    Returns:
+        Sanitized text safe for Excel
+    """
+    if not text or not isinstance(text, str):
+        return text
+    # Remove illegal control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F)
+    # Keep: \t (0x09), \n (0x0A), \r (0x0D)
+    illegal_chars = ''.join(
+        chr(c) for c in range(0x20)
+        if c not in (0x09, 0x0A, 0x0D)
+    )
+    return text.translate(str.maketrans('', '', illegal_chars))
+
+
 def load_manifest(file_path: str) -> tuple:
     """
     Load audit results and metadata from manifest JSONL file.
@@ -272,7 +296,9 @@ def generate_excel_report(data: dict, output_path: str) -> None:
         ]
 
         for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            # Sanitize string values to remove illegal control characters
+            safe_value = sanitize_excel_string(value) if isinstance(value, str) else value
+            cell = ws.cell(row=row_idx, column=col_idx, value=safe_value)
             cell.alignment = content_alignment
             cell.border = thin_border
 
