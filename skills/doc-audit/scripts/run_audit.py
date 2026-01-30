@@ -39,6 +39,15 @@ from utils import (  # noqa: E402
     is_vertex_ai_mode,
 )
 
+from prompt import (  # noqa: E402
+    build_block_audit_system_prompt,
+    build_block_audit_user_prompt,
+    build_global_extract_system_prompt,
+    build_global_extract_user_prompt,
+    build_global_verify_system_prompt,
+    build_global_verify_user_prompt,
+)
+
 # Maximum number of concurrent LLM API calls
 MAX_PARALLEL_WORKERS = 8
 
@@ -167,7 +176,7 @@ async def audit_block_with_retry(
     
     for attempt in range(max_retries + 1):
         try:
-            user_prompt = build_user_prompt(block)
+            user_prompt = build_block_audit_user_prompt(block)
             if use_gemini:
                 return await audit_block_gemini_async(
                     user_prompt, system_prompt, model_name, client,
@@ -298,153 +307,6 @@ async def global_verify_with_retry(
             )
             await asyncio.sleep(wait_time)
     raise last_error
-
-
-def normalize_extracted_fields(rule: dict) -> list:
-    """
-    Normalize extracted_fields definitions into a list of {name, desc, evidence_desc}.
-
-    Supports two formats:
-    1) New: {"name": "...", "desc": "...", "evidence": "..."}
-    2) Legacy: {"field_name": "...", "evidence": "..."}
-    """
-    normalized = []
-    for field in rule.get("extracted_fields", []):
-        if not isinstance(field, dict):
-            continue
-        if "name" in field:
-            normalized.append({
-                "name": field.get("name", "").strip(),
-                "desc": field.get("desc", "").strip(),
-                "evidence_desc": field.get("evidence", "").strip()
-            })
-            continue
-        evidence_desc = field.get("evidence", "").strip()
-        for key, value in field.items():
-            if key == "evidence":
-                continue
-            normalized.append({
-                "name": str(key).strip(),
-                "desc": str(value).strip(),
-                "evidence_desc": evidence_desc
-            })
-    return normalized
-
-
-def format_global_rules_for_extraction(rules: list) -> str:
-    lines = ["Global Extraction Rules:"]
-    for rule in rules:
-        fields = normalize_extracted_fields(rule)
-        lines.append(f"- [{rule.get('id', '')}] {rule.get('topic', '')}")
-        extraction = rule.get("extraction", "")
-        if extraction:
-            lines.append(f"  Extraction: {extraction}")
-        entity_label = rule.get("extracted_entity", "")
-        if entity_label:
-            lines.append(f"  Entity: {entity_label}")
-        if fields:
-            lines.append("  Fields:")
-            for f in fields:
-                desc = f.get("desc", "")
-                evidence_desc = f.get("evidence_desc", "")
-                lines.append(f"    - {f.get('name','')}: {desc}")
-                if evidence_desc:
-                    lines.append(f"      Evidence: {evidence_desc}")
-    return "\n".join(lines)
-
-
-def build_global_extract_system_prompt(rules: list) -> str:
-    output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
-    rules_text = format_global_rules_for_extraction(rules)
-    return f"""You are an information extraction engine. Extract data from a single text block according to the global rules.
-
-{rules_text}
-
-Instructions:
-1. Only use information explicitly present in the given block.
-2. For each matched rule, return zero or more extracted entities with their fields.
-3. Fields must use the exact field names defined in the rule.
-4. If a field cannot be extracted, return empty string for both value and evidence.
-5. Evidence must be a verbatim excerpt from the block and should be short (no more than one sentence).
-
-Return JSON only with this structure:
-{{
-  "results": [
-    {{
-      "rule_id": "G001",
-      "extracted_results": [
-        {{
-          "entity": "entity name (string, can be empty if unknown)",
-          "fields": [
-            {{"name": "field_name", "value": "summary text", "evidence": "verbatim excerpt"}}
-          ]
-        }}
-      ]
-    }}
-  ]
-}}
-
-If no relevant information is found, return:
-{{
-  "results": []
-}}
-
-Return ONLY the JSON object, no other text. Output language for summaries should be {output_language}."""
-
-
-def build_global_extract_user_prompt(block: dict) -> str:
-    block_text = format_block_for_prompt(block)
-    return f"""Extract global rule information from the following block:
-
-{block_text}"""
-
-
-def build_global_verify_system_prompt(rule: dict) -> str:
-    output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
-    verification = rule.get("verification", "")
-    topic = rule.get("topic", "")
-    return f"""You are a consistency auditor. Check extracted items for conflicts based on the rule below.
-
-Rule ID: {rule.get('id','')}
-Topic: {topic}
-Verification: {verification}
-
-Instructions:
-1. Compare extracted items and identify inconsistencies or conflicts as defined by the rule.
-2. Use only the provided evidence text when referencing problematic content.
-3. violation_text must be a verbatim evidence excerpt from the input items.
-4. If unsure, mark as manual.
-
-Return JSON only:
-{{
-  "violations": [
-    {{
-      "rule_id": "{rule.get('id','')}",
-      "uuid": "<uuid>",
-      "uuid_end": "<uuid_end>",
-      "violation_text": "<verbatim evidence>",
-      "violation_reason": "<reason in {output_language}>",
-      "fix_action": "manual",
-      "revised_text": "<guidance in {output_language}>"
-    }}
-  ]
-}}
-
-If no violations, return:
-{{ "violations": [] }}
-
-Return ONLY the JSON object, no other text."""
-
-
-def build_global_verify_user_prompt(rule: dict, items: list) -> str:
-    payload = {
-        "rule_id": rule.get("id", ""),
-        "items": items
-    }
-    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
-    return f"""Check consistency for the following extracted items:
-
-{payload_text}"""
 
 
 def chunk_items_by_token_limit(rule: dict, items: list, max_tokens: int) -> list:
@@ -630,153 +492,6 @@ def build_rule_category_map(rules: list) -> dict:
         Dictionary mapping rule_id to category
     """
     return {rule['id']: rule.get('category', 'other') for rule in rules}
-
-
-def format_block_for_prompt(block: dict) -> str:
-    """
-    Format a text block for inclusion in the audit prompt.
-
-    Args:
-        block: Block dictionary with heading, content, type
-
-    Returns:
-        Formatted string
-    """
-    heading = block.get('heading', 'Unknown').strip()
-    content = block.get('content', '').strip()
-    block_type = block.get('type', 'text')
-    parent_headings = block.get('parent_headings', [])
-
-    ### Context format
-    # Context hierarchy: 1  header1 → 1.2  header2 → 1.2.2  header3
-    context = ""
-    if parent_headings:
-        context = f"Section hierarchy context: {' → '.join(h.strip() for h in parent_headings)}  → {heading}"
-
-    if block_type == 'table':
-        # Format table as readable text
-        if isinstance(content, list):
-            rows = []
-            for row in content:
-                rows.append(" | ".join(str(cell) for cell in row))
-            content = "\n".join(rows)
-
-    return f"""Section: {heading}
-{context}
-
-Content:
-{content}"""
-
-
-def format_rules_for_prompt(rules: list) -> str:
-    """
-    Format audit rules for inclusion in the prompt.
-
-    Args:
-        rules: List of rule dictionaries
-
-    Returns:
-        Formatted string
-    """
-    lines = ["Audit Rules:"]
-    for rule in rules:
-        severity = rule.get('severity', 'medium').upper()
-        lines.append(f"- [{rule['id']}] ({severity}) {rule['description']}")
-
-    return "\n".join(lines)
-
-
-def build_system_prompt(rules: list) -> str:
-    """
-    Build the system prompt containing static instructions and rules.
-    This can be cached by the LLM across multiple block audits.
-
-    Args:
-        rules: Audit rules to apply
-
-    Returns:
-        System prompt string
-    """
-    # Get output language from environment variable
-    output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
-    
-    rules_text = format_rules_for_prompt(rules)
-
-    system_prompt = f"""You are a professional document auditor. Your task is to analyze text blocks and check for violations of audit rules.
-
-{rules_text}
-
----
-
-Instructions:
-1. Check if the provided text block violates ANY of the rules above
-2. Report each violation as a separate item. Do not merge multiple instances of the same violation category into one entry.
-3. For each violation found, provide:
-   - The rule ID that was violated
-   - The violation text with enough surrounding context for unique string matching
-   - Why it's a violation
-   - The fix action: "delete", "replace", or "manual"
-   - The revised text based on fix_action
-
-violation_text guidelines:
-- The extracted text must be a direct verbatim quote from the source content, include line breaks, tabs, and other whitespace characters
-- Do not use ellipses to replace or omit any part of the original text
-- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
-- If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
-- If an entire section is in violation, select the corresponding heading as the violation_text (excluding `Section:` and the following heading number) 
-- For violations spanning multiple table cells, select text from one of the most relevant cell only; do not consolidate multiple cells into a single violation_text entry
-
-fix_action guidelines:
-- "delete": Use when the problematic text should be completely removed
-- "replace": Use when the text can be corrected with a specific replacement
-- "manual": Use when the fix requires human judgment or complex restructuring
-
-revised_text guidelines:
-- For "delete": Set to empty string ""
-- For "replace": Provide the complete replacement text that can directly substitute violation_text
-- For "manual": Provide guidance for the human reviewer
-
-If the violation_text is truncated due to excessive length or fails to achieve an exact match with the source material, the fix_action must be set to "manual"
-
-Return your analysis as a JSON object with this structure:
-{{
-  "is_violation": true/false,
-  "violations": [
-    {{
-      "rule_id": "R001",
-      "violation_text": "the specific problematic text with sufficient context",
-      "violation_reason": "explanation of why this violates the rule written in {output_language}",
-      "fix_action": "delete|replace|manual",
-      "revised_text": "corrected text in original language if fix_action is 'replace', otherwise guidance for human reviewer written in {output_language}"
-    }}
-  ]
-}}
-
-If there are no violations, return:
-{{
-  "is_violation": false,
-  "violations": []
-}}
-
-Return ONLY the JSON object, no other text."""
-
-    return system_prompt
-
-
-def build_user_prompt(block: dict) -> str:
-    """
-    Build the user prompt containing the dynamic block content to audit.
-
-    Args:
-        block: Text block to audit
-
-    Returns:
-        User prompt string
-    """
-    block_text = format_block_for_prompt(block)
-    return f"""Analyze the following content with section context for rule violations:
-
-{block_text}"""
 
 
 async def save_manifest_entry_async(manifest_path: str, entry: dict, lock: asyncio.Lock):
@@ -1331,7 +1046,7 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     rule_category_map = build_rule_category_map(rules)
 
     # Build system prompt once (will be cached by LLM)
-    system_prompt = build_system_prompt(rules)
+    system_prompt = build_block_audit_system_prompt(rules)
 
     # Build uuid → block_idx mapping for all blocks
     uuid_to_block_idx = {}
@@ -1945,7 +1660,7 @@ def main():
     if args.dry_run:
         if not block_rules:
             print("Dry-run: No block rules provided; skipping block audit prompts.")
-        system_prompt = build_system_prompt(block_rules)
+        system_prompt = build_block_audit_system_prompt(block_rules)
         start_idx = args.start_block
         end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
         blocks_to_process = blocks[start_idx:end_idx + 1]
@@ -1960,7 +1675,7 @@ def main():
                     continue
 
                 print(f"[{block_idx+1}/{len(blocks)}] Auditing: {block.get('heading', 'Unknown')[:50]}...")
-                user_prompt = build_user_prompt(block)
+                user_prompt = build_block_audit_user_prompt(block)
                 print(f"\n--- System Prompt ---\n{system_prompt[:300]}...\n")
                 print(f"--- User Prompt ---\n{user_prompt[:300]}...")
 

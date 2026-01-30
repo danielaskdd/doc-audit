@@ -14,8 +14,10 @@ sys.path.insert(0, str(_scripts_dir))
 
 from run_audit import (  # noqa: E402  # type: ignore
     chunk_items_by_token_limit,
-    normalize_extracted_fields,
     merge_global_violations,
+)
+from prompt import (  # noqa: E402  # type: ignore
+    normalize_extracted_fields,
     build_global_extract_system_prompt,
     build_global_verify_system_prompt,
 )
@@ -361,7 +363,7 @@ class TestBuildGlobalExtractSystemPrompt:
         rules = [create_sample_rule()]
         prompt = build_global_extract_system_prompt(rules)
 
-        assert "extraction engine" in prompt.lower()
+        assert "information extractor" in prompt.lower()
         assert "results" in prompt
         assert "extracted_results" in prompt
         assert "entity" in prompt
@@ -388,7 +390,7 @@ class TestBuildGlobalVerifySystemPrompt:
         rule = create_sample_rule()
         prompt = build_global_verify_system_prompt(rule)
 
-        assert "consistency auditor" in prompt.lower()
+        assert "cross-reference auditor" in prompt.lower()
         assert "violations" in prompt
         assert "violation_text" in prompt
         assert "manual" in prompt
