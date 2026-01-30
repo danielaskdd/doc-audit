@@ -919,6 +919,15 @@ async def run_global_extraction_async(
     semaphore = asyncio.Semaphore(workers)
     extraction_lock = asyncio.Lock()
 
+    # Build rule metadata mapping (rule_id -> {topic, category})
+    rule_meta_map = {
+        rule.get("id", ""): {
+            "topic": rule.get("topic", ""),
+            "category": rule.get("category", "other")
+        }
+        for rule in global_rules
+    }
+
     # Initialize rule_buckets and completed_uuids
     rule_buckets = {rule.get("id", ""): [] for rule in global_rules}
     completed_uuids = set()
@@ -995,11 +1004,24 @@ async def run_global_extraction_async(
 
             # Save to extraction file if path provided
             if extraction_path and result:
+                # Enrich results with topic and category from rule metadata
+                enriched_results = []
+                for r in result.get("results", []):
+                    rule_id = r.get("rule_id", "")
+                    meta = rule_meta_map.get(rule_id, {})
+                    enriched_r = {
+                        "rule_id": rule_id,
+                        "topic": meta.get("topic", ""),
+                        "category": meta.get("category", "other"),
+                        "extracted_results": r.get("extracted_results", [])
+                    }
+                    enriched_results.append(enriched_r)
+
                 extraction_entry = {
                     "uuid": block.get("uuid", str(base_index + block_idx)),
                     "uuid_end": block.get("uuid_end", block.get("uuid", str(base_index + block_idx))),
                     "p_heading": block.get("heading", ""),
-                    "results": result.get("results", [])
+                    "results": enriched_results
                 }
                 await save_extraction_entry_async(extraction_path, extraction_entry, extraction_lock)
 
