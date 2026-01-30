@@ -21,6 +21,8 @@ from docx.opc.part import Part
 from docx.opc.packuri import PackURI
 from lxml import etree
 
+from xml_utils import sanitize_xml_string
+
 # ============================================================
 # Constants
 # ============================================================
@@ -83,11 +85,11 @@ class EditResult:
 def format_text_preview(text: str, max_len: int = 30) -> str:
     """
     Format text for log output: remove newlines and truncate.
-    
+
     Args:
         text: Text to format
         max_len: Maximum length before truncation
-    
+
     Returns:
         Clean, truncated text with "..." suffix if truncated
     """
@@ -565,7 +567,8 @@ class AuditEditApplier:
     # ==================== XML Helpers ====================
     
     def _escape_xml(self, text: str) -> str:
-        """Escape XML special characters"""
+        """Escape XML special characters and remove illegal control characters"""
+        text = sanitize_xml_string(text)
         return (text
             .replace('&', '&amp;')
             .replace('<', '&lt;')
@@ -1118,7 +1121,7 @@ class AuditEditApplier:
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
             r = etree.SubElement(p, f'{{{NS["w"]}}}r')
             t = etree.SubElement(r, f'{{{NS["w"]}}}t')
-            t.text = comment['text']
+            t.text = sanitize_xml_string(comment['text'])
         
         # Save via OPC
         blob = etree.tostring(

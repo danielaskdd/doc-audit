@@ -26,6 +26,8 @@ try:
 except ImportError:
     EXCEL_AVAILABLE = False
 
+from xml_utils import sanitize_xml_string
+
 
 def load_manifest(file_path: str) -> tuple:
     """
@@ -272,7 +274,9 @@ def generate_excel_report(data: dict, output_path: str) -> None:
         ]
 
         for col_idx, value in enumerate(row_data, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            # Sanitize string values to remove illegal control characters
+            safe_value = sanitize_xml_string(value) if isinstance(value, str) else value
+            cell = ws.cell(row=row_idx, column=col_idx, value=safe_value)
             cell.alignment = content_alignment
             cell.border = thin_border
 
