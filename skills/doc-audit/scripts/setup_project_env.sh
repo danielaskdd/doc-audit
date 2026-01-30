@@ -67,9 +67,7 @@ export AUDIT_LANGUAGE="\${AUDIT_LANGUAGE:-Chinese}"
 echo "Doc-Audit Environment Activated"
 echo "  Skill Path: \$DOC_AUDIT_SKILL_PATH"
 echo "  Python: \$(which python3)"
-echo "  Gemini Model: \$DOC_AUDIT_GEMINI_MODEL"
-echo "  OpenAI Model: \$DOC_AUDIT_OPENAI_MODEL"
-echo "  API Keys: \${GOOGLE_API_KEY:+GOOGLE_API_KEY=set} \${OPENAI_API_KEY:+OPENAI_API_KEY=set}"
+echo
 EOF
 
 chmod +x "$DOC_AUDIT_DIR/env.sh"
