@@ -885,7 +885,8 @@ async def run_global_extraction_async(
     metadata: dict = None,
     thinking_level: str = None,
     thinking_budget: int = None,
-    reasoning_effort: str = None
+    reasoning_effort: str = None,
+    base_index: int = 0
 ) -> dict:
     """
     Extract global rule information from each block.
@@ -905,6 +906,7 @@ async def run_global_extraction_async(
         thinking_level: Thinking level for Gemini 3 models
         thinking_budget: Thinking budget for Gemini 2.5 models
         reasoning_effort: Reasoning effort for OpenAI o-series models
+        base_index: Base index offset for UUID fallback (default: 0)
 
     Returns:
         Dict mapping rule_id -> list of extracted items
@@ -939,7 +941,7 @@ async def run_global_extraction_async(
     # Filter out already-extracted blocks
     blocks_to_extract = [
         (idx, block) for idx, block in enumerate(blocks)
-        if block.get('uuid', str(idx)) not in completed_uuids
+        if block.get('uuid', str(base_index + idx)) not in completed_uuids
     ]
 
     # Progress tracking
@@ -990,8 +992,8 @@ async def run_global_extraction_async(
             # Save to extraction file if path provided
             if extraction_path and result:
                 extraction_entry = {
-                    "uuid": block.get("uuid", str(block_idx)),
-                    "uuid_end": block.get("uuid_end", block.get("uuid", str(block_idx))),
+                    "uuid": block.get("uuid", str(base_index + block_idx)),
+                    "uuid_end": block.get("uuid_end", block.get("uuid", str(base_index + block_idx))),
                     "p_heading": block.get("heading", ""),
                     "results": result.get("results", [])
                 }
@@ -1023,8 +1025,8 @@ async def run_global_extraction_async(
                 continue
             for extracted in rule_result.get("extracted_results", []):
                 item = {
-                    "uuid": block.get("uuid", str(block_idx)),
-                    "uuid_end": block.get("uuid_end", block.get("uuid", str(block_idx))),
+                    "uuid": block.get("uuid", str(base_index + block_idx)),
+                    "uuid_end": block.get("uuid_end", block.get("uuid", str(base_index + block_idx))),
                     "p_heading": block.get("heading", ""),
                     "entity": extracted.get("entity", ""),
                     "fields": extracted.get("fields", [])
@@ -1378,7 +1380,8 @@ async def run_full_audit_async(
             metadata=metadata,
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
-            reasoning_effort=reasoning_effort
+            reasoning_effort=reasoning_effort,
+            base_index=start_idx
         )
 
         global_violations = await run_global_verification_async(

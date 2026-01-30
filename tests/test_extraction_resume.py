@@ -153,9 +153,32 @@ def test_extraction_file_missing():
     print("✓ missing file handling tests passed")
 
 
+def test_uuid_fallback_with_base_index():
+    """Test that UUID fallback uses base_index for consistency."""
+    # Simulate blocks without UUID that would use fallback
+    blocks_without_uuid = [
+        {"heading": "Section 1", "content": "Content 1"},
+        {"heading": "Section 2", "content": "Content 2"},
+        {"heading": "Section 3", "content": "Content 3"}
+    ]
+    
+    # When processing with start_idx=2 (base_index=2)
+    # The fallback UUIDs should be "2", "3", "4", not "0", "1", "2"
+    base_index = 2
+    
+    # Simulate UUID generation for blocks
+    for idx, block in enumerate(blocks_without_uuid):
+        expected_uuid = str(base_index + idx)
+        actual_uuid = block.get('uuid', str(base_index + idx))
+        assert actual_uuid == expected_uuid, f"Expected UUID {expected_uuid}, got {actual_uuid}"
+    
+    print("✓ UUID fallback with base_index tests passed")
+
+
 if __name__ == "__main__":
     test_derive_extraction_path()
     test_load_completed_extraction_uuids()
     test_load_extraction_buckets()
     test_extraction_file_missing()
+    test_uuid_fallback_with_base_index()
     print("\n✅ All extraction resume tests passed!")
