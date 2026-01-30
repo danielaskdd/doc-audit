@@ -143,9 +143,6 @@ class AuditEditApplier:
         self.verbose = verbose
         self.author = author
         self.initials = initials if initials else author[:2] if len(author) >= 2 else author
-        # Different author names for revisions vs comments
-        self.revision_author = f"{author}-fixed"
-        self.comment_author = f"{author}-comment"
         
         # Load JSONL
         self.meta, self.edit_items = self._load_jsonl()
@@ -168,6 +165,17 @@ class AuditEditApplier:
         
         # Results tracking
         self.results: List[EditResult] = []
+
+    # ==================== Author Helpers ====================
+
+    def _category_suffix(self, item: EditItem) -> str:
+        """Normalize category suffix for author; default to 'uncategorized'."""
+        category = (item.category or '').strip()
+        return category if category else 'uncategorized'
+
+    def _author_for_item(self, item: EditItem) -> str:
+        """Build author name using base author + category suffix."""
+        return f"{self.author}-{self._category_suffix(item)}"
     
     # ==================== JSONL & Hash ====================
     
@@ -663,7 +671,8 @@ class AuditEditApplier:
 
     def _apply_delete(self, para_elem, violation_text: str,
                      orig_runs_info: List[Dict],
-                     orig_match_start: int) -> str:
+                     orig_match_start: int,
+                     author: str) -> str:
         """
         Apply delete operation with track changes.
         
@@ -672,6 +681,7 @@ class AuditEditApplier:
             violation_text: Text to delete
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
+            author: Track change author (base author + category suffix)
         
         Returns:
             'success': Deletion applied successfully
@@ -707,7 +717,7 @@ class AuditEditApplier:
             new_elements.append(self._create_run(before_text, rPr_xml))
         
         # Deleted text
-        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
+        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
             <w:r>{rPr_xml}<w:delText>{self._escape_xml(violation_text)}</w:delText></w:r>
         </w:del>'''
         new_elements.append(etree.fromstring(del_xml))
@@ -721,10 +731,11 @@ class AuditEditApplier:
     
     # ==================== Replace Operation ====================
     
-    def _apply_replace(self, para_elem, violation_text: str, 
+    def _apply_replace(self, para_elem, violation_text: str,
                       revised_text: str,
                       orig_runs_info: List[Dict],
-                      orig_match_start: int) -> str:
+                      orig_match_start: int,
+                      author: str) -> str:
         """
         Apply replace operation with diff-based track changes.
         
@@ -738,6 +749,7 @@ class AuditEditApplier:
             revised_text: New text
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
+            author: Track change author (base author + category suffix)
         
         Returns:
             'success': Replace applied (may be partial)
@@ -834,7 +846,7 @@ class AuditEditApplier:
                 
             elif op == 'delete':
                 change_id = self._get_next_change_id()
-                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
+                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:delText>{self._escape_xml(text)}</w:delText></w:r>
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
@@ -842,7 +854,7 @@ class AuditEditApplier:
                 
             elif op == 'insert':
                 change_id = self._get_next_change_id()
-                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{self.revision_author}" w:date="{timestamp}">
+                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
                     <w:r>{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
@@ -863,7 +875,7 @@ class AuditEditApplier:
         Insert an unselected comment at the end of paragraph for failed items.
         
         Comment format: {WHY}<violation_reason>  {WHERE}<violation_text>{SUGGEST}<revised_text>
-        Author: author_override if provided, otherwise {self.author}-notfound
+        Author: author_override if provided, otherwise {self.author}-{category}
         
         Args:
             para_elem: Paragraph element to attach comment
@@ -882,7 +894,7 @@ class AuditEditApplier:
         
         # Record comment content with custom format and author
         comment_text = f"{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
-        comment_author = author_override if author_override else f"{self.author}-notfound"
+        comment_author = author_override if author_override else self._author_for_item(item)
         self.comments.append({
             'id': comment_id,
             'text': comment_text,
@@ -923,7 +935,7 @@ class AuditEditApplier:
         self.comments.append({
             'id': comment_id,
             'text': comment_text,
-            'author': f"{self.author}-conflict"
+            'author': self._author_for_item(item)
         })
         
         return True
@@ -931,7 +943,8 @@ class AuditEditApplier:
     def _apply_manual(self, para_elem, violation_text: str,
                      violation_reason: str, revised_text: str,
                      orig_runs_info: List[Dict],
-                     orig_match_start: int) -> str:
+                     orig_match_start: int,
+                     author: str) -> str:
         """
         Apply manual operation by adding a Word comment.
         
@@ -952,6 +965,7 @@ class AuditEditApplier:
             revised_text: Suggestion to show in comment
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
+            author: Comment author (base author + category suffix)
         
         Returns:
             'success': Comment added successfully
@@ -1073,7 +1087,8 @@ class AuditEditApplier:
         
         self.comments.append({
             'id': comment_id,
-            'text': comment_text
+            'text': comment_text,
+            'author': author
         })
         
         return 'success'
@@ -1104,13 +1119,12 @@ class AuditEditApplier:
                 comments_xml, f'{{{NS["w"]}}}comment'
             )
             comment_elem.set(f'{{{NS["w"]}}}id', str(comment['id']))
-            # Support independent author for each comment (e.g., AI-notfound, AI-conflict)
-            # Default author is comment_author (author-comment suffix)
-            comment_author = comment.get('author', self.comment_author)
+            # Support independent author for each comment (author-category suffix)
+            comment_author = comment.get('author', self.author)
             comment_elem.set(f'{{{NS["w"]}}}author', comment_author)
             comment_elem.set(f'{{{NS["w"]}}}date', timestamp)
             # Use self.initials for all comments with author prefix matching self.author
-            # This includes: AI-comment, AI-notfound, AI-conflict (all share same initials)
+            # This includes: AI-<category> (all share same initials)
             if comment_author.startswith(self.author):
                 comment_initials = self.initials
             else:
@@ -1158,6 +1172,8 @@ class AuditEditApplier:
                 return EditResult(False, item,
                     f"Paragraph ID {item.uuid} not found (may be in header/footer or ID changed)")
             
+            item_author = self._author_for_item(item)
+
             # 2. Search for text from anchor paragraph using ORIGINAL text (before revisions)
             # Store match results to pass to apply methods (avoid double matching)
             # IMPORTANT: Search is restricted to uuid -> uuid_end range to prevent
@@ -1212,9 +1228,8 @@ class AuditEditApplier:
             
             if target_para is None:
                 # For manual fix_action, text not found is expected (not an error)
-                # Use AI-comment author instead of AI-notfound, mark as warning
                 if item.fix_action == 'manual':
-                    self._apply_error_comment(anchor_para, item, author_override=self.comment_author)
+                    self._apply_error_comment(anchor_para, item)
                     return EditResult(
                         success=True,
                         item=item,
@@ -1234,18 +1249,21 @@ class AuditEditApplier:
             if item.fix_action == 'delete':
                 success_status = self._apply_delete(
                     target_para, violation_text,
-                    matched_runs_info, matched_start
+                    matched_runs_info, matched_start,
+                    item_author
                 )
             elif item.fix_action == 'replace':
                 success_status = self._apply_replace(
                     target_para, violation_text, revised_text,
-                    matched_runs_info, matched_start
+                    matched_runs_info, matched_start,
+                    item_author
                 )
             elif item.fix_action == 'manual':
                 success_status = self._apply_manual(
                     target_para, violation_text,
                     item.violation_reason, revised_text,
-                    matched_runs_info, matched_start
+                    matched_runs_info, matched_start,
+                    item_author
                 )
             else:
                 # Insert error comment for unknown action type
@@ -1271,11 +1289,9 @@ class AuditEditApplier:
                 )
             elif success_status == 'fallback':
                 # Fallback to comment annotation - mark as warning for all fix_actions
-                # For manual fix_action, use AI-comment author (expected behavior)
-                # For delete/replace, use AI-conflict author
                 reason = "Text not found in current document state"
                 if item.fix_action == 'manual':
-                    self._apply_error_comment(target_para, item, author_override=self.comment_author)
+                    self._apply_error_comment(target_para, item)
                 else:
                     self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:

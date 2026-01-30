@@ -218,8 +218,6 @@ def create_mock_applier():
         applier.verbose = True
         applier.author = 'Test'
         applier.initials = 'Te'
-        applier.revision_author = 'Test-fixed'
-        applier.comment_author = 'Test-comment'
         applier.next_change_id = 0
         applier.next_comment_id = 0
         applier.comments = []
@@ -247,6 +245,11 @@ def create_edit_item(
         category=category,
         rule_id=rule_id
     )
+
+
+def get_test_author(applier, category: str = "semantic") -> str:
+    """Build test author using category suffix (matches production logic)."""
+    return applier._author_for_item(create_edit_item(category=category))
 
 
 # ============================================================
@@ -340,7 +343,7 @@ class TestApplyDelete:
         
         runs_info, _ = applier._collect_runs_info_original(para)
         
-        result = applier._apply_delete(para, "to delete", runs_info, 12)
+        result = applier._apply_delete(para, "to delete", runs_info, 12, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -355,7 +358,7 @@ class TestApplyDelete:
         runs_info, _ = applier._collect_runs_info_original(para)
         
         # Position 50 is beyond text length
-        result = applier._apply_delete(para, "missing", runs_info, 50)
+        result = applier._apply_delete(para, "missing", runs_info, 50, get_test_author(applier))
         
         assert result == 'fallback'
 
@@ -379,7 +382,7 @@ class TestApplyReplaceWithImages:
         revised_text = "Hi"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del and w:ins elements were created
@@ -399,7 +402,7 @@ class TestApplyReplaceWithImages:
         violation_text = "Hello World"
         revised_text = 'Hello <drawing id="2" name="New Image" /> World'
         
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, 0)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, 0, get_test_author(applier))
         
         assert result == 'fallback'
     
@@ -421,7 +424,7 @@ class TestApplyReplaceWithImages:
         revised_text = "Hello World"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
 
@@ -451,7 +454,7 @@ class TestApplyReplaceEqualPortions:
         revised_text = f"Hi {img_str} World"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         
@@ -485,7 +488,7 @@ class TestApplyReplaceEqualPortions:
         revised_text = f"Keep {img_str}"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         
@@ -515,7 +518,7 @@ class TestApplyReplaceEqualPortions:
         revised_text = f"{img_str} End"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         
@@ -586,7 +589,7 @@ class TestApplyReplaceMultipleImages:
         revised_text = f"X {img1_str} B {img2_str} C"
         
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start)
+        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         
@@ -612,7 +615,8 @@ class TestApplyManual:
         result = applier._apply_manual(
             para, "problematic text",
             "This text is wrong", "Fix suggestion",
-            runs_info, 8
+            runs_info, 8,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -643,7 +647,7 @@ class TestApplyDeleteWithImages:
         runs_info, combined_text = applier._collect_runs_info_original(para)
         
         # Delete "Delete this "
-        result = applier._apply_delete(para, "Delete this ", runs_info, 0)
+        result = applier._apply_delete(para, "Delete this ", runs_info, 0, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -667,7 +671,7 @@ class TestApplyDeleteWithImages:
 
         # Find position of " delete this" after the image
         match_start = combined_text.find(" delete this")
-        result = applier._apply_delete(para, " delete this", runs_info, match_start)
+        result = applier._apply_delete(para, " delete this", runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -692,7 +696,7 @@ class TestApplyDeleteWithImages:
         
         # Delete the image placeholder
         match_start = combined_text.find(img_str)
-        result = applier._apply_delete(para, img_str, runs_info, match_start)
+        result = applier._apply_delete(para, img_str, runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -712,7 +716,7 @@ class TestApplyDeleteWithImages:
         
         # Delete "delete_me " before the image
         match_start = combined_text.find("delete_me ")
-        result = applier._apply_delete(para, "delete_me ", runs_info, match_start)
+        result = applier._apply_delete(para, "delete_me ", runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -735,7 +739,7 @@ class TestApplyDeleteWithImages:
         
         # Delete " delete me " between the images
         match_start = combined_text.find(" delete me ")
-        result = applier._apply_delete(para, " delete me ", runs_info, match_start)
+        result = applier._apply_delete(para, " delete me ", runs_info, match_start, get_test_author(applier))
         
         assert result == 'success'
         # Verify w:del element was created
@@ -768,7 +772,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, "Mark this",
             "This text needs review", "Suggestion here",
-            runs_info, 0
+            runs_info, 0,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -800,7 +805,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, "mark this",
             "This text needs fixing", "Fix suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -831,7 +837,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, img_str,
             "This image needs replacement", "Use a better image",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -863,7 +870,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, violation_text,
             "This section needs work", "Improve the description",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -891,7 +899,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, "mark this",
             "This needs attention", "Suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -923,7 +932,8 @@ class TestApplyManualWithImages:
         result = applier._apply_manual(
             para, img_str,
             "Image quality is low", "Replace with high-res version",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -1083,7 +1093,8 @@ class TestApplyManualWithRevisions:
         result = applier._apply_manual(
             para, "mark this deleted text",
             "This deleted text needs review", "Suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -1130,7 +1141,8 @@ class TestApplyManualWithRevisions:
         result = applier._apply_manual(
             para, violation_text,
             "This span needs review", "Fix suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -1171,7 +1183,8 @@ class TestApplyManualWithRevisions:
         result = applier._apply_manual(
             para, "Run2",
             "Middle run needs attention", "Suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
@@ -1216,7 +1229,8 @@ class TestApplyManualWithRevisions:
         result = applier._apply_manual(
             para, violation_text,
             "This section includes image", "Suggestion",
-            runs_info, match_start
+            runs_info, match_start,
+            get_test_author(applier)
         )
         
         assert result == 'success'
