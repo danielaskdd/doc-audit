@@ -738,11 +738,42 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 # Without --resume, it processes all blocks 10-20 regardless of manifest
 ```
 
-### Important Notes
+#### Important Notes
 
 - ⚠️ **UUID Consistency**: Resume relies on UUIDs. If you re-run `parse_document.py`, `manifest.jsonl` is automatically deleted by the script, a fresh audit is required.
 - ✅ **Append-Only**: Resume appends to `manifest.jsonl`. If you want to start completely fresh, delete the manifest file first.
 - ✅ **Block Range + Resume**: Combining `--start-block`/`--end-block` with `--resume` is valid - it will skip already-processed blocks within the specified range.
+
+#### Global Audit Idempotency
+
+When running global audits multiple times on the same document, the script ensures **idempotent behavior**:
+
+1. **Before merging new global violations**: All existing violations belonging to global rules are stripped from the manifest
+2. **If no violations found**: Previous global violations are cleared from the manifest
+3. **Result**: Running the same global audit multiple times produces identical results
+
+**Technical Details:**
+- Uses `strip_global_violations()` to remove previous global rule violations before merging
+- Global rules are identified by their rule IDs (e.g., `G001`, `G002`)
+- Block-level violations (e.g., `R001`, `R002`) are never affected by global audit reruns
+
+**Use Case:**
+```bash
+# First run: finds 3 global violations
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl -r rules.json
+
+# Second run: same result (3 global violations), not 6
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl -r rules.json
+
+# After fixing issues: global violations cleared
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl -r rules.json
+# Output: "Global audit completed: no violations found. Cleared 3 previous global violation(s)."
+```
+
+**Note:** If block-level audit has failures, global audit is automatically aborted to prevent inconsistent results.
 
 ### Workflow
 

@@ -1209,6 +1209,40 @@ def merge_global_violations(
     return list(entry_by_uuid.values())
 
 
+def strip_global_violations(entries_with_idx: list, global_rule_ids: set) -> tuple:
+    """
+    Remove violations that belong to global rules from existing manifest entries.
+
+    Args:
+        entries_with_idx: List of (block_idx, entry) tuples
+        global_rule_ids: Set of global rule IDs
+
+    Returns:
+        Tuple of (cleaned_entries, removed_count)
+    """
+    if not global_rule_ids:
+        return entries_with_idx, 0
+
+    cleaned = []
+    removed_count = 0
+    for block_idx, entry in entries_with_idx:
+        violations = entry.get("violations", [])
+        if not violations:
+            cleaned.append((block_idx, entry))
+            continue
+        filtered = [
+            v for v in violations
+            if v.get("rule_id", "") not in global_rule_ids
+        ]
+        if len(filtered) != len(violations):
+            removed_count += (len(violations) - len(filtered))
+            entry = dict(entry)
+            entry["violations"] = filtered
+            entry["is_violation"] = len(filtered) > 0
+        cleaned.append((block_idx, entry))
+    return cleaned, removed_count
+
+
 async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids,
                          thinking_level=None, thinking_budget=None, reasoning_effort=None):
     """
@@ -1260,7 +1294,11 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
 
     if not blocks_with_indices:
         print("\nAll blocks already processed!")
-        return
+        return {
+            "blocks_processed": 0,
+            "blocks_failed": 0,
+            "total_violations": 0
+        }
 
     print(f"\nProcessing: blocks {start_idx}-{end_idx} ({len(blocks_with_indices)} pending), {args.workers} workers")
     print(f"Output: {args.output}")
@@ -1347,6 +1385,12 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     print(f"Total violations: {total_violations}")
     print(f"Manifest saved to: {args.output} (sorted by block order)")
 
+    return {
+        "blocks_processed": blocks_processed,
+        "blocks_failed": blocks_failed,
+        "total_violations": total_violations
+    }
+
 
 async def run_full_audit_async(
     args,
@@ -1362,26 +1406,42 @@ async def run_full_audit_async(
     thinking_level: str = None,
     thinking_budget: int = None,
     reasoning_effort: str = None
-):
+) -> dict:
     """
     Unified async entry point for both block-level and global audits.
 
     This function runs both audit phases in sequence within a single event loop
     for better efficiency.
+    
+    Returns:
+        dict: Status dictionary with keys:
+            - status: "completed" | "aborted"
+            - reason: Abort reason (if status is "aborted")
+            - block_stats: Block-level audit statistics (if executed)
+            - global_violations: Number of global violations found (if executed)
     """
     # Phase 1: Block-level audit
+    block_stats = None
     if block_rules:
-        await run_audit_async(
+        block_stats = await run_audit_async(
             args, blocks, block_rules, metadata, use_gemini, model_name,
             provider_name, client, completed_uuids,
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             reasoning_effort=reasoning_effort
         )
+        if block_stats and block_stats.get("blocks_failed", 0) > 0:
+            print("\nBlock-level audit had failures; aborting global audit.")
+            return {
+                "status": "aborted",
+                "reason": "block_audit_failures",
+                "block_stats": block_stats
+            }
     else:
         print("\nNo block rules provided; skipping block-level audit.")
 
     # Phase 2: Global extraction + verification
+    global_violations_count = 0
     if global_rules:
         max_tokens = get_global_audit_max_tokens()
 
@@ -1423,14 +1483,18 @@ async def run_full_audit_async(
             max_tokens=max_tokens
         )
 
+        global_violations_count = len(global_violations)
+
         if global_violations:
             uuid_to_block_idx = {
                 block.get('uuid', str(idx)): idx for idx, block in enumerate(blocks)
             }
             existing_entries = load_existing_entries_with_block_idx(args.output, uuid_to_block_idx)
+            global_rule_ids = {r.get("id", "") for r in global_rules if r.get("id", "")}
+            cleaned_entries, _ = strip_global_violations(existing_entries, global_rule_ids)
             global_rule_category_map = build_rule_category_map(global_rules)
             merged_entries = merge_global_violations(
-                entries_with_idx=existing_entries,
+                entries_with_idx=cleaned_entries,
                 global_violations=global_violations,
                 blocks=blocks,
                 uuid_to_block_idx=uuid_to_block_idx,
@@ -1455,9 +1519,26 @@ async def run_full_audit_async(
             rewrite_manifest_sorted(args.output, audit_metadata, merged_entries)
             print(f"Global violations merged: {len(global_violations)}")
         else:
-            print("Global audit completed: no violations found.")
+            uuid_to_block_idx = {
+                block.get('uuid', str(idx)): idx for idx, block in enumerate(blocks)
+            }
+            existing_entries = load_existing_entries_with_block_idx(args.output, uuid_to_block_idx)
+            global_rule_ids = {r.get("id", "") for r in global_rules if r.get("id", "")}
+            cleaned_entries, removed = strip_global_violations(existing_entries, global_rule_ids)
+            if removed > 0:
+                audit_metadata = load_manifest_metadata(args.output)
+                rewrite_manifest_sorted(args.output, audit_metadata, cleaned_entries)
+                print(f"Global audit completed: no violations found. Cleared {removed} previous global violation(s).")
+            else:
+                print("Global audit completed: no violations found.")
     else:
         print("\nNo global rules provided; skipping global audit.")
+    
+    return {
+        "status": "completed",
+        "block_stats": block_stats,
+        "global_violations": global_violations_count
+    }
 
 
 def main():

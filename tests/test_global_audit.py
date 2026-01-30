@@ -15,6 +15,7 @@ sys.path.insert(0, str(_scripts_dir))
 from run_audit import (  # noqa: E402  # type: ignore
     chunk_items_by_token_limit,
     merge_global_violations,
+    strip_global_violations,
 )
 from prompt import (  # noqa: E402  # type: ignore
     normalize_extracted_fields,
@@ -583,3 +584,168 @@ class TestEstimateTokens:
         text = '{"name": "测试名称", "value": 123}'
         tokens = estimate_tokens(text)
         assert tokens > 0
+
+
+# ============================================================
+# Tests: strip_global_violations
+# ============================================================
+
+class TestStripGlobalViolations:
+    """Tests for strip_global_violations function"""
+
+    def test_empty_global_rule_ids_returns_unchanged(self):
+        """Test that empty global_rule_ids returns entries unchanged"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "G001", "violation_text": "text1"},
+                    {"rule_id": "R001", "violation_text": "text2"}
+                ]
+            })
+        ]
+        
+        cleaned, removed = strip_global_violations(entries, set())
+        
+        assert cleaned == entries
+        assert removed == 0
+
+    def test_strips_global_violations_correctly(self):
+        """Test that violations with global rule IDs are removed"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "G001", "violation_text": "global violation 1"},
+                    {"rule_id": "G002", "violation_text": "global violation 2"}
+                ]
+            })
+        ]
+        
+        global_rule_ids = {"G001", "G002"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        assert len(cleaned) == 1
+        _, entry = cleaned[0]
+        assert len(entry["violations"]) == 0
+        assert entry["is_violation"] is False
+        assert removed == 2
+
+    def test_preserves_block_violations(self):
+        """Test that block-level violations are preserved"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "R001", "violation_text": "block violation 1"},
+                    {"rule_id": "R002", "violation_text": "block violation 2"}
+                ]
+            })
+        ]
+        
+        global_rule_ids = {"G001", "G002"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        assert len(cleaned) == 1
+        _, entry = cleaned[0]
+        assert len(entry["violations"]) == 2
+        assert entry["is_violation"] is True
+        assert removed == 0
+
+    def test_updates_is_violation_flag(self):
+        """Test that is_violation is updated correctly after stripping"""
+        # Entry with only global violations
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "G001", "violation_text": "global only"}
+                ]
+            })
+        ]
+        
+        global_rule_ids = {"G001"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        _, entry = cleaned[0]
+        assert entry["is_violation"] is False
+        assert removed == 1
+
+    def test_returns_correct_removed_count(self):
+        """Test that removed count is accurate"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "G001", "violation_text": "v1"},
+                    {"rule_id": "G002", "violation_text": "v2"}
+                ]
+            }),
+            (1, {
+                "uuid": "UUID2",
+                "uuid_end": "UUID2",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "G001", "violation_text": "v3"},
+                    {"rule_id": "R001", "violation_text": "v4"}
+                ]
+            })
+        ]
+        
+        global_rule_ids = {"G001", "G002"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        assert removed == 3  # 2 from UUID1, 1 from UUID2
+
+    def test_mixed_violations_partial_removal(self):
+        """Test partial removal when entry has both block and global violations"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": True,
+                "violations": [
+                    {"rule_id": "R001", "violation_text": "block violation"},
+                    {"rule_id": "G001", "violation_text": "global violation 1"},
+                    {"rule_id": "R002", "violation_text": "another block"},
+                    {"rule_id": "G002", "violation_text": "global violation 2"}
+                ]
+            })
+        ]
+        
+        global_rule_ids = {"G001", "G002"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        _, entry = cleaned[0]
+        assert len(entry["violations"]) == 2
+        assert entry["violations"][0]["rule_id"] == "R001"
+        assert entry["violations"][1]["rule_id"] == "R002"
+        assert entry["is_violation"] is True
+        assert removed == 2
+
+    def test_entry_without_violations_unchanged(self):
+        """Test that entries without violations field are preserved"""
+        entries = [
+            (0, {
+                "uuid": "UUID1",
+                "uuid_end": "UUID1",
+                "is_violation": False
+            })
+        ]
+        
+        global_rule_ids = {"G001"}
+        cleaned, removed = strip_global_violations(entries, global_rule_ids)
+        
+        assert len(cleaned) == 1
+        assert cleaned[0] == entries[0]
+        assert removed == 0
