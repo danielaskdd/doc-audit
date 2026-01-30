@@ -8,7 +8,7 @@ from pathlib import Path
 # Add scripts directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "doc-audit" / "scripts"))
 
-from utils import sanitize_xml_string
+from utils import sanitize_xml_string  # type: ignore
 
 
 class TestSanitizeXmlString:
