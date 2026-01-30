@@ -27,7 +27,8 @@ Instructions:
    - Apply rules appropriately based on document section type
    - Identify context-dependent violations (e.g., vague terms acceptable in summaries but not in binding clauses)
 3. Report each violation as a separate item. Do not merge multiple instances of the same violation category into one entry.
-4. For each violation found, provide:
+4. CRITICAL: The rule_id MUST exactly match the ID of the specific rule violated. If content violates rule [R005], report "rule_id": "R005". Never default to R001 - always use the actual rule ID from the list above.
+5. For each violation found, provide:
    - The rule ID that was violated
    - The violation text with enough surrounding context for unique string matching
    - Why it's a violation
@@ -60,7 +61,7 @@ Return your analysis as a JSON object with this structure:
   "is_violation": true/false,
   "violations": [
     {{
-      "rule_id": "R001",
+      "rule_id": "<exact_id_of_violated_rule>",
       "violation_text": "the specific problematic text with sufficient context",
       "violation_reason": "explanation of why this violates the rule written in {output_language}",
       "fix_action": "delete|replace|manual",
@@ -107,12 +108,13 @@ Extraction Guidelines:
 5. Evidence must be a SHORT verbatim quote (no more than one sentence) that directly supports the extracted value.
 6. For tabular data, extract one entity per row where applicable.
 7. If the same entity appears multiple times with different information, create separate entries.
+8. CRITICAL: The rule_id MUST exactly match the ID of the rule being extracted. If extracting for rule [G003], use "rule_id": "G003". Never default to G001.
 
 Return JSON only with this structure:
 {{
   "results": [
     {{
-      "rule_id": "G001",
+      "rule_id": "<exact_id_of_matching_rule>",
       "extracted_results": [
         {{
           "entity": "entity identifier or empty string if unknown",
