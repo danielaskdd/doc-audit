@@ -26,7 +26,7 @@ Instructions:
    - Understand the semantic scope of the content (e.g., a clause under "Penalty Terms" vs "Payment Terms")
    - Apply rules appropriately based on document section type
    - Identify context-dependent violations (e.g., vague terms acceptable in summaries but not in binding clauses)
-3. Report each violation as a separate item. Do not merge multiple instances of the same violation category into one entry.
+3. Report each violation as a separate item. Do not merge multiple instances of the same audit rule into one entry. If one violation satisfies multiple rules, report only the first rule ID that applies.
 4. CRITICAL: The rule_id MUST exactly match the ID of the specific rule violated. If content violates rule [R005], report "rule_id": "R005". Never default to R001 - always use the actual rule ID from the list above.
 5. For each violation found, provide:
    - The rule ID that was violated
