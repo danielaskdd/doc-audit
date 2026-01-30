@@ -35,7 +35,7 @@ Instructions:
    - The revised text based on fix_action
 
 violation_text guidelines:
-- The extracted text must be a direct verbatim quote from the source content, include line breaks, tabs, and other whitespace characters
+- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
 - Do not use ellipses to replace or omit any part of the original text
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
@@ -171,6 +171,14 @@ Instructions:
 4. Use the uuid and uuid_end from the INPUT items when reporting violations
 5. violation_text MUST be a verbatim evidence quote from the input items
 6. Mark fix_action as "manual" since resolution requires human judgment
+
+violation_text guidelines:
+- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
+- Do not use ellipses to replace or omit any part of the original text
+- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
+- If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
+- For table content in JSON format, report violations at the individual cell level whenever possible, with each cell's violation as a separate entry
+- If a table violation cannot be split into individual cells, use the content of the first non-empty cell as violation_text rather than the entire row
 
 Return JSON only:
 {{
