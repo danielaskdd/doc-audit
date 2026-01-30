@@ -85,6 +85,19 @@ Return ONLY the JSON object, no other text.""",
 
 {rules_text}
 
+Understanding the Rules:
+- Each rule defines a TOPIC (what kind of information to look for)
+- EXTRACTION describes the scope and types of data to capture
+- ENTITY is the main identifier that groups related fields together
+- FIELDS are specific attributes to extract for each entity instance
+- EVIDENCE is a verbatim text snippet that justifies each extracted value
+
+Key Principles:
+1. One entity = one complete set of fields (even if some fields are empty)
+2. Multiple instances of the same entity type should be separate results
+3. Value should be a concise summary; Evidence should be the exact source text (no more than one sentence)
+4. If the same entity appears multiple times with different information, create separate entries
+
 Extraction Guidelines:
 1. Extract ONLY information explicitly stated in the text - never infer or assume.
 2. Each unique entity instance should be a separate extraction result.
@@ -126,22 +139,37 @@ Return ONLY the JSON object, no other text. Output language for value summaries 
     "global_verify_system": """You are a cross-reference auditor specializing in document consistency verification.
 
 Rule: [{rule_id}] {topic}
+Extraction Scope: {extraction}
+Entity Name: {extracted_entity}
 Verification Criteria: {verification}
 
-Your Task:
-Compare all extracted items below and identify ANY inconsistencies, conflicts, or contradictions.
+Understanding the Input Data:
+- Each item represents an extracted entity instance from a document block
+- "entity" field contains the entity name (e.g., {extracted_entity})
+- "fields" contain extracted attributes with values and evidence
+- "uuid"/"uuid_end" mark the source location in the original document
 
-Types of inconsistencies to check:
-- VALUE CONFLICTS: Same data point has different values across locations
-- NAMING VARIATIONS: Same entity referred to with different spellings or names
-- LOGICAL CONTRADICTIONS: Statements that cannot both be true
-- COMPLETENESS GAPS: Information present in some sections but missing in related sections
+Comparison Scope:
+IMPORTANT: Only compare items that refer to THE SAME ENTITY.
+- Items with similar or identical "entity" names represent the same entity
+- Different entities (e.g., "Server A" vs "Server B") should NOT be compared against each other
+- Focus on finding conflicts where the SAME entity has inconsistent information across different document sections
+
+Your Primary Task:
+Follow the VERIFICATION CRITERIA above to identify inconsistencies WITHIN the same entity.
+Specifically check if the same entity has conflicting attribute values in different parts of the document.
+
+Types of inconsistencies to check (only for same entity):
+- VALUE CONFLICTS: Same entity has different values for the same attribute
+- COMPLETENESS GAPS: Same entity has information in some sections but missing in related sections
 
 Instructions:
-1. Cross-reference ALL items provided - do not skip any comparisons.
-2. Use the uuid and uuid_end from the INPUT items when reporting violations.
-3. violation_text MUST be a verbatim evidence quote from the input items.
-4. If severity is unclear or fix requires human judgment, mark fix_action as "manual".
+1. Group items by entity name (similar names = same entity)
+2. Within each entity group, cross-reference all fields based on the verification criteria
+3. Report conflicts only when the SAME entity shows inconsistent information
+4. Use the uuid and uuid_end from the INPUT items when reporting violations
+5. violation_text MUST be a verbatim evidence quote from the input items
+6. Mark fix_action as "manual" since resolution requires human judgment
 
 Return JSON only:
 {{
@@ -393,10 +421,14 @@ def build_global_verify_system_prompt(rule: dict) -> str:
     output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
     rule_id = rule.get("id", "")
     topic = rule.get("topic", "")
+    extraction = rule.get("extraction", "")
+    extracted_entity = rule.get("extracted_entity", "")
     verification = rule.get("verification", "")
     return PROMPT_TEMPLATES["global_verify_system"].format(
         rule_id=rule_id,
         topic=topic,
+        extraction=extraction,
+        extracted_entity=extracted_entity,
         verification=verification,
         output_language=output_language
     )
