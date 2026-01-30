@@ -7,10 +7,14 @@ ABOUTME: Extracts automatic numbering, splits by headings, converts tables to JS
 import argparse
 import hashlib
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Add script directory to path for local module imports
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
 
 try:
     from docx import Document
@@ -21,8 +25,13 @@ except ImportError:
 try:
     from numbering_resolver import NumberingResolver
     from table_extractor import TableExtractor
+    from utils import estimate_tokens
 except ImportError:
-    print("Error: Required modules not found. Ensure numbering_resolver.py and table_extractor.py are in the same directory.", file=sys.stderr)
+    print(
+        "Error: Required modules not found. Ensure numbering_resolver.py, table_extractor.py, "
+        "and utils.py are in the same directory.",
+        file=sys.stderr
+    )
     sys.exit(1)
 
 
@@ -40,48 +49,6 @@ TABLE_IDEAL_TOKENS = 3000  # Ideal target size for table chunks (tokens)
 TABLE_MAX_TOKENS = 5000    # Maximum table size before splitting (tokens), must smaller than IDEAL_BLOCK_CONTENT_TOKENS
 TABLE_MIN_LAST_CHUNK_TOKENS = int((TABLE_MAX_TOKENS - TABLE_IDEAL_TOKENS) * 0.8)  # Minimum size for last chunk to avoid tiny fragments
 TABLE_CHUNK_SUFFIX_LABEL = "表格片段"  # Label prefix for split table chunk headings
-
-
-def estimate_tokens(text: str) -> int:
-    """
-    Estimate token count for LLM context management.
-    
-    Uses a weighted formula based on character types:
-    - Chinese characters: ~0.75 tokens per character (subword tokenization)
-    - JSON structural characters (brackets, quotes, commas): ~1 tokens per character
-    - Other characters (English, numbers, symbols): ~0.4 tokens per character (~3 chars/token)
-    
-    Includes 5% buffer and safety offset for special formatting and system prompt overhead.
-    
-    Args:
-        text: Input text to estimate tokens for
-        
-    Returns:
-        int: Estimated token count
-    """
-    if not text:
-        return 0
-    
-    # Count Chinese characters (CJK Unified Ideographs range)
-    chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
-    
-    # Count JSON structural characters that commonly occupy individual tokens
-    # Includes: brackets [], quotes "", commas, braces {}
-    json_chars_count = len(re.findall(r'[\[\]",{}]', text))
-    
-    # Count other characters (English, numbers, symbols, whitespace)
-    other_count = len(text) - chinese_count - json_chars_count
-    
-    # Weighted estimation based on modern tokenizer characteristics
-    # Chinese coefficient: 0.7 (typical for GPT-4o/DeepSeek/Llama3)
-    # JSON structural chars coefficient: 0.8 (brackets/quotes often individual tokens)
-    # English/other coefficient: 0.35 (~3 characters per token)
-    base_estimate = (chinese_count * 0.75) + (json_chars_count * 1) + (other_count * 0.4)
-    
-    # Add 5% buffer + safety offset for formatting overhead
-    final_tokens = int(base_estimate * 1.05) + 2
-    
-    return final_tokens
 
 
 def print_error(title: str, details: str, solution: str):

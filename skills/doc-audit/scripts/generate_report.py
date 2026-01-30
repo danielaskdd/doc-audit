@@ -26,7 +26,7 @@ try:
 except ImportError:
     EXCEL_AVAILABLE = False
 
-from xml_utils import sanitize_xml_string
+from utils import sanitize_xml_string
 
 
 def load_manifest(file_path: str) -> tuple:

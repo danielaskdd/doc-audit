@@ -21,7 +21,7 @@ from docx.opc.part import Part
 from docx.opc.packuri import PackURI
 from lxml import etree
 
-from xml_utils import sanitize_xml_string
+from utils import sanitize_xml_string
 
 # ============================================================
 # Constants

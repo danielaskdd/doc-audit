@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "description": "Additional audit rules for bidding document verification",
-  "type": "block_level",
+  "type": "block",
   "rules": [
     {
       "id": "B001",

@@ -11,7 +11,33 @@ import json
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
+
+# Add script directory to path for local module imports
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from utils import (  # noqa: E402
+    HAS_GEMINI,
+    HAS_OPENAI,
+    audit_block_gemini_async,
+    audit_block_openai_async,
+    create_gemini_client,
+    create_openai_client,
+    estimate_tokens,
+    get_gemini_provider_name,
+    get_openai_provider_name,
+    global_extract_gemini_async,
+    global_extract_openai_async,
+    global_verify_gemini_async,
+    global_verify_openai_async,
+    is_gemini_retryable,
+    is_openai_reasoning_model,
+    is_openai_retryable,
+    is_vertex_ai_mode,
+)
 
 # Maximum number of concurrent LLM API calls
 MAX_PARALLEL_WORKERS = 8
@@ -22,156 +48,38 @@ INITIAL_BACKOFF = 1.0  # Initial backoff time in seconds
 MAX_BACKOFF = 60.0     # Maximum backoff time in seconds
 BACKOFF_MULTIPLIER = 2.0  # Backoff multiplier for exponential growth
 
-# Try to import LLM libraries
-HAS_GEMINI = False
-HAS_OPENAI = False
-
-try:
-    from google import genai
-    from google.genai import types
-    HAS_GEMINI = True
-except ImportError:
-    pass
-
-try:
-    import openai
-    HAS_OPENAI = True
-except ImportError:
-    pass
+# Global audit context limit (tokens)
+DEFAULT_GLOBAL_AUDIT_MAX_TOKENS = 120000
 
 
-def is_vertex_ai_mode() -> bool:
+
+def get_global_audit_max_tokens() -> int:
     """
-    Check if Vertex AI mode is enabled via environment variable.
-    
+    Resolve global audit context limit from environment.
+
     Returns:
-        True if GOOGLE_GENAI_USE_VERTEXAI is set to 'true', False otherwise
+        int: Maximum allowed tokens for a global audit context chunk
     """
-    return os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
-
-
-def create_gemini_client(use_async: bool = False):
-    """
-    Create Gemini client for AI Studio or Vertex AI.
-    
-    Supports two modes:
-    - AI Studio (default): Uses GOOGLE_API_KEY for authentication
-    - Vertex AI: Uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
-    
-    Environment variables for Vertex AI mode:
-    - GOOGLE_GENAI_USE_VERTEXAI: Set to 'true' to enable Vertex AI mode
-    - GOOGLE_CLOUD_PROJECT: Required GCP project ID
-    - GOOGLE_CLOUD_LOCATION: Optional region (default: us-central1)
-    - GOOGLE_VERTEX_BASE_URL: Optional custom API endpoint (for API gateway proxies)
-    - GOOGLE_APPLICATION_CREDENTIALS: Path to service account JSON (or use gcloud auth)
-    
-    Args:
-        use_async: If True, return the async client (.aio), otherwise return sync client
-        
-    Returns:
-        Gemini client instance (sync or async based on use_async parameter)
-        
-    Raises:
-        ValueError: If required environment variables are not set
-    """
-    use_vertex = is_vertex_ai_mode()
-    
-    if use_vertex:
-        # Vertex AI mode - uses ADC (GOOGLE_APPLICATION_CREDENTIALS or gcloud auth)
-        project = os.getenv("GOOGLE_CLOUD_PROJECT")
-        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-        base_url = os.getenv("GOOGLE_VERTEX_BASE_URL")
-        
-        if not project:
-            raise ValueError(
-                "GOOGLE_CLOUD_PROJECT is required for Vertex AI mode. "
-                "Set GOOGLE_GENAI_USE_VERTEXAI=false to use AI Studio mode instead."
-            )
-        
-        # Build http_options only if custom base_url is specified
-        http_options = None
-        if base_url:
-            http_options = {"base_url": base_url}
-        
-        # Note: ADC handles authentication automatically
-        # via GOOGLE_APPLICATION_CREDENTIALS env var or gcloud auth
-        client = genai.Client(
-            vertexai=True,
-            project=project,
-            location=location,
-            http_options=http_options
+    raw = os.getenv("GLOBAL_AUDIT_MAX_TOKENS")
+    if not raw:
+        return DEFAULT_GLOBAL_AUDIT_MAX_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        print(
+            f"Warning: GLOBAL_AUDIT_MAX_TOKENS must be an integer, got '{raw}'. "
+            f"Using default {DEFAULT_GLOBAL_AUDIT_MAX_TOKENS}.",
+            file=sys.stderr
         )
-    else:
-        # AI Studio mode - requires API key
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError(
-                "GOOGLE_API_KEY is required for AI Studio mode. "
-                "Set GOOGLE_GENAI_USE_VERTEXAI=true and configure GCP credentials for Vertex AI mode."
-            )
-        
-        client = genai.Client(api_key=api_key)
-    
-    # Return async or sync client based on parameter
-    return client.aio if use_async else client
-
-
-def get_gemini_provider_name() -> str:
-    """
-    Get the Gemini provider name based on current mode.
-    
-    Returns:
-        Provider name string for display purposes
-    """
-    if is_vertex_ai_mode():
-        project = os.getenv("GOOGLE_CLOUD_PROJECT", "unknown")
-        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-        return f"Google Gemini (Vertex AI: {project}/{location})"
-    else:
-        return "Google Gemini (AI Studio)"
-
-
-def create_openai_client(use_async: bool = True):
-    """
-    Create OpenAI client with optional custom base URL.
-    
-    Environment variables:
-    - OPENAI_API_KEY: Required API key
-    - OPENAI_BASE_URL: Optional custom API endpoint (for proxies, Azure, etc.)
-    
-    Args:
-        use_async: If True, return AsyncOpenAI, otherwise return OpenAI
-        
-    Returns:
-        OpenAI client instance (async or sync based on use_async parameter)
-        
-    Raises:
-        ValueError: If OPENAI_API_KEY is not set
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is required for OpenAI mode.")
-    
-    base_url = os.getenv("OPENAI_BASE_URL")
-    
-    if use_async:
-        return openai.AsyncOpenAI(base_url=base_url)
-    else:
-        return openai.OpenAI(base_url=base_url)
-
-
-def get_openai_provider_name() -> str:
-    """
-    Get the OpenAI provider name, including custom endpoint if configured.
-    
-    Returns:
-        Provider name string for display purposes
-    """
-    base_url = os.getenv("OPENAI_BASE_URL")
-    if base_url:
-        return f"OpenAI (Custom: {base_url})"
-    else:
-        return "OpenAI"
+        return DEFAULT_GLOBAL_AUDIT_MAX_TOKENS
+    if value <= 0:
+        print(
+            f"Warning: GLOBAL_AUDIT_MAX_TOKENS must be positive, got '{value}'. "
+            f"Using default {DEFAULT_GLOBAL_AUDIT_MAX_TOKENS}.",
+            file=sys.stderr
+        )
+        return DEFAULT_GLOBAL_AUDIT_MAX_TOKENS
+    return value
 
 
 class NonRetryableError(Exception):
@@ -213,188 +121,6 @@ def validate_thinking_config(thinking_level: str = None, thinking_budget: int = 
         print("  - For Gemini 3: Use --thinking-level or GEMINI_THINKING_LEVEL", file=sys.stderr)
         print("  - For Gemini 2.5: Use --thinking-budget or GEMINI_THINKING_BUDGET", file=sys.stderr)
         sys.exit(1)
-
-
-def is_openai_reasoning_model(model_name: str) -> bool:
-    """
-    Check if the OpenAI model supports reasoning_effort parameter.
-    
-    Models that support reasoning_effort:
-    - o-series: o1, o3, o4 and their variants (o1-mini, o1-2024-12-17, etc.)
-    - gpt-5 series: gpt-5, gpt-5.2, gpt-5-turbo, etc.
-    
-    Non-reasoning models like gpt-4.1, gpt-4o, etc. will reject this parameter.
-    
-    Handles proxy/router prefixes like "openai/o1-mini" or "openrouter/gpt-5.2".
-    
-    Args:
-        model_name: The OpenAI model name (may include path prefix)
-        
-    Returns:
-        True if the model supports reasoning_effort, False otherwise
-    """
-    model_lower = model_name.lower()
-    
-    # Handle proxy/router prefixes like "openai/o1-mini", "openrouter/gpt-5.2"
-    # Extract the base model name after the last "/"
-    if '/' in model_lower:
-        model_lower = model_lower.rsplit('/', 1)[-1]
-    
-    # Match o-series and gpt-5 series
-    return model_lower.startswith(('o1', 'o3', 'o4', 'gpt-5'))
-
-
-def is_openai_retryable(error: Exception) -> bool:
-    """
-    Determine if an OpenAI error should be retried.
-    
-    Non-retryable errors:
-    - AuthenticationError (401): Invalid API key
-    - PermissionDeniedError (403): No access to resource
-    - BadRequestError (400): Invalid request format
-    - NotFoundError (404): Model or resource not found
-    
-    Retryable errors:
-    - RateLimitError (429): Rate limit exceeded
-    - APIConnectionError: Network issues
-    - InternalServerError (500): Server errors
-    - APIStatusError with 502, 503, 504: Gateway/service errors
-    
-    Args:
-        error: The exception from OpenAI API call
-        
-    Returns:
-        True if the error should be retried, False otherwise
-    """
-    if not HAS_OPENAI:
-        return True
-    
-    # Authentication error - invalid API key (401)
-    if isinstance(error, openai.AuthenticationError):
-        return False
-    
-    # Permission denied - no access to resource (403)
-    if isinstance(error, openai.PermissionDeniedError):
-        return False
-    
-    # Bad request - invalid request format (400)
-    if isinstance(error, openai.BadRequestError):
-        return False
-    
-    # Not found - model or resource doesn't exist (404)
-    if isinstance(error, openai.NotFoundError):
-        return False
-    
-    # Rate limit exceeded - should retry with backoff (429)
-    if isinstance(error, openai.RateLimitError):
-        return True
-    
-    # API connection error - network issues, should retry
-    if isinstance(error, openai.APIConnectionError):
-        return True
-    
-    # Internal server error - should retry (500)
-    if isinstance(error, openai.InternalServerError):
-        return True
-    
-    # For other APIStatusError, check HTTP status code
-    if isinstance(error, openai.APIStatusError):
-        # Retryable server-side errors
-        return error.status_code in (429, 500, 502, 503, 504)
-    
-    # For unknown errors, default to retry (network issues, timeouts, etc.)
-    return True
-
-
-def is_gemini_retryable(error: Exception) -> bool:
-    """
-    Determine if a Gemini error should be retried.
-    
-    Uses string matching on error messages since google-genai may not have
-    well-defined exception types for all error cases.
-    
-    Non-retryable errors:
-    - API key errors
-    - Authentication/permission errors
-    - Invalid request errors
-    - Model not found errors
-    - Billing/quota permanently exceeded
-    
-    Retryable errors:
-    - Rate limit (429)
-    - Server errors (500, 502, 503, 504)
-    - Timeout/connection errors
-    
-    Args:
-        error: The exception from Gemini API call
-        
-    Returns:
-        True if the error should be retried, False otherwise
-    """
-    error_str = str(error).lower()
-    
-    # API key / authentication errors - do not retry
-    if 'api_key' in error_str or 'api key' in error_str:
-        return False
-    if 'authentication' in error_str or 'authenticate' in error_str:
-        return False
-    if 'invalid_api_key' in error_str or 'invalid api key' in error_str:
-        return False
-    
-    # Permission / forbidden errors - do not retry
-    if 'permission' in error_str and 'denied' in error_str:
-        return False
-    if 'forbidden' in error_str or '403' in error_str:
-        return False
-    
-    # Invalid request errors - do not retry
-    if 'invalid' in error_str and ('request' in error_str or 'argument' in error_str):
-        return False
-    if '400' in error_str and 'bad request' in error_str:
-        return False
-    
-    # Model not found - do not retry
-    if 'model' in error_str and ('not found' in error_str or 'not exist' in error_str):
-        return False
-    if '404' in error_str:
-        return False
-    
-    # Billing / permanent quota errors - do not retry
-    if 'billing' in error_str:
-        return False
-    if 'quota' in error_str and ('exceeded' in error_str or 'exhausted' in error_str):
-        # Check if it mentions billing which indicates permanent quota issue
-        if 'billing' in error_str or 'payment' in error_str:
-            return False
-        # Temporary quota (rate limit) - should retry
-        return True
-    
-    # Rate limit errors - should retry (429)
-    if 'rate' in error_str and 'limit' in error_str:
-        return True
-    if '429' in error_str or 'resource_exhausted' in error_str:
-        return True
-    
-    # Server errors - should retry (500, 502, 503, 504)
-    if any(code in error_str for code in ['500', '502', '503', '504']):
-        return True
-    if 'internal' in error_str and ('error' in error_str or 'server' in error_str):
-        return True
-    if 'service' in error_str and 'unavailable' in error_str:
-        return True
-    if 'gateway' in error_str:
-        return True
-    
-    # Timeout / connection errors - should retry
-    if 'timeout' in error_str or 'timed out' in error_str:
-        return True
-    if 'connection' in error_str:
-        return True
-    if 'network' in error_str:
-        return True
-    
-    # Unknown errors - default to retry with limited attempts
-    return True
 
 
 async def audit_block_with_retry(
@@ -441,15 +167,16 @@ async def audit_block_with_retry(
     
     for attempt in range(max_retries + 1):
         try:
+            user_prompt = build_user_prompt(block)
             if use_gemini:
                 return await audit_block_gemini_async(
-                    block, system_prompt, model_name, client,
+                    user_prompt, system_prompt, model_name, client,
                     thinking_level=thinking_level,
                     thinking_budget=thinking_budget
                 )
             else:
                 return await audit_block_openai_async(
-                    block, system_prompt, model_name, client,
+                    user_prompt, system_prompt, model_name, client,
                     reasoning_effort=reasoning_effort
                 )
                 
@@ -482,50 +209,300 @@ async def audit_block_with_retry(
     raise last_error
 
 
-# JSON Schema for LLM structured output
-AUDIT_RESULT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "is_violation": {
-            "type": "boolean",
-            "description": "Whether any violations were found"
-        },
-        "violations": {
-            "type": "array",
-            "description": "List of violations found",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "rule_id": {
-                        "type": "string",
-                        "description": "ID of the violated rule (e.g., R001)"
-                    },
-                    "violation_text": {
-                        "type": "string",
-                        "description": "The problematic text directly verbatim quote from the source content, and not span multiple cells"
-                    },
-                    "violation_reason": {
-                        "type": "string",
-                        "description": "Explanation of why this violates the rule"
-                    },
-                    "fix_action": {
-                        "type": "string",
-                        "enum": ["delete", "replace", "manual"],
-                        "description": "Action type: delete removes the text, replace substitutes it, manual requires human review"
-                    },
-                    "revised_text": {
-                        "type": "string",
-                        "description": "For replace: complete replacement text. For delete: empty string. For manual: additional guidance for human reviewer"
-                    }
-                },
-                "required": ["rule_id", "violation_text", "violation_reason", "fix_action", "revised_text"]
-            }
-        }
-    },
-    "required": ["is_violation", "violations"]
-}
+async def global_extract_with_retry(
+    block: dict,
+    system_prompt: str,
+    model_name: str,
+    client,
+    use_gemini: bool,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    block_idx: int = 0,
+    total_blocks: int = 0,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
+) -> dict:
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            user_prompt = build_global_extract_user_prompt(block)
+            if use_gemini:
+                return await global_extract_gemini_async(
+                    user_prompt, system_prompt, model_name, client,
+                    thinking_level=thinking_level, thinking_budget=thinking_budget
+                )
+            return await global_extract_openai_async(
+                user_prompt, system_prompt, model_name, client,
+                reasoning_effort=reasoning_effort
+            )
+        except Exception as e:
+            last_error = e
+            retryable = is_gemini_retryable(e) if use_gemini else is_openai_retryable(e)
+            if not retryable:
+                raise NonRetryableError(f"Non-retryable error: {e}") from e
+            if attempt >= max_retries:
+                raise
+            backoff = min(INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt), MAX_BACKOFF)
+            jitter = backoff * 0.1 * (2 * random.random() - 1)
+            wait_time = backoff + jitter
+            print(
+                f"  [Extract {block_idx+1}/{total_blocks}] Retry {attempt + 1}/{max_retries} "
+                f"after {wait_time:.1f}s: {type(e).__name__}: {str(e)[:100]}",
+                file=sys.stderr
+            )
+            await asyncio.sleep(wait_time)
+    raise last_error
+
+
+async def global_verify_with_retry(
+    rule: dict,
+    items: list,
+    system_prompt: str,
+    model_name: str,
+    client,
+    use_gemini: bool,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    rule_idx: int = 0,
+    total_rules: int = 0,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
+) -> dict:
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            user_prompt = build_global_verify_user_prompt(rule, items)
+            if use_gemini:
+                return await global_verify_gemini_async(
+                    user_prompt, system_prompt, model_name, client,
+                    thinking_level=thinking_level, thinking_budget=thinking_budget
+                )
+            return await global_verify_openai_async(
+                user_prompt, system_prompt, model_name, client,
+                reasoning_effort=reasoning_effort
+            )
+        except Exception as e:
+            last_error = e
+            retryable = is_gemini_retryable(e) if use_gemini else is_openai_retryable(e)
+            if not retryable:
+                raise NonRetryableError(f"Non-retryable error: {e}") from e
+            if attempt >= max_retries:
+                raise
+            backoff = min(INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt), MAX_BACKOFF)
+            jitter = backoff * 0.1 * (2 * random.random() - 1)
+            wait_time = backoff + jitter
+            print(
+                f"  [Verify {rule_idx+1}/{total_rules}] Retry {attempt + 1}/{max_retries} "
+                f"after {wait_time:.1f}s: {type(e).__name__}: {str(e)[:100]}",
+                file=sys.stderr
+            )
+            await asyncio.sleep(wait_time)
+    raise last_error
+
+
+def normalize_extracted_fields(rule: dict) -> list:
+    """
+    Normalize extracted_fields definitions into a list of {name, desc, evidence_desc}.
+
+    Supports two formats:
+    1) New: {"name": "...", "desc": "...", "evidence": "..."}
+    2) Legacy: {"field_name": "...", "evidence": "..."}
+    """
+    normalized = []
+    for field in rule.get("extracted_fields", []):
+        if not isinstance(field, dict):
+            continue
+        if "name" in field:
+            normalized.append({
+                "name": field.get("name", "").strip(),
+                "desc": field.get("desc", "").strip(),
+                "evidence_desc": field.get("evidence", "").strip()
+            })
+            continue
+        evidence_desc = field.get("evidence", "").strip()
+        for key, value in field.items():
+            if key == "evidence":
+                continue
+            normalized.append({
+                "name": str(key).strip(),
+                "desc": str(value).strip(),
+                "evidence_desc": evidence_desc
+            })
+    return normalized
+
+
+def format_global_rules_for_extraction(rules: list) -> str:
+    lines = ["Global Extraction Rules:"]
+    for rule in rules:
+        fields = normalize_extracted_fields(rule)
+        lines.append(f"- [{rule.get('id', '')}] {rule.get('topic', '')}")
+        extraction = rule.get("extraction", "")
+        if extraction:
+            lines.append(f"  Extraction: {extraction}")
+        entity_label = rule.get("extracted_entity", "")
+        if entity_label:
+            lines.append(f"  Entity: {entity_label}")
+        if fields:
+            lines.append("  Fields:")
+            for f in fields:
+                desc = f.get("desc", "")
+                evidence_desc = f.get("evidence_desc", "")
+                lines.append(f"    - {f.get('name','')}: {desc}")
+                if evidence_desc:
+                    lines.append(f"      Evidence: {evidence_desc}")
+    return "\n".join(lines)
+
+
+def build_global_extract_system_prompt(rules: list) -> str:
+    output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
+    rules_text = format_global_rules_for_extraction(rules)
+    return f"""You are an information extraction engine. Extract data from a single text block according to the global rules.
+
+{rules_text}
+
+Instructions:
+1. Only use information explicitly present in the given block.
+2. For each matched rule, return zero or more extracted entities with their fields.
+3. Fields must use the exact field names defined in the rule.
+4. If a field cannot be extracted, return empty string for both value and evidence.
+5. Evidence must be a verbatim excerpt from the block and should be short (no more than one sentence).
+
+Return JSON only with this structure:
+{{
+  "results": [
+    {{
+      "rule_id": "G001",
+      "extracted_results": [
+        {{
+          "entity": "entity name (string, can be empty if unknown)",
+          "fields": [
+            {{"name": "field_name", "value": "summary text", "evidence": "verbatim excerpt"}}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}
+
+If no relevant information is found, return:
+{{
+  "results": []
+}}
+
+Return ONLY the JSON object, no other text. Output language for summaries should be {output_language}."""
+
+
+def build_global_extract_user_prompt(block: dict) -> str:
+    block_text = format_block_for_prompt(block)
+    return f"""Extract global rule information from the following block:
+
+{block_text}"""
+
+
+def build_global_verify_system_prompt(rule: dict) -> str:
+    output_language = os.getenv("AUDIT_LANGUAGE", "Chinese")
+    verification = rule.get("verification", "")
+    topic = rule.get("topic", "")
+    return f"""You are a consistency auditor. Check extracted items for conflicts based on the rule below.
+
+Rule ID: {rule.get('id','')}
+Topic: {topic}
+Verification: {verification}
+
+Instructions:
+1. Compare extracted items and identify inconsistencies or conflicts as defined by the rule.
+2. Use only the provided evidence text when referencing problematic content.
+3. violation_text must be a verbatim evidence excerpt from the input items.
+4. If unsure, mark as manual.
+
+Return JSON only:
+{{
+  "violations": [
+    {{
+      "rule_id": "{rule.get('id','')}",
+      "uuid": "<uuid>",
+      "uuid_end": "<uuid_end>",
+      "violation_text": "<verbatim evidence>",
+      "violation_reason": "<reason in {output_language}>",
+      "fix_action": "manual",
+      "revised_text": "<guidance in {output_language}>"
+    }}
+  ]
+}}
+
+If no violations, return:
+{{ "violations": [] }}
+
+Return ONLY the JSON object, no other text."""
+
+
+def build_global_verify_user_prompt(rule: dict, items: list) -> str:
+    payload = {
+        "rule_id": rule.get("id", ""),
+        "items": items
+    }
+    payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    return f"""Check consistency for the following extracted items:
+
+{payload_text}"""
+
+
+def chunk_items_by_token_limit(rule: dict, items: list, max_tokens: int) -> list:
+    """
+    Chunk items so that each chunk's total prompt (system + user) stays within max_tokens.
+    
+    The system prompt includes the rule's topic and verification text, which can be
+    substantial for rules with detailed descriptions or many fields. This overhead
+    must be accounted for to avoid exceeding the token limit when the actual API
+    call includes both system and user prompts.
+    
+    Args:
+        rule: Global audit rule
+        items: List of extracted items to chunk
+        max_tokens: Maximum allowed tokens per chunk (total context)
+        
+    Returns:
+        List of item chunks, each staying within the token budget
+    """
+    # Calculate system prompt token overhead for this rule
+    system_prompt = build_global_verify_system_prompt(rule)
+    system_tokens = estimate_tokens(system_prompt)
+    available_tokens = max_tokens - system_tokens
+    
+    # Handle edge case where system prompt alone exceeds max_tokens
+    if available_tokens <= 0:
+        print(
+            f"Warning: System prompt for rule {rule.get('id','')} exceeds GLOBAL_AUDIT_MAX_TOKENS "
+            f"({system_tokens} tokens > {max_tokens}). Using fallback budget of {max_tokens // 2} tokens.",
+            file=sys.stderr
+        )
+        available_tokens = max_tokens // 2  # Fallback: use half for user prompt
+    
+    chunks = []
+    current = []
+    for item in items:
+        trial = current + [item]
+        prompt_text = build_global_verify_user_prompt(rule, trial)
+        user_tokens = estimate_tokens(prompt_text)
+        
+        if user_tokens <= available_tokens or not current:
+            current = trial
+            # Warn if a single item exceeds available budget
+            if user_tokens > available_tokens and len(trial) == 1:
+                total_tokens = user_tokens + system_tokens
+                print(
+                    f"Warning: Single item exceeds token budget for rule {rule.get('id','')}. "
+                    f"Estimated {user_tokens} (user) + {system_tokens} (system) = {total_tokens} > {max_tokens}.",
+                    file=sys.stderr
+                )
+        else:
+            chunks.append(current)
+            current = [item]
+    
+    if current:
+        chunks.append(current)
+    
+    return chunks
 
 
 def load_blocks(file_path: str) -> tuple:
@@ -583,11 +560,26 @@ def load_rules(file_path: str) -> list:
         data = json.load(f)
 
     if isinstance(data, list):
-        return data
+        rules = data
     elif 'rules' in data:
-        return data['rules']
+        rules = data['rules']
+        default_type = data.get('type')
+        if default_type:
+            for rule in rules:
+                rule.setdefault('type', default_type)
     else:
         raise ValueError(f"Unknown rules format in {file_path}")
+    
+    # Normalize type values for backward compatibility
+    # 1. Set default type for rules missing the field
+    # 2. Normalize legacy "block_level" → "block"
+    for rule in rules:
+        if 'type' not in rule:
+            rule['type'] = 'block'  # Set default
+        elif rule['type'] == 'block_level':
+            rule['type'] = 'block'  # Normalize legacy
+    
+    return rules
 
 
 def merge_rules(rule_files: list) -> list:
@@ -785,121 +777,6 @@ def build_user_prompt(block: dict) -> str:
     return f"""Analyze the following content with section context for rule violations:
 
 {block_text}"""
-
-
-async def audit_block_gemini_async(
-    block: dict,
-    system_prompt: str,
-    model_name: str,
-    async_client,
-    thinking_level: str = None,
-    thinking_budget: int = None
-) -> dict:
-    """
-    Audit a text block using Google Gemini with strict JSON mode (async version).
-
-    Args:
-        block: Text block to audit
-        system_prompt: Cached system prompt with rules and instructions
-        model_name: Gemini model to use
-        async_client: Gemini async client instance (client.aio)
-        thinking_level: Thinking level for Gemini 3 models (MINIMAL, LOW, MEDIUM, HIGH)
-        thinking_budget: Thinking token budget for Gemini 2.5 models (integer)
-
-    Returns:
-        Audit result dictionary
-    """
-    user_prompt = build_user_prompt(block)
-
-    # Build thinking config based on model and parameters
-    thinking_config = None
-    
-    if thinking_level and thinking_level.upper() in ("MINIMAL", "LOW", "MEDIUM", "HIGH"):
-        # For Gemini 3 models
-        level_map = {
-            "MINIMAL": types.ThinkingLevel.MINIMAL,
-            "LOW": types.ThinkingLevel.LOW,
-            "MEDIUM": types.ThinkingLevel.MEDIUM,
-            "HIGH": types.ThinkingLevel.HIGH,
-        }
-        thinking_config = types.ThinkingConfig(
-            thinking_level=level_map[thinking_level.upper()]
-        )
-    elif thinking_budget is not None:
-        # For Gemini 2.5 models
-        thinking_config = types.ThinkingConfig(
-            thinking_budget=int(thinking_budget)
-        )
-    
-    config_params = {
-        "system_instruction": system_prompt,
-        "response_mime_type": "application/json",
-        "response_schema": AUDIT_RESULT_SCHEMA
-    }
-    
-    # Only add thinking_config if it's configured
-    if thinking_config:
-        config_params["thinking_config"] = thinking_config
-
-    response = await async_client.models.generate_content(
-        model=model_name,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(**config_params)
-    )
-    
-    # With structured output, response is guaranteed to be valid JSON
-    result = json.loads(response.text)
-    return result
-
-
-async def audit_block_openai_async(
-    block: dict,
-    system_prompt: str,
-    model_name: str,
-    client,
-    reasoning_effort: str = None
-) -> dict:
-    """
-    Audit a text block using OpenAI with strict JSON mode (async version).
-
-    Args:
-        block: Text block to audit
-        system_prompt: Cached system prompt with rules and instructions
-        model_name: OpenAI model to use
-        client: AsyncOpenAI client instance
-        reasoning_effort: Reasoning effort for o-series models (low, medium, high)
-
-    Returns:
-        Audit result dictionary
-    """
-    user_prompt = build_user_prompt(block)
-
-    request_params = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "audit_result",
-                "strict": True,
-                "schema": AUDIT_RESULT_SCHEMA
-            }
-        }
-    }
-    
-    # Add reasoning_effort only for o-series models that support it
-    if reasoning_effort and reasoning_effort.lower() in ("low", "medium", "high") \
-            and is_openai_reasoning_model(model_name):
-        request_params["reasoning_effort"] = reasoning_effort.lower()
-
-    response = await client.chat.completions.create(**request_params)
-
-    # With structured output, response is guaranteed to be valid JSON
-    result = json.loads(response.choices[0].message.content)
-    return result
 
 
 async def save_manifest_entry_async(manifest_path: str, entry: dict, lock: asyncio.Lock):
@@ -1188,6 +1065,249 @@ async def process_block_async(
             return (block_idx, False, 0, heading, None)
 
 
+async def run_global_extraction_async(
+    blocks: list,
+    global_rules: list,
+    use_gemini: bool,
+    model_name: str,
+    client,
+    max_retries: int,
+    rate_limit: float,
+    workers: int,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
+) -> dict:
+    """
+    Extract global rule information from each block.
+
+    Returns:
+        Dict mapping rule_id -> list of extracted items
+    """
+    system_prompt = build_global_extract_system_prompt(global_rules)
+    semaphore = asyncio.Semaphore(workers)
+
+    # Progress tracking
+    completed_count = 0
+    total_entities = 0
+    progress_lock = asyncio.Lock()
+    total_blocks = len(blocks)
+
+    # Print header
+    print(f"\nGlobal extraction: {len(global_rules)} rules, {total_blocks} blocks")
+    print("-" * 50)
+
+    async def extract_block(block_idx: int, block: dict):
+        nonlocal completed_count, total_entities
+        async with semaphore:
+            if rate_limit > 0:
+                await asyncio.sleep(rate_limit)
+            result = await global_extract_with_retry(
+                block=block,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                client=client,
+                use_gemini=use_gemini,
+                max_retries=max_retries,
+                block_idx=block_idx,
+                total_blocks=total_blocks,
+                thinking_level=thinking_level,
+                thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort
+            )
+
+            # Count entities extracted from this block
+            entity_count = sum(
+                len(r.get("extracted_results", []))
+                for r in result.get("results", [])
+            ) if result and isinstance(result, dict) else 0
+
+            # Progress output
+            heading = block.get("heading", "Unknown")[:40]
+            async with progress_lock:
+                completed_count += 1
+                total_entities += entity_count
+                entity_str = "entity" if entity_count == 1 else "entities"
+                print(f"[Extract {completed_count}/{total_blocks}] {heading}... {entity_count} {entity_str}")
+
+            return block_idx, result
+
+    tasks = [
+        extract_block(idx, block)
+        for idx, block in enumerate(blocks)
+    ]
+
+    rule_buckets = {rule.get("id", ""): [] for rule in global_rules}
+
+    for coro in asyncio.as_completed(tasks):
+        block_idx, result = await coro
+        block = blocks[block_idx]
+        if not result or not isinstance(result, dict):
+            continue
+        for rule_result in result.get("results", []):
+            rule_id = rule_result.get("rule_id", "")
+            if rule_id not in rule_buckets:
+                continue
+            for extracted in rule_result.get("extracted_results", []):
+                item = {
+                    "uuid": block.get("uuid", str(block_idx)),
+                    "uuid_end": block.get("uuid_end", block.get("uuid", str(block_idx))),
+                    "p_heading": block.get("heading", ""),
+                    "entity": extracted.get("entity", ""),
+                    "fields": extracted.get("fields", [])
+                }
+                rule_buckets[rule_id].append(item)
+
+    # Print summary
+    print("-" * 50)
+    entity_str = "entity" if total_entities == 1 else "entities"
+    print(f"Extraction complete: {total_blocks} blocks, {total_entities} {entity_str} extracted")
+
+    return rule_buckets
+
+
+async def run_global_verification_async(
+    rule_buckets: dict,
+    global_rules: list,
+    use_gemini: bool,
+    model_name: str,
+    client,
+    max_retries: int,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None,
+    max_tokens: int = DEFAULT_GLOBAL_AUDIT_MAX_TOKENS
+) -> list:
+    """
+    Verify global consistency per rule bucket.
+
+    Returns:
+        List of violation dicts
+    """
+    # Print header
+    print(f"\nGlobal verification: {len(global_rules)} rules")
+    print("-" * 50)
+
+    violations = []
+    for idx, rule in enumerate(global_rules):
+        rule_id = rule.get("id", "")
+        topic = rule.get("topic", "Unknown")[:30]
+        items = rule_buckets.get(rule_id, [])
+
+        if not items:
+            print(f"[Verify {rule_id}] {topic} (0 items)... skipped")
+            continue
+
+        system_prompt = build_global_verify_system_prompt(rule)
+        chunks = chunk_items_by_token_limit(rule, items, max_tokens)
+
+        rule_violations = []
+        for chunk in chunks:
+            result = await global_verify_with_retry(
+                rule=rule,
+                items=chunk,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                client=client,
+                use_gemini=use_gemini,
+                max_retries=max_retries,
+                rule_idx=idx,
+                total_rules=len(global_rules),
+                thinking_level=thinking_level,
+                thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort
+            )
+            for v in result.get("violations", []):
+                if not v.get("rule_id"):
+                    v["rule_id"] = rule_id
+                rule_violations.append(v)
+
+        # Progress output for this rule
+        chunk_str = "chunk" if len(chunks) == 1 else "chunks"
+        viol_str = "violation" if len(rule_violations) == 1 else "violations"
+        print(f"[Verify {rule_id}] {topic} ({len(items)} items, {len(chunks)} {chunk_str})... {len(rule_violations)} {viol_str}")
+
+        violations.extend(rule_violations)
+
+    # Print summary
+    print("-" * 50)
+    viol_str = "violation" if len(violations) == 1 else "violations"
+    print(f"Verification complete: {len(violations)} {viol_str} found")
+
+    return violations
+
+
+def merge_global_violations(
+    entries_with_idx: list,
+    global_violations: list,
+    blocks: list,
+    uuid_to_block_idx: dict,
+    rule_category_map: dict
+) -> list:
+    """
+    Merge global violations into existing manifest entries.
+
+    Args:
+        entries_with_idx: List of (block_idx, entry) tuples
+        global_violations: List of violation dicts from global verification
+        blocks: Original blocks list
+        uuid_to_block_idx: Mapping from uuid to block index
+        rule_category_map: Mapping from rule_id to category
+
+    Returns:
+        Updated list of (block_idx, entry) tuples
+    """
+    entry_by_uuid = {}
+    for block_idx, entry in entries_with_idx:
+        entry_by_uuid[entry.get("uuid", "")] = (block_idx, entry)
+
+    for violation in global_violations:
+        uuid = violation.get("uuid", "")
+        if not uuid:
+            print("Warning: Global violation missing uuid, skipping.", file=sys.stderr)
+            continue
+        block_idx = uuid_to_block_idx.get(uuid)
+        if block_idx is None:
+            print(f"Warning: Global violation uuid not found in blocks: {uuid}", file=sys.stderr)
+            continue
+
+        entry_tuple = entry_by_uuid.get(uuid)
+        if entry_tuple:
+            _, entry = entry_tuple
+        else:
+            block = blocks[block_idx]
+            entry = {
+                "uuid": block.get("uuid", uuid),
+                "uuid_end": block.get("uuid_end", block.get("uuid", uuid)),
+                "p_heading": block.get("heading", ""),
+                "p_content": block.get("content", "") if isinstance(block.get("content"), str)
+                else json.dumps(block.get("content", ""), ensure_ascii=False),
+                "is_violation": False,
+                "violations": []
+            }
+            entry_by_uuid[uuid] = (block_idx, entry)
+
+        # Deduplicate by rule_id + violation_text + uuid_end
+        existing_keys = {
+            (v.get("rule_id", ""), v.get("violation_text", ""), v.get("uuid_end", ""))
+            for v in entry.get("violations", [])
+        }
+
+        rule_id = violation.get("rule_id", "")
+        violation_with_meta = {
+            **violation,
+            "category": rule_category_map.get(rule_id, "other")
+        }
+        key = (violation_with_meta.get("rule_id", ""),
+               violation_with_meta.get("violation_text", ""),
+               violation_with_meta.get("uuid_end", ""))
+        if key not in existing_keys:
+            entry.setdefault("violations", []).append(violation_with_meta)
+        entry["is_violation"] = len(entry.get("violations", [])) > 0
+
+    return list(entry_by_uuid.values())
+
+
 async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids,
                          thinking_level=None, thinking_budget=None, reasoning_effort=None):
     """
@@ -1301,7 +1421,6 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
         # Prepare metadata for rewrite
         audit_metadata = None
         if metadata:
-            from datetime import datetime
             audit_metadata = {
                 **metadata,
                 "llm_provider": provider_name,
@@ -1326,6 +1445,111 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     print(f"Blocks failed: {blocks_failed}")
     print(f"Total violations: {total_violations}")
     print(f"Manifest saved to: {args.output} (sorted by block order)")
+
+
+async def run_full_audit_async(
+    args,
+    blocks: list,
+    block_rules: list,
+    global_rules: list,
+    metadata: dict,
+    use_gemini: bool,
+    model_name: str,
+    provider_name: str,
+    client,
+    completed_uuids: set,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
+):
+    """
+    Unified async entry point for both block-level and global audits.
+
+    This function runs both audit phases in sequence within a single event loop
+    for better efficiency.
+    """
+    # Phase 1: Block-level audit
+    if block_rules:
+        await run_audit_async(
+            args, blocks, block_rules, metadata, use_gemini, model_name,
+            provider_name, client, completed_uuids,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            reasoning_effort=reasoning_effort
+        )
+    else:
+        print("\nNo block rules provided; skipping block-level audit.")
+
+    # Phase 2: Global extraction + verification
+    if global_rules:
+        max_tokens = get_global_audit_max_tokens()
+
+        start_idx = args.start_block
+        end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
+        blocks_for_global = blocks[start_idx:end_idx + 1]
+
+        rule_buckets = await run_global_extraction_async(
+            blocks=blocks_for_global,
+            global_rules=global_rules,
+            use_gemini=use_gemini,
+            model_name=model_name,
+            client=client,
+            max_retries=args.max_retries,
+            rate_limit=args.rate_limit,
+            workers=args.workers,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            reasoning_effort=reasoning_effort
+        )
+
+        global_violations = await run_global_verification_async(
+            rule_buckets=rule_buckets,
+            global_rules=global_rules,
+            use_gemini=use_gemini,
+            model_name=model_name,
+            client=client,
+            max_retries=args.max_retries,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens
+        )
+
+        if global_violations:
+            uuid_to_block_idx = {
+                block.get('uuid', str(idx)): idx for idx, block in enumerate(blocks)
+            }
+            existing_entries = load_existing_entries_with_block_idx(args.output, uuid_to_block_idx)
+            global_rule_category_map = build_rule_category_map(global_rules)
+            merged_entries = merge_global_violations(
+                entries_with_idx=existing_entries,
+                global_violations=global_violations,
+                blocks=blocks,
+                uuid_to_block_idx=uuid_to_block_idx,
+                rule_category_map=global_rule_category_map
+            )
+
+            audit_metadata = load_manifest_metadata(args.output)
+            if not audit_metadata and metadata:
+                audit_metadata = {
+                    **metadata,
+                    "llm_provider": provider_name,
+                    "llm_model": model_name,
+                    "audited_at": datetime.now().isoformat()
+                }
+                if thinking_level:
+                    audit_metadata["thinking_level"] = thinking_level
+                if thinking_budget is not None:
+                    audit_metadata["thinking_budget"] = thinking_budget
+                if reasoning_effort:
+                    audit_metadata["reasoning_effort"] = reasoning_effort
+
+            rewrite_manifest_sorted(args.output, audit_metadata, merged_entries)
+            print(f"Global violations merged: {len(global_violations)}")
+        else:
+            print("Global audit completed: no violations found.")
+    else:
+        print("\nNo global rules provided; skipping global audit.")
 
 
 def main():
@@ -1642,6 +1866,10 @@ def main():
     rules = merge_rules(args.rules)
     print(f"  → {len(rules)} rules total")
 
+    block_rules = [r for r in rules if r.get("type", "block") == "block"]
+    global_rules = [r for r in rules if r.get("type") == "global"]
+    print(f"  → {len(block_rules)} block rules, {len(global_rules)} global rules")
+
     # Handle resume
     completed_uuids = set()
     output_path = Path(args.output)
@@ -1695,7 +1923,6 @@ def main():
     else:
         # Write metadata as first line for new manifest
         if metadata:
-            from datetime import datetime
             audit_metadata = {
                 **metadata,
                 "llm_provider": provider_name,
@@ -1716,28 +1943,43 @@ def main():
 
     # Handle dry-run mode (no async needed)
     if args.dry_run:
-        system_prompt = build_system_prompt(rules)
+        if not block_rules:
+            print("Dry-run: No block rules provided; skipping block audit prompts.")
+        system_prompt = build_system_prompt(block_rules)
         start_idx = args.start_block
         end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
         blocks_to_process = blocks[start_idx:end_idx + 1]
         
-        for i, block in enumerate(blocks_to_process):
-            block_idx = start_idx + i
-            block_uuid = block.get('uuid', str(block_idx))
-            
-            if block_uuid in completed_uuids:
-                print(f"[{block_idx+1}/{len(blocks)}] Skipping (already processed)")
-                continue
-            
-            print(f"[{block_idx+1}/{len(blocks)}] Auditing: {block.get('heading', 'Unknown')[:50]}...")
-            user_prompt = build_user_prompt(block)
-            print(f"\n--- System Prompt ---\n{system_prompt[:300]}...\n")
-            print(f"--- User Prompt ---\n{user_prompt[:300]}...")
+        if block_rules:
+            for i, block in enumerate(blocks_to_process):
+                block_idx = start_idx + i
+                block_uuid = block.get('uuid', str(block_idx))
+
+                if block_uuid in completed_uuids:
+                    print(f"[{block_idx+1}/{len(blocks)}] Skipping (already processed)")
+                    continue
+
+                print(f"[{block_idx+1}/{len(blocks)}] Auditing: {block.get('heading', 'Unknown')[:50]}...")
+                user_prompt = build_user_prompt(block)
+                print(f"\n--- System Prompt ---\n{system_prompt[:300]}...\n")
+                print(f"--- User Prompt ---\n{user_prompt[:300]}...")
+
+        if global_rules:
+            print("Dry-run: Global rules detected. Global extraction/verification prompts are skipped.")
         return
 
-    # Run async audit
-    asyncio.run(run_audit_async(
-        args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids,
+    # Run full audit (block-level + global) in a single event loop
+    asyncio.run(run_full_audit_async(
+        args=args,
+        blocks=blocks,
+        block_rules=block_rules,
+        global_rules=global_rules,
+        metadata=metadata,
+        use_gemini=use_gemini,
+        model_name=model_name,
+        provider_name=provider_name,
+        client=client,
+        completed_uuids=completed_uuids,
         thinking_level=thinking_level,
         thinking_budget=thinking_budget,
         reasoning_effort=reasoning_effort
