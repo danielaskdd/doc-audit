@@ -561,6 +561,8 @@ def load_completed_extraction_uuids(extraction_path: str) -> set:
         Set of completed UUIDs
     """
     completed = set()
+    if not Path(extraction_path).exists():
+        return completed
     for entry in iter_manifest_entries(extraction_path, ignore_errors=True):
         # Skip metadata entries
         if entry.get('type') == 'meta':
@@ -583,6 +585,8 @@ def load_extraction_buckets(extraction_path: str, global_rules: list) -> dict:
         Dict mapping rule_id -> list of extracted items
     """
     rule_buckets = {rule.get('id', ''): [] for rule in global_rules}
+    if not Path(extraction_path).exists():
+        return rule_buckets
     
     for entry in iter_manifest_entries(extraction_path, ignore_errors=True):
         # Skip metadata entries
