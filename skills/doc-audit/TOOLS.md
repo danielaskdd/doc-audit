@@ -445,6 +445,39 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | `--end-block` | int | No | End at this block index (inclusive, default: last block) |
 | `--resume` | flag | No | Resume from previous run (skip already-processed blocks) |
 | `--dry-run` | flag | No | Print prompts without calling LLM (for debugging) |
+| `--thinking-level` | choice | No | Gemini 3 thinking level: `minimal`, `low`, `medium`, `high` (env: `GEMINI_THINKING_LEVEL`) |
+| `--thinking-budget` | int | No | Gemini 2.5 thinking token budget, 0 to disable (env: `GEMINI_THINKING_BUDGET`) |
+| `--reasoning-effort` | choice | No | OpenAI o-series reasoning effort: `low`, `medium`, `high` (env: `OPENAI_REASONING_EFFORT`) |
+
+### Thinking/Reasoning Configuration
+
+The audit script supports controlling LLM thinking intensity for models that support extended reasoning capabilities.
+
+**Supported Models:**
+- **Gemini 3**: `--thinking-level` (minimal, low, medium, high)
+- **Gemini 2.5**: `--thinking-budget` (token count, 0 to disable)
+- **OpenAI o-series**: `--reasoning-effort` (low, medium, high)
+
+For detailed usage, examples, and performance considerations, see [THINKING_INTENSITY.md](./THINKING_INTENSITY.md).
+
+**Quick Examples:**
+
+```bash
+# Gemini 3 with high thinking
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl -r rules.json \
+  --model gemini-3-pro-preview --thinking-level high
+
+# OpenAI o-series with medium reasoning
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl -r rules.json \
+  --model o3-mini --reasoning-effort medium
+```
+
+**Environment Variables (alternative to command line):**
+- `GEMINI_THINKING_LEVEL` - Gemini 3 thinking level
+- `GEMINI_THINKING_BUDGET` - Gemini 2.5 thinking budget
+- `OPENAI_REASONING_EFFORT` - OpenAI o-series reasoning effort
 
 ### Provider Selection (`--provider`)
 

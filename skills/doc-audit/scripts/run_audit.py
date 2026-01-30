@@ -184,6 +184,66 @@ class NonRetryableError(Exception):
     pass
 
 
+def validate_thinking_config(thinking_level: str = None, thinking_budget: int = None,
+                            thinking_level_source: str = None, thinking_budget_source: str = None):
+    """
+    Validate that thinking_level and thinking_budget are not both set.
+    
+    thinking_level is for Gemini 3 models, thinking_budget is for Gemini 2.5 models.
+    Using both simultaneously would cause the API to receive incompatible parameters.
+    
+    Args:
+        thinking_level: Thinking level value (if set)
+        thinking_budget: Thinking budget value (if set)
+        thinking_level_source: Source description for error message (e.g., "env GEMINI_THINKING_LEVEL")
+        thinking_budget_source: Source description for error message (e.g., "--thinking-budget")
+        
+    Raises:
+        SystemExit: If both parameters are set
+    """
+    if thinking_level and thinking_budget is not None:
+        print("Error: Both thinking_level and thinking_budget are set.", file=sys.stderr)
+        if thinking_level_source:
+            print(f"  thinking_level: {thinking_level.upper()} (from {thinking_level_source})", file=sys.stderr)
+        if thinking_budget_source:
+            print(f"  thinking_budget: {thinking_budget} (from {thinking_budget_source})", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("thinking_level is for Gemini 3 models, thinking_budget is for Gemini 2.5 models.", file=sys.stderr)
+        print("Please use only one:", file=sys.stderr)
+        print("  - For Gemini 3: Use --thinking-level or GEMINI_THINKING_LEVEL", file=sys.stderr)
+        print("  - For Gemini 2.5: Use --thinking-budget or GEMINI_THINKING_BUDGET", file=sys.stderr)
+        sys.exit(1)
+
+
+def is_openai_reasoning_model(model_name: str) -> bool:
+    """
+    Check if the OpenAI model supports reasoning_effort parameter.
+    
+    Models that support reasoning_effort:
+    - o-series: o1, o3, o4 and their variants (o1-mini, o1-2024-12-17, etc.)
+    - gpt-5 series: gpt-5, gpt-5.2, gpt-5-turbo, etc.
+    
+    Non-reasoning models like gpt-4.1, gpt-4o, etc. will reject this parameter.
+    
+    Handles proxy/router prefixes like "openai/o1-mini" or "openrouter/gpt-5.2".
+    
+    Args:
+        model_name: The OpenAI model name (may include path prefix)
+        
+    Returns:
+        True if the model supports reasoning_effort, False otherwise
+    """
+    model_lower = model_name.lower()
+    
+    # Handle proxy/router prefixes like "openai/o1-mini", "openrouter/gpt-5.2"
+    # Extract the base model name after the last "/"
+    if '/' in model_lower:
+        model_lower = model_lower.rsplit('/', 1)[-1]
+    
+    # Match o-series and gpt-5 series
+    return model_lower.startswith(('o1', 'o3', 'o4', 'gpt-5'))
+
+
 def is_openai_retryable(error: Exception) -> bool:
     """
     Determine if an OpenAI error should be retried.
@@ -345,7 +405,10 @@ async def audit_block_with_retry(
     use_gemini: bool,
     max_retries: int = DEFAULT_MAX_RETRIES,
     block_idx: int = 0,
-    total_blocks: int = 1
+    total_blocks: int = 1,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
 ) -> dict:
     """
     Audit a block with automatic retry on transient errors.
@@ -363,6 +426,9 @@ async def audit_block_with_retry(
         max_retries: Maximum number of retry attempts
         block_idx: Block index for logging
         total_blocks: Total blocks for logging
+        thinking_level: Thinking level for Gemini 3 models
+        thinking_budget: Thinking budget for Gemini 2.5 models
+        reasoning_effort: Reasoning effort for OpenAI o-series models
         
     Returns:
         Audit result dictionary
@@ -376,9 +442,16 @@ async def audit_block_with_retry(
     for attempt in range(max_retries + 1):
         try:
             if use_gemini:
-                return await audit_block_gemini_async(block, system_prompt, model_name, client)
+                return await audit_block_gemini_async(
+                    block, system_prompt, model_name, client,
+                    thinking_level=thinking_level,
+                    thinking_budget=thinking_budget
+                )
             else:
-                return await audit_block_openai_async(block, system_prompt, model_name, client)
+                return await audit_block_openai_async(
+                    block, system_prompt, model_name, client,
+                    reasoning_effort=reasoning_effort
+                )
                 
         except Exception as e:
             last_error = e
@@ -714,7 +787,14 @@ def build_user_prompt(block: dict) -> str:
 {block_text}"""
 
 
-async def audit_block_gemini_async(block: dict, system_prompt: str, model_name: str, async_client) -> dict:
+async def audit_block_gemini_async(
+    block: dict,
+    system_prompt: str,
+    model_name: str,
+    async_client,
+    thinking_level: str = None,
+    thinking_budget: int = None
+) -> dict:
     """
     Audit a text block using Google Gemini with strict JSON mode (async version).
 
@@ -723,20 +803,48 @@ async def audit_block_gemini_async(block: dict, system_prompt: str, model_name: 
         system_prompt: Cached system prompt with rules and instructions
         model_name: Gemini model to use
         async_client: Gemini async client instance (client.aio)
+        thinking_level: Thinking level for Gemini 3 models (MINIMAL, LOW, MEDIUM, HIGH)
+        thinking_budget: Thinking token budget for Gemini 2.5 models (integer)
 
     Returns:
         Audit result dictionary
     """
     user_prompt = build_user_prompt(block)
 
+    # Build thinking config based on model and parameters
+    thinking_config = None
+    
+    if thinking_level and thinking_level.upper() in ("MINIMAL", "LOW", "MEDIUM", "HIGH"):
+        # For Gemini 3 models
+        level_map = {
+            "MINIMAL": types.ThinkingLevel.MINIMAL,
+            "LOW": types.ThinkingLevel.LOW,
+            "MEDIUM": types.ThinkingLevel.MEDIUM,
+            "HIGH": types.ThinkingLevel.HIGH,
+        }
+        thinking_config = types.ThinkingConfig(
+            thinking_level=level_map[thinking_level.upper()]
+        )
+    elif thinking_budget is not None:
+        # For Gemini 2.5 models
+        thinking_config = types.ThinkingConfig(
+            thinking_budget=int(thinking_budget)
+        )
+    
+    config_params = {
+        "system_instruction": system_prompt,
+        "response_mime_type": "application/json",
+        "response_schema": AUDIT_RESULT_SCHEMA
+    }
+    
+    # Only add thinking_config if it's configured
+    if thinking_config:
+        config_params["thinking_config"] = thinking_config
+
     response = await async_client.models.generate_content(
         model=model_name,
         contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            response_mime_type="application/json",
-            response_schema=AUDIT_RESULT_SCHEMA
-        )
+        config=types.GenerateContentConfig(**config_params)
     )
     
     # With structured output, response is guaranteed to be valid JSON
@@ -744,7 +852,13 @@ async def audit_block_gemini_async(block: dict, system_prompt: str, model_name: 
     return result
 
 
-async def audit_block_openai_async(block: dict, system_prompt: str, model_name: str, client) -> dict:
+async def audit_block_openai_async(
+    block: dict,
+    system_prompt: str,
+    model_name: str,
+    client,
+    reasoning_effort: str = None
+) -> dict:
     """
     Audit a text block using OpenAI with strict JSON mode (async version).
 
@@ -753,20 +867,20 @@ async def audit_block_openai_async(block: dict, system_prompt: str, model_name: 
         system_prompt: Cached system prompt with rules and instructions
         model_name: OpenAI model to use
         client: AsyncOpenAI client instance
+        reasoning_effort: Reasoning effort for o-series models (low, medium, high)
 
     Returns:
         Audit result dictionary
     """
     user_prompt = build_user_prompt(block)
 
-    response = await client.chat.completions.create(
-        model=model_name,
-        messages=[
+    request_params = {
+        "model": model_name,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        temperature=0.2,
-        response_format={
+        "response_format": {
             "type": "json_schema",
             "json_schema": {
                 "name": "audit_result",
@@ -774,7 +888,14 @@ async def audit_block_openai_async(block: dict, system_prompt: str, model_name: 
                 "schema": AUDIT_RESULT_SCHEMA
             }
         }
-    )
+    }
+    
+    # Add reasoning_effort only for o-series models that support it
+    if reasoning_effort and reasoning_effort.lower() in ("low", "medium", "high") \
+            and is_openai_reasoning_model(model_name):
+        request_params["reasoning_effort"] = reasoning_effort.lower()
+
+    response = await client.chat.completions.create(**request_params)
 
     # With structured output, response is guaranteed to be valid JSON
     result = json.loads(response.choices[0].message.content)
@@ -971,7 +1092,10 @@ async def process_block_async(
     manifest_lock: asyncio.Lock,
     rate_limit: float,
     semaphore: asyncio.Semaphore,
-    max_retries: int = DEFAULT_MAX_RETRIES
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    thinking_level: str = None,
+    thinking_budget: int = None,
+    reasoning_effort: str = None
 ) -> tuple:
     """
     Process a single block asynchronously with concurrency control and retry.
@@ -1013,7 +1137,10 @@ async def process_block_async(
                 use_gemini=use_gemini,
                 max_retries=max_retries,
                 block_idx=block_idx,
-                total_blocks=total_blocks
+                total_blocks=total_blocks,
+                thinking_level=thinking_level,
+                thinking_budget=thinking_budget,
+                reasoning_effort=reasoning_effort
             )
 
             # Get UUID range from block for injection into violations
@@ -1061,7 +1188,8 @@ async def process_block_async(
             return (block_idx, False, 0, heading, None)
 
 
-async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids):
+async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids,
+                         thinking_level=None, thinking_budget=None, reasoning_effort=None):
     """
     Run the audit process asynchronously with parallel block processing.
 
@@ -1075,13 +1203,15 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
         provider_name: LLM provider name (e.g., "Google Gemini", "OpenAI")
         client: LLM client instance
         completed_uuids: Set of already-processed UUIDs
+        thinking_level: Thinking level for Gemini 3 models (resolved in main)
+        thinking_budget: Thinking budget for Gemini 2.5 models (resolved in main)
+        reasoning_effort: Reasoning effort for OpenAI o-series models (resolved in main)
     """
     # Build rule category mapping
     rule_category_map = build_rule_category_map(rules)
 
     # Build system prompt once (will be cached by LLM)
     system_prompt = build_system_prompt(rules)
-    print(f"System prompt built ({len(system_prompt)} chars, will be cached)")
 
     # Build uuid → block_idx mapping for all blocks
     uuid_to_block_idx = {}
@@ -1108,18 +1238,19 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
     ]
 
     if not blocks_with_indices:
-        print("All blocks already processed!")
+        print("\nAll blocks already processed!")
         return
 
-    print(f"\nUsing model: {model_name}")
-    print(f"Processing blocks {start_idx} to {end_idx} ({len(blocks_with_indices)} blocks to process)")
-    print(f"Parallel workers: {args.workers}")
+    print(f"\nProcessing: blocks {start_idx}-{end_idx} ({len(blocks_with_indices)} pending), {args.workers} workers")
     print(f"Output: {args.output}")
     print("-" * 50)
 
     # Create concurrency controls
     semaphore = asyncio.Semaphore(args.workers)
     manifest_lock = asyncio.Lock()
+
+    # Configuration is already resolved and validated in main()
+    # No need to re-parse or validate here
 
     # Create tasks for all blocks
     tasks = [
@@ -1136,7 +1267,10 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
             manifest_lock=manifest_lock,
             rate_limit=args.rate_limit,
             semaphore=semaphore,
-            max_retries=args.max_retries
+            max_retries=args.max_retries,
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            reasoning_effort=reasoning_effort
         )
         for block_idx, block in blocks_with_indices
     ]
@@ -1174,6 +1308,13 @@ async def run_audit_async(args, blocks, rules, metadata, use_gemini, model_name,
                 "llm_model": model_name,
                 "audited_at": datetime.now().isoformat()
             }
+            # Add thinking/reasoning config if set
+            if thinking_level:
+                audit_metadata["thinking_level"] = thinking_level
+            if thinking_budget is not None:
+                audit_metadata["thinking_budget"] = thinking_budget
+            if reasoning_effort:
+                audit_metadata["reasoning_effort"] = reasoning_effort
         
         print("Sorting and rewriting manifest...")
         rewrite_manifest_sorted(args.output, audit_metadata, all_results)
@@ -1264,8 +1405,29 @@ def main():
         action="store_true",
         help="Print prompts without calling LLM"
     )
+    parser.add_argument(
+        "--thinking-level",
+        type=str,
+        choices=["minimal", "low", "medium", "high"],
+        default=None,
+        help="Gemini 3 thinking level: minimal, low, medium, high (env: GEMINI_THINKING_LEVEL)"
+    )
+    parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=None,
+        help="Gemini 2.5 thinking token budget, 0 to disable (env: GEMINI_THINKING_BUDGET)"
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        type=str,
+        choices=["low", "medium", "high"],
+        default=None,
+        help="OpenAI o-series reasoning effort: low, medium, high (env: OPENAI_REASONING_EFFORT)"
+    )
 
     args = parser.parse_args()
+
 
     # Validate input format (JSON/JSONL blocks only)
     doc_path = Path(args.document)
@@ -1406,23 +1568,80 @@ def main():
 
     # Determine and print LLM provider name
     provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
-    print(f"\nLLM Provider: {provider_name}")
-    print(f"Model: {model_name}")
-
+    
+    # Display LLM configuration
+    print(f"\nLLM: {provider_name} / {model_name}")
+    
+    # Resolve thinking/reasoning configuration (command line args > environment variables)
+    # Only parse Gemini-specific env vars when using Gemini to avoid crashes from invalid values
+    thinking_level = None
+    thinking_budget = None
+    reasoning_effort = None
+    
+    if use_gemini:
+        # Resolve thinking_level from CLI or env
+        thinking_level = args.thinking_level or os.getenv("GEMINI_THINKING_LEVEL")
+        
+        # Resolve thinking_budget with proper error handling
+        thinking_budget = args.thinking_budget
+        if thinking_budget is None:
+            thinking_budget_str = os.getenv("GEMINI_THINKING_BUDGET")
+            if thinking_budget_str:
+                try:
+                    thinking_budget = int(thinking_budget_str)
+                except ValueError:
+                    print(f"Error: GEMINI_THINKING_BUDGET must be an integer, got: '{thinking_budget_str}'", file=sys.stderr)
+                    print("Set to a valid integer (e.g., 1024) or unset the variable.", file=sys.stderr)
+                    sys.exit(1)
+        
+        # Determine sources for error messages
+        thinking_level_source = None
+        thinking_budget_source = None
+        
+        if thinking_level:
+            thinking_level_source = "--thinking-level" if args.thinking_level else "env GEMINI_THINKING_LEVEL"
+        
+        if thinking_budget is not None:
+            thinking_budget_source = "--thinking-budget" if args.thinking_budget is not None else "env GEMINI_THINKING_BUDGET"
+        
+        # Validate that only one type of thinking config is set
+        validate_thinking_config(
+            thinking_level=thinking_level,
+            thinking_budget=thinking_budget,
+            thinking_level_source=thinking_level_source,
+            thinking_budget_source=thinking_budget_source
+        )
+        
+        # Display thinking configuration if set
+        if thinking_level:
+            print(f"Thinking: {thinking_level.upper()}")
+        elif thinking_budget is not None:
+            print(f"Thinking: Budget {thinking_budget} tokens")
+    else:
+        # For OpenAI, only resolve reasoning_effort
+        reasoning_effort = args.reasoning_effort or os.getenv("OPENAI_REASONING_EFFORT")
+        
+        # Display reasoning configuration if set
+        if reasoning_effort:
+            if is_openai_reasoning_model(model_name):
+                print(f"Reasoning: {reasoning_effort.upper()}")
+            else:
+                print(f"Note: reasoning_effort set but ignored (model {model_name} does not support it)")
+    
     # Load inputs
-    print(f"Loading blocks from: {args.document}")
+    print(f"\nLoading: {args.document}")
     metadata, blocks = load_blocks(args.document)
-    print(f"Loaded {len(blocks)} blocks")
+    print(f"  → {len(blocks)} blocks")
     if metadata:
-        print(f"Source file: {metadata.get('source_file', 'Unknown')}")
-        print(f"File hash: {metadata.get('source_hash', 'Unknown')[:20]}...")
+        print(f"  Source: {metadata.get('source_file', 'Unknown')}")
+        print(f"  Hash: {metadata.get('source_hash', 'Unknown')[:16]}...")
 
     # Load and merge rules from multiple files
-    print(f"Loading rules from {len(args.rules)} file(s):")
+    print(f"Rules: {len(args.rules)} file(s)")
     for rule_file in args.rules:
         print(f"  - {rule_file}")
     rules = merge_rules(args.rules)
-    print(f"Loaded {len(rules)} rules in total")
+    print(f"  → {len(rules)} rules total")
 
     # Handle resume
     completed_uuids = set()
@@ -1484,6 +1703,14 @@ def main():
                 "llm_model": model_name,
                 "audited_at": datetime.now().isoformat()
             }
+            # Add thinking/reasoning config if set
+            if thinking_level:
+                audit_metadata["thinking_level"] = thinking_level
+            if thinking_budget is not None:
+                audit_metadata["thinking_budget"] = thinking_budget
+            if reasoning_effort:
+                audit_metadata["reasoning_effort"] = reasoning_effort
+            
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(audit_metadata, ensure_ascii=False) + '\n')
             print(f"Created new manifest with source file metadata")
@@ -1510,7 +1737,12 @@ def main():
         return
 
     # Run async audit
-    asyncio.run(run_audit_async(args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids))
+    asyncio.run(run_audit_async(
+        args, blocks, rules, metadata, use_gemini, model_name, provider_name, client, completed_uuids,
+        thinking_level=thinking_level,
+        thinking_budget=thinking_budget,
+        reasoning_effort=reasoning_effort
+    ))
 
 
 if __name__ == "__main__":
