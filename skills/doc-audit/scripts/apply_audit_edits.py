@@ -21,6 +21,8 @@ from docx.opc.part import Part
 from docx.opc.packuri import PackURI
 from lxml import etree
 
+from xml_utils import sanitize_xml_string
+
 # ============================================================
 # Constants
 # ============================================================
@@ -79,31 +81,6 @@ class EditResult:
 # ============================================================
 # Helper Functions
 # ============================================================
-
-def sanitize_xml_string(text: str) -> str:
-    """
-    Remove control characters that are illegal in XML 1.0.
-
-    XML 1.0 allows: #x9 (tab), #xA (LF), #xD (CR), and #x20-#xD7FF, #xE000-#xFFFD, #x10000-#x10FFFF
-    This function removes all other control characters (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F).
-
-    Args:
-        text: Text that may contain control characters
-
-    Returns:
-        Sanitized text safe for XML
-    """
-    if not text:
-        return text
-    # Build a translation table to remove illegal control characters
-    # Keep: \t (0x09), \n (0x0A), \r (0x0D)
-    # Remove: 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F
-    illegal_chars = ''.join(
-        chr(c) for c in range(0x20)
-        if c not in (0x09, 0x0A, 0x0D)
-    )
-    return text.translate(str.maketrans('', '', illegal_chars))
-
 
 def format_text_preview(text: str, max_len: int = 30) -> str:
     """
