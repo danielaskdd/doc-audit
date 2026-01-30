@@ -40,7 +40,8 @@ violation_text guidelines:
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
 - If an entire section is in violation, select the corresponding heading as the violation_text (excluding `Section:` and the following heading number)
-- For violations spanning multiple table cells, select text from one of the most relevant cell only; do not consolidate multiple cells into a single violation_text entry
+- For table content, report violations at the individual cell level whenever possible, with each cell's violation as a separate entry
+- If a table violation cannot be split into individual cells, use the content of the first non-empty cell as violation_text rather than the entire row
 
 fix_action guidelines:
 - "delete": Use when the problematic text should be completely removed
