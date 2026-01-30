@@ -1573,18 +1573,26 @@ def main():
     print(f"\nLLM: {provider_name} / {model_name}")
     
     # Resolve thinking/reasoning configuration (command line args > environment variables)
-    # Only parse Gemini-specific env vars when using Gemini to avoid crashes from invalid values
+    # CLI parameters override and clear environment-derived values
     thinking_level = None
     thinking_budget = None
     reasoning_effort = None
     
     if use_gemini:
-        # Resolve thinking_level from CLI or env
-        thinking_level = args.thinking_level or os.getenv("GEMINI_THINKING_LEVEL")
-        
-        # Resolve thinking_budget with proper error handling
-        thinking_budget = args.thinking_budget
-        if thinking_budget is None:
+        # CLI takes precedence - if CLI provides one type, ignore env for the other type
+        if args.thinking_level is not None:
+            # CLI --thinking-level provided, use it exclusively
+            thinking_level = args.thinking_level
+            thinking_budget = None  # Clear any env-derived budget
+        elif args.thinking_budget is not None:
+            # CLI --thinking-budget provided, use it exclusively
+            thinking_budget = args.thinking_budget
+            thinking_level = None  # Clear any env-derived level
+        else:
+            # Neither CLI arg provided, fall back to env vars
+            thinking_level = os.getenv("GEMINI_THINKING_LEVEL")
+            
+            # Parse thinking_budget from env with error handling
             thinking_budget_str = os.getenv("GEMINI_THINKING_BUDGET")
             if thinking_budget_str:
                 try:
@@ -1593,24 +1601,15 @@ def main():
                     print(f"Error: GEMINI_THINKING_BUDGET must be an integer, got: '{thinking_budget_str}'", file=sys.stderr)
                     print("Set to a valid integer (e.g., 1024) or unset the variable.", file=sys.stderr)
                     sys.exit(1)
-        
-        # Determine sources for error messages
-        thinking_level_source = None
-        thinking_budget_source = None
-        
-        if thinking_level:
-            thinking_level_source = "--thinking-level" if args.thinking_level else "env GEMINI_THINKING_LEVEL"
-        
-        if thinking_budget is not None:
-            thinking_budget_source = "--thinking-budget" if args.thinking_budget is not None else "env GEMINI_THINKING_BUDGET"
-        
-        # Validate that only one type of thinking config is set
-        validate_thinking_config(
-            thinking_level=thinking_level,
-            thinking_budget=thinking_budget,
-            thinking_level_source=thinking_level_source,
-            thinking_budget_source=thinking_budget_source
-        )
+            
+            # Validate only when both come from env (conflict situation)
+            if thinking_level and thinking_budget is not None:
+                validate_thinking_config(
+                    thinking_level=thinking_level,
+                    thinking_budget=thinking_budget,
+                    thinking_level_source="env GEMINI_THINKING_LEVEL",
+                    thinking_budget_source="env GEMINI_THINKING_BUDGET"
+                )
         
         # Display thinking configuration if set
         if thinking_level:
