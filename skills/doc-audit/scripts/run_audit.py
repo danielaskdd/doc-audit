@@ -520,6 +520,97 @@ def save_manifest_entry(manifest_path: str, entry: dict):
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
+def derive_extraction_path(manifest_path: str) -> str:
+    """
+    Derive extraction file path from manifest path.
+    
+    Args:
+        manifest_path: Path to manifest file
+    
+    Returns:
+        Path to extraction file (e.g., manifest.jsonl → manifest_extractions.jsonl)
+    """
+    path = Path(manifest_path)
+    stem = path.stem  # e.g., "manifest"
+    parent = path.parent
+    return str(parent / f"{stem}_extractions.jsonl")
+
+
+async def save_extraction_entry_async(extraction_path: str, entry: dict, lock: asyncio.Lock):
+    """
+    Append an extraction entry to the extraction JSONL file (async with lock).
+    
+    Args:
+        extraction_path: Path to extraction file
+        entry: Entry dictionary to append
+        lock: asyncio.Lock for thread-safe writing
+    """
+    async with lock:
+        with open(extraction_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+def load_completed_extraction_uuids(extraction_path: str) -> set:
+    """
+    Load UUIDs of already-extracted blocks from extraction file.
+    
+    Args:
+        extraction_path: Path to extraction file
+    
+    Returns:
+        Set of completed UUIDs
+    """
+    completed = set()
+    for entry in iter_manifest_entries(extraction_path, ignore_errors=True):
+        # Skip metadata entries
+        if entry.get('type') == 'meta':
+            continue
+        uuid = entry.get('uuid', '')
+        if uuid:
+            completed.add(uuid)
+    return completed
+
+
+def load_extraction_buckets(extraction_path: str, global_rules: list) -> dict:
+    """
+    Rebuild rule_buckets from extraction file.
+    
+    Args:
+        extraction_path: Path to extraction file
+        global_rules: List of global audit rules
+    
+    Returns:
+        Dict mapping rule_id -> list of extracted items
+    """
+    rule_buckets = {rule.get('id', ''): [] for rule in global_rules}
+    
+    for entry in iter_manifest_entries(extraction_path, ignore_errors=True):
+        # Skip metadata entries
+        if entry.get('type') == 'meta':
+            continue
+        
+        uuid = entry.get('uuid', '')
+        uuid_end = entry.get('uuid_end', uuid)
+        p_heading = entry.get('p_heading', '')
+        
+        for rule_result in entry.get('results', []):
+            rule_id = rule_result.get('rule_id', '')
+            if rule_id not in rule_buckets:
+                continue
+            
+            for extracted in rule_result.get('extracted_results', []):
+                item = {
+                    "uuid": uuid,
+                    "uuid_end": uuid_end,
+                    "p_heading": p_heading,
+                    "entity": extracted.get('entity', ''),
+                    "fields": extracted.get('fields', [])
+                }
+                rule_buckets[rule_id].append(item)
+    
+    return rule_buckets
+
+
 def iter_manifest_entries(manifest_path: str, ignore_errors: bool = False):
     """
     Iterate over JSONL entries in a manifest file with optional error tolerance.
@@ -789,34 +880,93 @@ async def run_global_extraction_async(
     max_retries: int,
     rate_limit: float,
     workers: int,
+    extraction_path: str = None,
+    resume: bool = False,
+    metadata: dict = None,
     thinking_level: str = None,
     thinking_budget: int = None,
     reasoning_effort: str = None
 ) -> dict:
     """
     Extract global rule information from each block.
+    
+    Args:
+        blocks: List of text blocks
+        global_rules: List of global audit rules
+        use_gemini: Whether to use Gemini
+        model_name: LLM model name
+        client: LLM client instance
+        max_retries: Maximum retries for transient errors
+        rate_limit: Seconds to wait between API calls
+        workers: Number of parallel workers
+        extraction_path: Path to extraction file (for persistence)
+        resume: Whether to resume from previous run
+        metadata: Document metadata (for writing to extraction file)
+        thinking_level: Thinking level for Gemini 3 models
+        thinking_budget: Thinking budget for Gemini 2.5 models
+        reasoning_effort: Reasoning effort for OpenAI o-series models
 
     Returns:
         Dict mapping rule_id -> list of extracted items
     """
     system_prompt = build_global_extract_system_prompt(global_rules)
     semaphore = asyncio.Semaphore(workers)
+    extraction_lock = asyncio.Lock()
+
+    # Initialize rule_buckets and completed_uuids
+    rule_buckets = {rule.get("id", ""): [] for rule in global_rules}
+    completed_uuids = set()
+    
+    # Handle resume mode
+    if extraction_path and resume and Path(extraction_path).exists():
+        completed_uuids = load_completed_extraction_uuids(extraction_path)
+        rule_buckets = load_extraction_buckets(extraction_path, global_rules)
+        print(f"Resuming extraction: {len(completed_uuids)} blocks already extracted")
+    elif extraction_path and not resume:
+        # Initialize new extraction file with metadata
+        extraction_metadata = {
+            "type": "meta",
+            "extraction_started_at": datetime.now().isoformat()
+        }
+        if metadata:
+            extraction_metadata.update({
+                "source_file": metadata.get("source_file", ""),
+                "source_hash": metadata.get("source_hash", "")
+            })
+        with open(extraction_path, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(extraction_metadata, ensure_ascii=False) + '\n')
+
+    # Filter out already-extracted blocks
+    blocks_to_extract = [
+        (idx, block) for idx, block in enumerate(blocks)
+        if block.get('uuid', str(idx)) not in completed_uuids
+    ]
 
     # Progress tracking
-    completed_count = 0
-    total_entities = 0
+    completed_count = len(completed_uuids)  # Start from already completed
+    total_entities = sum(len(items) for items in rule_buckets.values())  # Count entities already extracted
     progress_lock = asyncio.Lock()
     total_blocks = len(blocks)
 
     # Print header
     print(f"\nGlobal extraction: {len(global_rules)} rules, {total_blocks} blocks")
+    if completed_uuids:
+        print(f"Skipping {len(completed_uuids)} already extracted, processing {len(blocks_to_extract)} remaining")
     print("-" * 50)
+
+    if not blocks_to_extract:
+        print("All blocks already extracted!")
+        print("-" * 50)
+        entity_str = "entity" if total_entities == 1 else "entities"
+        print(f"Extraction complete: {total_blocks} blocks, {total_entities} {entity_str} extracted")
+        return rule_buckets
 
     async def extract_block(block_idx: int, block: dict):
         nonlocal completed_count, total_entities
         async with semaphore:
             if rate_limit > 0:
                 await asyncio.sleep(rate_limit)
+            
             result = await global_extract_with_retry(
                 block=block,
                 system_prompt=system_prompt,
@@ -837,6 +987,16 @@ async def run_global_extraction_async(
                 for r in result.get("results", [])
             ) if result and isinstance(result, dict) else 0
 
+            # Save to extraction file if path provided
+            if extraction_path and result:
+                extraction_entry = {
+                    "uuid": block.get("uuid", str(block_idx)),
+                    "uuid_end": block.get("uuid_end", block.get("uuid", str(block_idx))),
+                    "p_heading": block.get("heading", ""),
+                    "results": result.get("results", [])
+                }
+                await save_extraction_entry_async(extraction_path, extraction_entry, extraction_lock)
+
             # Progress output
             heading = block.get("heading", "Unknown")[:40]
             async with progress_lock:
@@ -849,10 +1009,8 @@ async def run_global_extraction_async(
 
     tasks = [
         extract_block(idx, block)
-        for idx, block in enumerate(blocks)
+        for idx, block in blocks_to_extract
     ]
-
-    rule_buckets = {rule.get("id", ""): [] for rule in global_rules}
 
     for coro in asyncio.as_completed(tasks):
         block_idx, result = await coro
@@ -1203,6 +1361,9 @@ async def run_full_audit_async(
         end_idx = args.end_block if args.end_block >= 0 else len(blocks) - 1
         blocks_for_global = blocks[start_idx:end_idx + 1]
 
+        # Derive extraction file path and handle resume
+        extraction_path = derive_extraction_path(args.output)
+        
         rule_buckets = await run_global_extraction_async(
             blocks=blocks_for_global,
             global_rules=global_rules,
@@ -1212,6 +1373,9 @@ async def run_full_audit_async(
             max_retries=args.max_retries,
             rate_limit=args.rate_limit,
             workers=args.workers,
+            extraction_path=extraction_path,
+            resume=args.resume,
+            metadata=metadata,
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             reasoning_effort=reasoning_effort
