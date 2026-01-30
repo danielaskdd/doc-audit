@@ -189,7 +189,7 @@ The generated `rules.json` file has this structure:
 
 ### Workflow
 
-1. **Load base rules**: Auto-detect from `.claude-work/doc-audit/default_rules.json` or skill assets
+1. **Load base rules**: Auto-detect from `$DOC_AUDIT_SKILL_PATH/assets/default_rules.json`
 2. **Build prompt**: Create LLM prompt with base rules and user requirements
 3. **Call LLM**: Use Gemini (preferred) or OpenAI with structured JSON output
 4. **Renumber rules**: Ensure sequential IDs (R001, R002, ...)
@@ -208,14 +208,24 @@ The generated `rules.json` file has this structure:
 
 `workflow.sh` is a convenience script that runs all three stages (parse, audit, report) automatically. This is the **recommended way** to perform a complete audit workflow.
 
+**Location**: `$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh`
+
+Like other scripts, workflow.sh is used directly from the skill's scripts directory. It uses the working directory (`.claude-work/doc-audit/`) for intermediate files and resources.
+
+**Auto-initialization**: If the working directory doesn't exist, workflow.sh automatically runs `setup_project_env.sh` to create it. This means you can run workflow.sh directly without manual setup.
+
 ### Usage Examples
 
 ```bash
-# Use default rules
-./.claude-work/doc-audit/workflow.sh document.docx
+# First time: use relative path (auto-initializes if needed)
+skills/doc-audit/scripts/workflow.sh document.docx
 
-# Use custom rules
-./.claude-work/doc-audit/workflow.sh document.docx .claude-work/doc-audit/custom_rules.json
+# After setup: can use $DOC_AUDIT_SKILL_PATH
+source .claude-work/doc-audit/env.sh
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx
+
+# Use custom rules (with additional rule file)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r custom_rules.json
 ```
 
 ### Internal Process
@@ -362,13 +372,13 @@ Execute LLM-based audit on each text block against audit rules. This tool is aut
 # Basic usage with single rule file
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/blocks.jsonl \
-  --rules .claude-work/doc-audit/default_rules.json
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json
 
 # Use multiple rule files (auto-merge, checks for duplicate IDs)
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/blocks.jsonl \
-  -r .claude-work/doc-audit/default_rules.json \
-  -r skills/doc-audit/assets/bidding_rules.json
+  -r $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json
 
 # Another way to specify multiple files
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
@@ -761,35 +771,35 @@ Create HTML audit report from audit manifest with statistics and traceability. T
 # Basic usage with single rule file
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   --manifest manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
-  --rules .claude-work/doc-audit/default_rules.json \
+  --template $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
   --output audit_report.html
 
 # Use multiple rule files (auto-merge, later files override earlier ones)
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
-  -r .claude-work/doc-audit/default_rules.json \
-  -r skills/doc-audit/assets/bidding_rules.json \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
+  -r $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json \
   -o audit_report.html
 
 # Another way to specify multiple files
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   --rules rules1.json rules2.json rules3.json \
   -o audit_report.html
 
 # No rule descriptions in report (not recommended)
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   -o audit_report.html
 
 # Also output JSON data
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   -r rules.json \
   -o report.html \
   --json
@@ -797,7 +807,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
 # Also output Excel report
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   -r rules.json \
   -o report.html \
   --excel
@@ -805,7 +815,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
 # For trusted HTML content (disables escaping, not recommended)
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   -o report.html \
   --trusted-html
 ```

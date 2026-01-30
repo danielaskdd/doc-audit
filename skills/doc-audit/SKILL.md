@@ -24,7 +24,7 @@ The doc-audit skill supports two workflow paths depending on whether user has sp
 
 ### Phase 0: Environment Setup (First Time Only)
 
-Before running any audit, set up the project environment:
+Run setup to create working directory and install dependencies:
 
 ```bash
 bash skills/doc-audit/scripts/setup_project_env.sh
@@ -32,10 +32,11 @@ source .claude-work/doc-audit/env.sh
 ```
 
 This creates:
-- `.claude-work/env.sh` - Script for setting up python virtual environment and environment variables
-- `.claude-work/doc-audit/` - Directory for all doc-audit files (env, scripts, intermediate files)
+- `.claude-work/doc-audit/env.sh` - Environment activation script
 - `.claude-work/venv/` - Python virtual environment (shared across skills)
 - `.claude-work/logs/` - Operation logs (shared across skills)
+
+> **Note:** `workflow.sh` can auto-initialize if `.claude-work/doc-audit/` doesn't exist, but explicit setup is recommended for first-time use to verify environment configuration.
 
 ### Phase 1: Rule Selection
 
@@ -43,9 +44,9 @@ This creates:
 
 **Path A: Use Default Rules (Simple)**
 
-- User only requests "audit [filename]" without specific requirements
-- **Skip rule generation** - use `.claude-work/doc-audit/default_rules.json` (copied from `assets/default_rules.json` during environment setup)
-- Proceed immediately to Phase 2
+1. User only requests "audit [filename]" without specific requirements
+2. **Skip rule generation** - use `$DOC_AUDIT_SKILL_PATH/assets/default_rules.json`
+3. Proceed immediately to Phase 2
 
 **Path B: Custom Rules (Iterative)**
 
@@ -53,9 +54,7 @@ This creates:
 
 2. **Generate Rules** - Invoke `parse_rules.py` to generate customized rules from user requirements
 
-3. **User Confirmation**:
-
-   After generating rules, you **MUST**:
+3. **User Confirmation** - After generating rules, you **MUST**:
    - Use `read_file` to read the generated rules file (`.claude-work/doc-audit/<docname>_custom_rules.json`)
    - Present ALL rules to user in the following simplified format:
      ```
@@ -68,9 +67,9 @@ This creates:
    - Ask user explicitly: Please review the rules above. Approve to continue audit? Or need modifications?
    - **DO NOT proceed to Phase 2 until user explicitly confirms approval**
 
-4. **Iterate if Needed**:
+4. **Iterate if Needed** - Upon receiving a user request to amend any rules, invoke parse_rules.py with the user's input and specify the generated rules file using the `--base-rules` flag.
 
-   - Upon receiving a user request to amend any rules, invoke parse_rules.py with the user's input and specify the generated rules file using the `--base-rules` flag.
+5. Once rules are confirmed, proceed to Phase 2
 
 **Path C: Use Additional Rule Sets (Multi-Rules)**
 
@@ -85,25 +84,60 @@ When user requests using specific rule file(s) (e.g., "use bidding_rules to audi
 2. **Determine Merge Mode**:
    - **Default behavior (Merge)**: Automatically include `default_rules.json` + user-specified rules
      - User says: "use bidding rules", "add 招标规则", "also check with X"
-     - Example: `./workflow.sh doc.docx -r bidding_rules.json`
-
    - **Exclude default rules**: Only when user explicitly says "only/just/仅用/只使用"
      - User says: "only use bidding rules", "just use X, no default rules", "仅使用招标规则"
-     - Example: `./workflow.sh doc.docx --rules-only -r bidding_rules.json`
 
 3. **Verify and Proceed**:
    - Confirm all rule files are found
    - Show user which rules will be used
    - Proceed to Phase 2
 
-### Phase 2: Parse and Audit
+### Phase 2: Execute Audit
 
-5. **Parse Document** - Extract text blocks from .docx with proper numbering (python-docx)
-   - Output: `.claude-work/doc-audit/<docname>_blocks.jsonl` (with document name prefix)
-   - ⚠️ **Error handling**: If `parse_document.py` fails (e.g., missing paraId error), **stop the workflow immediately** and inform the user. Do NOT proceed to step 6.
-6. **Execute Audit Work Flow** - LLM audits each text block against rules by `workflow.sh` (created by enviroment setup)
-   - Intermediate: `.claude-work/doc-audit/<docname>_manifest.jsonl`
-   - Output: `<document_directory>/<document_name>_audit_report.html` (same directory as source document)
+After rules are determined in Phase 1, execute the audit using `workflow.sh`:
+
+```bash
+# Path A: Default rules only
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx
+
+# Path B: With custom rules
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r .claude-work/doc-audit/<docname>_custom_rules.json
+
+# Path C: With additional rule sets (auto-merge with defaults)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json
+
+# Path C: Exclude default rules (only specified rules)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx --rules-only -r custom_rules.json
+```
+
+`workflow.sh` automatically performs:
+1. **Parse document** → `.claude-work/doc-audit/<docname>_blocks.jsonl`
+2. **Run audit** → `.claude-work/doc-audit/<docname>_manifest.jsonl`
+3. **Generate report** → `<document_directory>/<docname>_audit_report.html`
+
+⚠️ **Error handling**: If parsing fails (e.g., missing paraId error), **stop the workflow immediately** and inform the user.
+
+**Fallback (Manual Execution)**: If workflow.sh fails or you need finer control, run individual scripts:
+
+```bash
+# Step 1: Parse document
+python $DOC_AUDIT_SKILL_PATH/scripts/parse_document.py document.docx
+
+# Step 2: Run audit (use the same rules as workflow.sh would)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/<docname>_blocks.jsonl \
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  --output .claude-work/doc-audit/<docname>_manifest.jsonl
+
+# Step 3: Generate report
+python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
+  --manifest .claude-work/doc-audit/<docname>_manifest.jsonl \
+  --template $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  --output <document_directory>/<docname>_audit_report.html
+```
+
+📖 For detailed parameters (resume, parallel workers, etc.), see [Available Tools](#available-tools) section below.
 
 ### Phase 3: Review and Apply Audit Results
 
@@ -120,64 +154,75 @@ After Phase 2 generates the HTML audit report, user can review the results and a
 
 **Path B: Review and Apply (Recommended)**
 
-7. **Review Results** - User opens HTML audit report in browser
+1. **Review Results** - User opens HTML audit report in browser
    - Location: `<document_directory>/<document_name>_audit_report.html`
    - User can review each issue with source context
 
-8. **Block Unwanted Results** - User marks unreasonable or unwanted items as "blocked" (屏蔽)
+2. **Block Unwanted Results** - User marks unreasonable or unwanted items as "blocked" (屏蔽)
    - Click "屏蔽本条" checkbox on each item to exclude
    - Blocked items are visually dimmed and excluded from export
 
-9. **Export Control File** - User clicks "导出结果" button
+3. **Export Control File** - User clicks "导出结果" button
    - Output: `<document_name>_audit_export.jsonl` (downloaded to browser's download folder)
    - First line contains metadata with `source_file` and `source_hash`
    - Only non-blocked items are included
 
-10. **Apply Edits** - Use the exported control file to apply changes:
-    ```bash
-    python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py <document_name>_audit_export.jsonl
-    ```
-    - The control file's metadata line contains the source document path, so only the control file path is needed
-    - Output: `<original_document>_edited.docx` with track changes and comments
+4. **Apply Edits** - Use the exported control file to apply changes:
+   ```bash
+   python $DOC_AUDIT_SKILL_PATH/scripts/apply_audit_edits.py <document_name>_audit_export.jsonl
+   ```
+   - The control file's metadata line contains the source document path, so only the control file path is needed
+   - Output: `<original_document>_edited.docx` with track changes and comments
 
 ```
 Phase 0 (Setup - First Time Only):
-Environment Setup → [User sets API key] → Ready to Audit
+  setup_project_env.sh → source env.sh → [User sets API key] → Ready
 
-Path A (Default Rules):
-User: "Audit file.docx" → Parse Document → Audit (default rules) → Report
+Phase 1 (Rule Selection):
+  Path A: User: "Audit file.docx" → Use default_rules.json → Phase 2
+  Path B: User: "Check for X, Y" → parse_rules.py → User confirms → Phase 2
+  Path C: User: "Use bidding_rules" → Find rule files → Phase 2
 
-Path B (Custom Rules):
-User: "Check for X, Y, Z" → Generate Rules → Present ───┐
-                              ↑                         │
-                              └─ (Modify) ←─ Review ────┘ (User confirms)
-                                               │
-                                          (User Approves)
-                                               ↓
-                                          Parse Document → Execute Audit
-                                          
+Phase 2 (Execute Audit):
+  workflow.sh document.docx [-r rules.json]
+    → Parse → Audit → Report
+    → Output: <docname>_audit_report.html (same directory as source)
+
 Phase 3 (Apply Results):
-
-Path A (Direct Apply - Skip Review):
-Manifest.jsonl → apply_audit_edits.py → <origin_file_name>_edited.docx
-
-Path B (Reviewed Apply - Recommended):
-Open HTML Report → Block unwanted → Export JSONL → apply_audit_edits.py → _edited.docx
-
-Final Report Location: Same directory as source document (<filename>_audit_report.html)
+  Path A (Direct): manifest.jsonl → apply_audit_edits.py → _edited.docx
+  Path B (Review): HTML Report → Block/Export → apply_audit_edits.py → _edited.docx
 ```
+
+## File Location Rules
+
+**Working Directory** (`.claude-work/doc-audit/`):
+- All intermediate files generated during audit process
+- Custom rules generated by `parse_rules.py` → `<docname>_custom_rules.json`
+- Parsed document blocks → `<docname>_blocks.jsonl`
+- Audit manifest → `<docname>_manifest.jsonl`
+
+**Source Document Directory**:
+- Final HTML report → `<docname>_audit_report.html`
+- Final Excel report → `<docname>_audit_report.xlsx`
+- Edited document with track changes → `<docname>_edited.docx`
+
+**Assets Directory** (`$DOC_AUDIT_SKILL_PATH/assets/`) - Read-only:
+- Report template → `report_template.html`
+- Default audit rules → `default_rules.json`
+- Additional audit rulesets → `bidding_rules.json`, `contract_rules.json`, etc.
 
 ## Available Tools
 
-> **Note:** All script examples below use `$DOC_AUDIT_SKILL_PATH` environment variable, which is automatically set by `source .claude-work/doc-audit/env.sh`. Always run `source .claude-work/doc-audit/env.sh` before executing any scripts.
+> **Note:** `workflow.sh` handles setup automatically. The following manual setup is only needed when using individual scripts (parse_document.py, run_audit.py, etc.) directly.
 
-### 1. Environment Setup (First Time Only)
+### 1. Environment Setup (Required for Individual Scripts)
 
-Setup the project environment before running any audit:
+If using individual scripts instead of `workflow.sh`, setup the environment first:
 
 ```bash
 bash skills/doc-audit/scripts/setup_project_env.sh
 source ./.claude-work/doc-audit/env.sh
+# $DOC_AUDIT_SKILL_PATH is now set, can use individual scripts
 ```
 
 **What it creates:**
@@ -186,9 +231,6 @@ source ./.claude-work/doc-audit/env.sh
 - `.claude-work/logs/` - Operation logs (shared across skills)
 - `.claude-work/doc-audit/` - Document audit working directory
 - `.claude-work/doc-audit/env.sh` - Environment activation script
-- `.claude-work/doc-audit/workflow.sh` - Convenience workflow script
-- `.claude-work/doc-audit/default_rules.json` - Default audit rules (copied from assets)
-- `.claude-work/doc-audit/report_template.html` - Report template (copied from assets)
 
 **Installed packages:**
 - `python-docx` - DOCX parsing
@@ -230,22 +272,30 @@ python $DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
 
 📖 **Detailed parameters, decision guide, LLM configuration, and output format**: See [TOOLS.md - Parse Rules](TOOLS.md#Parse-Rules)
 
-### 3. Workflow Script (Recommended for Normal Audit Workflow)
+### 3. Workflow Script (Recommended for Phase 2)
 
-`workflow.sh` runs the complete audit pipeline: parse → audit → report. **This is the recommended way to perform audits instead of involving each tool separately.**
+`workflow.sh` runs the complete audit pipeline: parse → audit → report. **Use this after Phase 1 (rule selection) is complete.**
+
+> **Important:** `workflow.sh` combines parse + audit + report into a single command. It should be used in Phase 2 after determining which rules to use.
+
+**Auto-initialization**: If `.claude-work/doc-audit/` doesn't exist, workflow.sh automatically runs setup. However, explicit setup (Phase 0) is recommended for first-time use.
 
 ```bash
-# Use default rules only
-./.claude-work/doc-audit/workflow.sh document.docx
+# Standard usage (after Phase 0 setup and Phase 1 rule selection)
+source .claude-work/doc-audit/env.sh
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx
 
-# Use default rules + additional rule set (auto-merge)
-./.claude-work/doc-audit/workflow.sh document.docx -r bidding_rules.json
+# With custom rules (from Phase 1 Path B)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r .claude-work/doc-audit/<docname>_custom_rules.json
 
-# Use default rules + multiple additional rule sets (auto-merge)
-./.claude-work/doc-audit/workflow.sh document.docx -r bidding_rules.json -r contract_rules.json
+# With additional rule set (Phase 1 Path C - auto-merge with defaults)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json
 
-# Use only specified rules (exclude default rules)
-./.claude-work/doc-audit/workflow.sh document.docx --rules-only -r custom_rules.json
+# With multiple additional rule sets (auto-merge)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json -r $DOC_AUDIT_SKILL_PATH/assets/contract_rules.json
+
+# Exclude default rules (only specified rules)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx --rules-only -r .claude-work/doc-audit/<docname>_custom_rules.json
 ```
 
 **Rule File Search Order**:
@@ -295,25 +345,25 @@ Execute LLM-based audit on each text block against audit rules. **Use this audit
 # Basic usage with default rules
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/<docname>_blocks.jsonl \
-  --rules .claude-work/doc-audit/default_rules.json
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json
 
 # Use multiple rule files (auto-merge)
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/<docname>_blocks.jsonl \
-  -r .claude-work/doc-audit/default_rules.json \
-  -r skills/doc-audit/assets/bidding_rules.json
+  -r $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
+  -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json
 
 # Resume from interruption (MUST specify the same output file as the original run)
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/<docname>_blocks.jsonl \
-  --rules .claude-work/doc-audit/default_rules.json \
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
   --output .claude-work/doc-audit/<docname>_manifest.jsonl \
   --resume
 
 # Increase parallelism for faster processing
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/<docname>_blocks.jsonl \
-  --rules .claude-work/doc-audit/default_rules.json \
+  --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
   --workers 12
 ```
 
@@ -334,15 +384,15 @@ Generate interactive HTML audit report from manifest. **Use this report script i
 # Basic usage with single rule file
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   --manifest manifest.jsonl \
-  --template .claude-work/doc-audit/report_template.html \
+  --template $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
   --rules rules.json \
   --output audit_report.html
 
 # Use multiple rule files (auto-merge)
 python $DOC_AUDIT_SKILL_PATH/scripts/generate_report.py \
   -m manifest.jsonl \
-  -t .claude-work/doc-audit/report_template.html \
-  -r default_rules.json -r bidding_rules.json \
+  -t $DOC_AUDIT_SKILL_PATH/assets/report_template.html \
+  -r $DOC_AUDIT_SKILL_PATH/assets/default_rules.json -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json \
   -o audit_report.html
 ```
 
@@ -538,25 +588,24 @@ doc-audit/
 ├── SKILL.md                    # This file
 ├── scripts/
 │   ├── setup_project_env.sh    # Environment setup script
+│   ├── workflow.sh             # Complete audit workflow script
 │   ├── parse_rules.py          # Rule parsing
 │   ├── parse_document.py       # DOCX parsing (python-docx)
 │   ├── run_audit.py            # LLM audit execution
 │   ├── generate_report.py      # Report generation
 │   └── apply_audit_edits.py    # Apply audit edits to Word document
 └── assets/
-    ├── default_rules.json      # Default audit rules (source)
-    └── report_template.html    # Jinja2 report template (source)
+    ├── default_rules.json      # Default audit rules
+    ├── bidding_rules.json      # Additional audit rules for bidding document
+    └── report_template.html    # Jinja2 report template
 
-# Working directory (created by setup script - all work happens here)
+# Working directory (created by setup script - intermediate files only)
 .claude-work/
 ├── venv/                                 # Python virtual environment (shared across skills)
 ├── logs/                                 # Operation logs (shared across skills)
 └── doc-audit/                            # Document audit working directory
     ├── env.sh                            # Environment activation script
-    ├── workflow.sh                       # Convenience workflow script
     ├── README.md                         # Working directory documentation
-    ├── default_rules.json                # Default rules (copied from assets)
-    ├── report_template.html              # Report template (copied from assets)
     ├── <docname>_blocks.jsonl            # Parsed document blocks (per document)
     ├── <docname>_manifest.jsonl          # Audit results (per document)
     └── <docname>_custom_rules.json       # Custom rules (optional, per document)
