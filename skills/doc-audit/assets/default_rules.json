@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "description": "Default audit rules for document verification",
-  "type": "block_level",
+  "type": "block",
   "rules": [
     {
       "id": "R001",
