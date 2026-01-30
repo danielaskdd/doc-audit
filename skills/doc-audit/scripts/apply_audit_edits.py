@@ -360,6 +360,60 @@ class AuditEditApplier:
     
     # ==================== Run Processing ====================
 
+    def _collect_runs_info_across_paragraphs(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool]:
+        """
+        Collect run info across multiple paragraphs (uuid → uuid_end range).
+        Paragraph boundaries are represented as '\n' in the combined text.
+        
+        This method supports cross-paragraph text search for table cells with multiple paragraphs.
+        
+        Args:
+            start_para: Starting paragraph element
+            uuid_end: End boundary paraId (inclusive)
+        
+        Returns:
+            Tuple of (runs_info, combined_text, is_cross_paragraph)
+            runs_info: [{'text': str, 'start': int, 'end': int, 'para_elem': Element, ...}, ...]
+            combined_text: Full text string with '\n' at paragraph boundaries
+            is_cross_paragraph: True if text spans multiple paragraphs
+        """
+        runs_info = []
+        pos = 0
+        para_count = 0
+        
+        for para in self._iter_paragraphs_in_range(start_para, uuid_end):
+            para_count += 1
+            
+            # Collect runs for this paragraph
+            para_runs, para_text = self._collect_runs_info_original(para)
+            
+            # Add paragraph element reference to each run
+            for run in para_runs:
+                run['para_elem'] = para
+                run['start'] += pos
+                run['end'] += pos
+                runs_info.append(run)
+            
+            pos += len(para_text)
+            
+            # Add paragraph boundary (except after last paragraph)
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            if para_id != uuid_end:
+                # Not the last paragraph - add boundary marker
+                runs_info.append({
+                    'text': '\n',
+                    'start': pos,
+                    'end': pos + 1,
+                    'para_elem': para,
+                    'is_para_boundary': True  # Mark as paragraph boundary
+                })
+                pos += 1
+        
+        combined_text = ''.join(r['text'] for r in runs_info)
+        is_cross_paragraph = para_count > 1
+        
+        return runs_info, combined_text, is_cross_paragraph
+    
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
         Collect run info representing ORIGINAL text (before track changes).
@@ -944,7 +998,8 @@ class AuditEditApplier:
                      violation_reason: str, revised_text: str,
                      orig_runs_info: List[Dict],
                      orig_match_start: int,
-                     author: str) -> str:
+                     author: str,
+                     is_cross_paragraph: bool = False) -> str:
         """
         Apply manual operation by adding a Word comment.
         
@@ -958,14 +1013,19 @@ class AuditEditApplier:
         3. If inside revision: insert marker outside the revision container
         4. If not inside revision: split run if needed, insert marker at precise position
         
+        Cross-paragraph support:
+        - When is_cross_paragraph=True, commentRangeStart/End can span multiple paragraphs
+        - Uses 'para_elem' field from runs to determine which paragraph to insert markers into
+        
         Args:
-            para_elem: Paragraph element
+            para_elem: Paragraph element (anchor paragraph, may not be used in cross-para mode)
             violation_text: Text to mark with comment
             violation_reason: Reason to show in comment
             revised_text: Suggestion to show in comment
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
             author: Comment author (base author + category suffix)
+            is_cross_paragraph: If True, handle cross-paragraph comment range
         
         Returns:
             'success': Comment added successfully
@@ -979,18 +1039,32 @@ class AuditEditApplier:
         if not affected:
             return 'fallback'
         
+        # Filter out paragraph boundary markers (they don't have 'elem' in cross-paragraph mode)
+        real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
+        
+        if not real_runs:
+            return 'fallback'
+        
         comment_id = self.next_comment_id
         self.next_comment_id += 1
         
-        first_run_info = affected[0]
-        last_run_info = affected[-1]
+        first_run_info = real_runs[0]
+        last_run_info = real_runs[-1]
         first_run = first_run_info['elem']
         last_run = last_run_info['elem']
-        rPr_xml = self._get_rPr_xml(first_run_info['rPr'])
+        rPr_xml = self._get_rPr_xml(first_run_info.get('rPr'))
+        
+        # Get parent paragraphs (may be different in cross-paragraph mode)
+        if is_cross_paragraph:
+            first_para = first_run_info.get('para_elem', para_elem)
+            last_para = last_run_info.get('para_elem', para_elem)
+        else:
+            first_para = para_elem
+            last_para = para_elem
         
         # Check if start/end runs are inside revision markup
-        start_revision = self._find_revision_ancestor(first_run, para_elem)
-        end_revision = self._find_revision_ancestor(last_run, para_elem)
+        start_revision = self._find_revision_ancestor(first_run, first_para)
+        end_revision = self._find_revision_ancestor(last_run, last_para)
         
         # Calculate text split points
         before_text = first_run_info['text'][:match_start - first_run_info['start']]
@@ -1183,7 +1257,10 @@ class AuditEditApplier:
             matched_start = -1
             numbering_stripped = False
             
-            # Try original text first (using revision-free view)
+            # Strategy: Try single-paragraph search first, then cross-paragraph if needed
+            is_cross_paragraph = False
+            
+            # Try original text first (using revision-free view) - single paragraph
             for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                 runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                 
@@ -1194,7 +1271,7 @@ class AuditEditApplier:
                     matched_start = pos
                     break
             
-            # Fallback: Try stripping auto-numbering if original match failed
+            # Fallback 1: Try stripping auto-numbering if original match failed
             if target_para is None:
                 stripped_violation, was_stripped = strip_auto_numbering(violation_text)
                 
@@ -1226,6 +1303,29 @@ class AuditEditApplier:
                             
                             break
             
+            # Fallback 2: Try cross-paragraph search (for table cells with multiple paragraphs)
+            if target_para is None:
+                if self.verbose:
+                    print(f"  [Fallback] Trying cross-paragraph search...")
+                
+                # Collect runs across all paragraphs in range
+                cross_runs, cross_text, is_multi_para = self._collect_runs_info_across_paragraphs(
+                    anchor_para, item.uuid_end
+                )
+                
+                if is_multi_para:
+                    # Only use cross-paragraph mode if there are actually multiple paragraphs
+                    pos = cross_text.find(violation_text)
+                    if pos != -1:
+                        # Found match across paragraphs
+                        target_para = anchor_para  # Use anchor as reference
+                        matched_runs_info = cross_runs
+                        matched_start = pos
+                        is_cross_paragraph = True
+                        
+                        if self.verbose:
+                            print(f"  [Success] Found in cross-paragraph mode")
+            
             if target_para is None:
                 # For manual fix_action, text not found is expected (not an error)
                 if item.fix_action == 'manual':
@@ -1247,23 +1347,82 @@ class AuditEditApplier:
             success_status = None
             
             if item.fix_action == 'delete':
-                success_status = self._apply_delete(
-                    target_para, violation_text,
-                    matched_runs_info, matched_start,
-                    item_author
-                )
+                # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
+                if is_cross_paragraph:
+                    # Get affected runs in the matched range
+                    match_end = matched_start + len(violation_text)
+                    affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
+                    
+                    # Filter out paragraph boundary markers
+                    real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
+                    
+                    # Check if actual match spans multiple paragraphs
+                    para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
+                    
+                    if len(para_elems) > 1:
+                        # Actually spans multiple paragraphs - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
+                        success_status = 'cross_paragraph_fallback'
+                    else:
+                        # All content is in single paragraph - safe to delete
+                        if real_runs:
+                            target_para = real_runs[0].get('para_elem', target_para)
+                        if self.verbose:
+                            print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with delete")
+                        success_status = self._apply_delete(
+                            target_para, violation_text,
+                            matched_runs_info, matched_start,
+                            item_author
+                        )
+                else:
+                    success_status = self._apply_delete(
+                        target_para, violation_text,
+                        matched_runs_info, matched_start,
+                        item_author
+                    )
             elif item.fix_action == 'replace':
-                success_status = self._apply_replace(
-                    target_para, violation_text, revised_text,
-                    matched_runs_info, matched_start,
-                    item_author
-                )
+                # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
+                if is_cross_paragraph:
+                    # Get affected runs in the matched range
+                    match_end = matched_start + len(violation_text)
+                    affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
+                    
+                    # Filter out paragraph boundary markers
+                    real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
+                    
+                    # Check if actual match spans multiple paragraphs
+                    para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
+                    
+                    if len(para_elems) > 1:
+                        # Actually spans multiple paragraphs - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
+                        success_status = 'cross_paragraph_fallback'
+                    else:
+                        # All content is in single paragraph - safe to replace
+                        if real_runs:
+                            target_para = real_runs[0].get('para_elem', target_para)
+                        if self.verbose:
+                            print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with replace")
+                        success_status = self._apply_replace(
+                            target_para, violation_text, revised_text,
+                            matched_runs_info, matched_start,
+                            item_author
+                        )
+                else:
+                    success_status = self._apply_replace(
+                        target_para, violation_text, revised_text,
+                        matched_runs_info, matched_start,
+                        item_author
+                    )
             elif item.fix_action == 'manual':
                 success_status = self._apply_manual(
                     target_para, violation_text,
                     item.violation_reason, revised_text,
                     matched_runs_info, matched_start,
-                    item_author
+                    item_author,
+                    is_cross_paragraph  # Pass cross-paragraph flag
                 )
             else:
                 # Insert error comment for unknown action type
@@ -1287,6 +1446,35 @@ class AuditEditApplier:
                     error_message=reason,
                     warning=True
                 )
+            elif success_status == 'cross_paragraph_fallback':
+                # Cross-paragraph delete/replace not supported - fallback to manual comment
+                reason = "Cross-paragraph delete/replace not supported (Phase 1 limitation)"
+                # Apply manual comment instead
+                manual_status = self._apply_manual(
+                    target_para, violation_text,
+                    item.violation_reason, revised_text,
+                    matched_runs_info, matched_start,
+                    item_author,
+                    is_cross_paragraph
+                )
+                if manual_status == 'success':
+                    if self.verbose:
+                        print(f"  [Cross-paragraph] Applied comment instead")
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=reason,
+                        warning=True
+                    )
+                else:
+                    # Manual comment also failed - use fallback comment
+                    self._apply_fallback_comment(target_para, item, reason)
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=f"{reason} (comment also failed)",
+                        warning=True
+                    )
             elif success_status == 'fallback':
                 # Fallback to comment annotation - mark as warning for all fix_actions
                 reason = "Text not found in current document state"
