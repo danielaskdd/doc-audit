@@ -162,7 +162,10 @@ class AuditEditApplier:
         
         # Track change ID management
         self.next_change_id = 0
-        
+
+        # Unified timestamp for all track changes and comments in one apply() run
+        self.operation_timestamp: str = None
+
         # Results tracking
         self.results: List[EditResult] = []
 
@@ -757,7 +760,6 @@ class AuditEditApplier:
             return 'conflict'
 
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         change_id = self._get_next_change_id()
 
         # Allocate comment ID for wrapping the deleted text
@@ -781,7 +783,7 @@ class AuditEditApplier:
         new_elements.append(etree.fromstring(comment_start_xml))
 
         # Deleted text
-        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
+        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
             <w:r>{rPr_xml}<w:delText>{self._escape_xml(violation_text)}</w:delText></w:r>
         </w:del>'''
         new_elements.append(etree.fromstring(del_xml))
@@ -873,7 +875,6 @@ class AuditEditApplier:
             # insert doesn't consume original text position
 
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         # Allocate comment ID for wrapping the replaced text
         comment_id = self.next_comment_id
@@ -939,7 +940,7 @@ class AuditEditApplier:
 
             elif op == 'delete':
                 change_id = self._get_next_change_id()
-                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
+                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
                     <w:r>{rPr_xml}<w:delText>{self._escape_xml(text)}</w:delText></w:r>
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
@@ -947,7 +948,7 @@ class AuditEditApplier:
 
             elif op == 'insert':
                 change_id = self._get_next_change_id()
-                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
+                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
                     <w:r>{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
@@ -1231,9 +1232,8 @@ class AuditEditApplier:
         """Save comments to comments.xml using OPC API"""
         if not self.comments:
             return
-        
+
         from docx.opc.constants import RELATIONSHIP_TYPE as RT
-        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         
         # Try to get existing comments.xml
         try:
@@ -1254,7 +1254,7 @@ class AuditEditApplier:
             # Support independent author for each comment (author-category suffix)
             comment_author = comment.get('author', self.author)
             comment_elem.set(f'{{{NS["w"]}}}author', comment_author)
-            comment_elem.set(f'{{{NS["w"]}}}date', timestamp)
+            comment_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
             # Use self.initials for all comments with author prefix matching self.author
             # This includes: AI-<category> (all share same initials)
             if comment_author.startswith(self.author):
@@ -1581,8 +1581,11 @@ class AuditEditApplier:
         # 3. Initialize IDs
         self._init_comment_id()
         self._init_change_id()
-        
-        # 4. Process each item
+
+        # 4. Set unified timestamp for all operations in this run
+        self.operation_timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        # 5. Process each item
         for i, item in enumerate(self.edit_items):
             if self.verbose:
                 print(f"[{i+1}/{len(self.edit_items)}] {item.fix_action}: "

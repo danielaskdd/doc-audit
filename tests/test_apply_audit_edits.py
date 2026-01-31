@@ -221,6 +221,8 @@ def create_mock_applier():
         applier.next_change_id = 0
         applier.next_comment_id = 0
         applier.comments = []
+        # Set a fixed timestamp for tests
+        applier.operation_timestamp = '2025-01-01T00:00:00Z'
         return applier
 
 
