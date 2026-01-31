@@ -46,6 +46,7 @@ from prompt import (  # noqa: E402
     build_global_extract_user_prompt,
     build_global_verify_system_prompt,
     build_global_verify_user_prompt,
+    format_global_rules_for_extraction,
 )
 
 # Maximum number of concurrent LLM API calls
@@ -1954,7 +1955,37 @@ def main():
                 print(f"--- User Prompt ---\n{user_prompt[:300]}...")
 
         if global_rules:
-            print("Dry-run: Global rules detected. Global extraction/verification prompts are skipped.")
+            print(f"\n--- Global Extraction (Dry-run) ---")
+            print(f"Global rules: {len(global_rules)}")
+            rules_text = format_global_rules_for_extraction(global_rules)
+            print(f"\n--- Global Extract Rules ---\n{rules_text}")
+
+            # Show extraction user prompt for first few blocks
+            max_extract_examples = min(3, len(blocks_to_process))
+            for i in range(max_extract_examples):
+                block = blocks_to_process[i]
+                block_idx = start_idx + i
+                block_uuid = block.get('uuid', str(block_idx))
+
+                if block_uuid in completed_uuids:
+                    print(f"[Extract {block_idx+1}/{len(blocks)}] Skipping (already processed)")
+                    continue
+
+                print(f"\n[Extract {block_idx+1}/{len(blocks)}] {block.get('heading', 'Unknown')[:50]}...")
+                user_prompt = build_global_extract_user_prompt(block)
+                print(f"--- Global Extract User Prompt ---\n{user_prompt[:300]}...")
+
+            if len(blocks_to_process) > max_extract_examples:
+                print(f"\n... and {len(blocks_to_process) - max_extract_examples} more blocks")
+
+            # Show verification system prompt for each global rule
+            print(f"\n--- Global Verification (Dry-run) ---")
+            for rule in global_rules:
+                rule_id = rule.get('id', 'Unknown')
+                topic = rule.get('topic', 'Unknown')[:40]
+                verify_system = build_global_verify_system_prompt(rule)
+                print(f"\n[Verify {rule_id}] {topic}")
+                print(f"--- Global Verify System Prompt ---\n{verify_system[:300]}...")
         return
 
     # Run full audit (block-level + global) in a single event loop
