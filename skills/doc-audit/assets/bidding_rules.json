@@ -20,6 +20,18 @@
       "description": "招标技术要求所有器件的还阴适应要求必须满足：a)工作环境温度范围：-45°C ～ +70°C；b)贮存环境温度范围：-55°C ～ +70°C；c)海拔高度范围：0 ～ 12000m。检查应标内容中是否在与此要求矛盾的地方，内容所描述范围更宽不属于违规，描述范围小于规定范围才属于违规。发现问题返回建议即可，不需要修改原文。",
       "severity": "high",
       "category": "deviation"
+    },
+    {
+      "id": "B004",
+      "description": "专业术语使用不正确或不严谨。例如应该明确使用现场可编程阵列FPGA的使用使用了泛称PLD；混淆“单片机 (MCU)”与“微处理器 (MPU)； 混肴波特率 (Baud Rate)”与“比特率 (Bit Rate)",
+      "severity": "medium",
+      "category": "consistency"
+    },
+    {
+      "id": "B005",
+      "description": "同一个型号的电子元器件的参数应该保持一致。例如，型号为 SM29LV256MC 的芯片工作温度范围应该保持一致。如果是因为不同的生产厂家导致参数不同，应该在标注出来要求人工确认。",
+      "severity": "medium",
+      "category": "consistency"
     }
   ]
 }
