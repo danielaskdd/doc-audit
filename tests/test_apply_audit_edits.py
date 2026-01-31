@@ -340,26 +340,30 @@ class TestApplyDelete:
         """Test deleting simple text"""
         applier = create_mock_applier()
         para = create_paragraph_xml("Hello World to delete")
-        
+
         runs_info, _ = applier._collect_runs_info_original(para)
-        
-        result = applier._apply_delete(para, "to delete", runs_info, 12, get_test_author(applier))
-        
+
+        result = applier._apply_delete(para, "to delete", "Test reason", runs_info, 12, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
         assert len(del_elems) == 1
-    
+        # Verify comment was also created with -R suffix author
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'] == "Test reason"
+        assert applier.comments[0]['author'].endswith('-R')
+
     def test_delete_text_not_found(self):
         """Test deleting text that doesn't match position"""
         applier = create_mock_applier()
         para = create_paragraph_xml("Hello World")
-        
+
         runs_info, _ = applier._collect_runs_info_original(para)
-        
+
         # Position 50 is beyond text length
-        result = applier._apply_delete(para, "missing", runs_info, 50, get_test_author(applier))
-        
+        result = applier._apply_delete(para, "missing", "Test reason", runs_info, 50, get_test_author(applier))
+
         assert result == 'fallback'
 
 
@@ -374,38 +378,42 @@ class TestApplyReplaceWithImages:
         """Test simple text replacement"""
         applier = create_mock_applier()
         para = create_paragraph_xml("Hello World")
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
+
         # Simple text replacement
         violation_text = "Hello"
         revised_text = "Hi"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del and w:ins elements were created
         del_elems = para.findall('.//w:del', NSMAP)
         ins_elems = para.findall('.//w:ins', NSMAP)
         assert len(del_elems) == 1
         assert len(ins_elems) == 1
-    
+        # Verify comment was also created with -R suffix author
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'] == "Test reason"
+        assert applier.comments[0]['author'].endswith('-R')
+
     def test_replace_insert_image_fallback(self):
         """Test that inserting images via replace triggers fallback"""
         applier = create_mock_applier()
         para = create_paragraph_xml("Hello World")
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
+
         # Try to insert image in revised text
         violation_text = "Hello World"
         revised_text = 'Hello <drawing id="2" name="New Image" /> World'
-        
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, 0, get_test_author(applier))
-        
+
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, 0, get_test_author(applier))
+
         assert result == 'fallback'
-    
+
     def test_replace_delete_image(self):
         """Test that deleting images via replace works"""
         applier = create_mock_applier()
@@ -415,17 +423,17 @@ class TestApplyReplaceWithImages:
             img_name="图片 1",
             text_after=" World"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img_str = '<drawing id="1" name="图片 1" />'
-        
+
         # Delete image from content
         violation_text = f"Hello {img_str} World"
         revised_text = "Hello World"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
 
 
@@ -445,23 +453,23 @@ class TestApplyReplaceEqualPortions:
             img_name="图片 1",
             text_after=" World"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img_str = '<drawing id="1" name="图片 1" />'
-        
+
         # Replace "Hello" with "Hi", keep " <img> World" as equal
         violation_text = f"Hello {img_str} World"
         revised_text = f"Hi {img_str} World"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
-        
+
         # Verify image element still exists
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-        
+
         # Verify inline docPr preserved
         inline = para.find('.//wp:inline', NSMAP)
         assert inline is not None
@@ -469,7 +477,7 @@ class TestApplyReplaceEqualPortions:
         assert doc_pr is not None
         assert doc_pr.get('id') == '1'
         assert doc_pr.get('name') == '图片 1'
-    
+
     def test_equal_at_start_with_delete_at_end(self):
         """Equal portion at start, delete at end"""
         applier = create_mock_applier()
@@ -479,27 +487,27 @@ class TestApplyReplaceEqualPortions:
             img_name="图片 1",
             text_after=" Delete"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img_str = '<drawing id="1" name="图片 1" />'
-        
+
         # Delete " Delete" at end, keep "Keep <img>" as equal
         violation_text = f"Keep {img_str} Delete"
         revised_text = f"Keep {img_str}"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
-        
+
         # Verify image preserved
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-        
+
         # Verify w:del created for " Delete"
         del_elems = para.findall('.//w:del', NSMAP)
         assert len(del_elems) == 1
-    
+
     def test_equal_text_before_image_in_equal(self):
         """Equal portion has text before image, both should be preserved"""
         applier = create_mock_applier()
@@ -509,23 +517,23 @@ class TestApplyReplaceEqualPortions:
             img_name="图片 1",
             text_after=" End"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img_str = '<drawing id="1" name="图片 1" />'
-        
+
         # Delete "Delete", keep " <img> End" (space + image + text)
         violation_text = f"Delete {img_str} End"
         revised_text = f"{img_str} End"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
-        
+
         # Verify image preserved
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-        
+
         # Verify w:del created
         del_elems = para.findall('.//w:del', NSMAP)
         assert len(del_elems) == 1
@@ -568,7 +576,7 @@ def create_paragraph_with_multiple_images(
 
 class TestApplyReplaceMultipleImages:
     """Tests for multiple images in equal portions"""
-    
+
     def test_two_images_both_preserved(self):
         """Two images in equal portion should both be preserved"""
         applier = create_mock_applier()
@@ -579,20 +587,20 @@ class TestApplyReplaceMultipleImages:
             {'img': ('2', 'Img2')},
             {'text': ' C'}
         ])
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img1_str = '<drawing id="1" name="Img1" />'
         img2_str = '<drawing id="2" name="Img2" />'
-        
+
         # Replace "A" with "X", keep rest
         violation_text = f"A {img1_str} B {img2_str} C"
         revised_text = f"X {img1_str} B {img2_str} C"
-        
+
         match_start = combined_text.find(violation_text)
-        result = applier._apply_replace(para, violation_text, revised_text, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
-        
+
         # Verify both images preserved
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 2
@@ -633,7 +641,7 @@ class TestApplyManual:
 
 class TestApplyDeleteWithImages:
     """Tests for _apply_delete method with image content"""
-    
+
     def test_delete_text_before_image(self):
         """Delete text appearing before an inline image, image should be preserved"""
         applier = create_mock_applier()
@@ -643,12 +651,12 @@ class TestApplyDeleteWithImages:
             img_name="图片 1",
             text_after=" keep"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
+
         # Delete "Delete this "
-        result = applier._apply_delete(para, "Delete this ", runs_info, 0, get_test_author(applier))
-        
+        result = applier._apply_delete(para, "Delete this ", "Test reason", runs_info, 0, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
@@ -656,7 +664,7 @@ class TestApplyDeleteWithImages:
         # Verify image is preserved
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-    
+
     def test_delete_text_after_image(self):
         """Delete text appearing after an inline image, image should be preserved"""
         applier = create_mock_applier()
@@ -666,13 +674,13 @@ class TestApplyDeleteWithImages:
             img_name="图片 1",
             text_after=" delete this"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
 
         # Find position of " delete this" after the image
         match_start = combined_text.find(" delete this")
-        result = applier._apply_delete(para, " delete this", runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_delete(para, " delete this", "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
@@ -680,7 +688,7 @@ class TestApplyDeleteWithImages:
         # Verify image is preserved
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-    
+
     def test_delete_image_placeholder(self):
         """Delete the image placeholder string itself"""
         applier = create_mock_applier()
@@ -690,19 +698,19 @@ class TestApplyDeleteWithImages:
             img_name="图片 1",
             text_after=" After"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
         img_str = '<drawing id="1" name="图片 1" />'
-        
+
         # Delete the image placeholder
         match_start = combined_text.find(img_str)
-        result = applier._apply_delete(para, img_str, runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_delete(para, img_str, "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
         assert len(del_elems) == 1
-    
+
     def test_delete_text_with_image_in_middle(self):
         """Delete text in a paragraph where image is in the middle"""
         applier = create_mock_applier()
@@ -711,13 +719,13 @@ class TestApplyDeleteWithImages:
             {'img': ('1', 'Img1')},
             {'text': ' End'}
         ])
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
+
         # Delete "delete_me " before the image
         match_start = combined_text.find("delete_me ")
-        result = applier._apply_delete(para, "delete_me ", runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_delete(para, "delete_me ", "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
@@ -725,7 +733,7 @@ class TestApplyDeleteWithImages:
         # Verify image is still present
         img_elems = para.findall('.//w:drawing', NSMAP)
         assert len(img_elems) == 1
-    
+
     def test_delete_text_between_two_images(self):
         """Delete text between two images"""
         applier = create_mock_applier()
@@ -734,13 +742,13 @@ class TestApplyDeleteWithImages:
             {'text': ' delete me '},
             {'img': ('2', 'Img2')}
         ])
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
+
         # Delete " delete me " between the images
         match_start = combined_text.find(" delete me ")
-        result = applier._apply_delete(para, " delete me ", runs_info, match_start, get_test_author(applier))
-        
+        result = applier._apply_delete(para, " delete me ", "Test reason", runs_info, match_start, get_test_author(applier))
+
         assert result == 'success'
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
@@ -1858,50 +1866,52 @@ class TestCrossParagraphFallback:
             target_para = real_runs[0].get('para_elem')
             result = applier._apply_delete(
                 target_para, violation_text,
+                "Test reason",
                 runs_info, match_start,
                 get_test_author(applier)
             )
             assert result == 'success'
-    
+
     def test_replace_with_single_para_content_proceeds(self):
         """Search cross-para but match in single para → normal replace"""
         applier = create_mock_applier()
-        
+
         # Create multiple paragraphs
         body = create_mock_body_with_paragraphs(['AAA', 'BBB'])
         applier.body_elem = body
-        
+
         # Modify BBB to have violation text
         para_bbb = body.find(f'.//w:p[@w14:paraId="BBB"]', NSMAP)
         para_bbb.find('.//w:t', NSMAP).text = "Bad text here"
-        
+
         para_aaa = body.find(f'.//w:p[@w14:paraId="AAA"]', NSMAP)
-        
+
         # Collect runs across paragraphs
         runs_info, combined_text, is_cross_paragraph = applier._collect_runs_info_across_paragraphs(para_aaa, 'BBB')
-        
+
         assert is_cross_paragraph is True
-        
+
         # Match is only in BBB (after \n)
         violation_text = "Bad text"
         match_start = combined_text.find(violation_text)
-        
+
         # Find affected runs
         match_end = match_start + len(violation_text)
         affected = applier._find_affected_runs(runs_info, match_start, match_end)
         real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
-        
+
         # Check actual paragraphs spanned
         para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
-        
+
         # Should only span 1 paragraph (BBB)
         assert len(para_elems) == 1
-        
+
         # Replace should proceed
         if len(para_elems) == 1:
             target_para = real_runs[0].get('para_elem')
             result = applier._apply_replace(
                 target_para, violation_text, "Good text",
+                "Test reason",
                 runs_info, match_start,
                 get_test_author(applier)
             )

@@ -724,19 +724,21 @@ class AuditEditApplier:
     # ==================== Delete Operation ====================
 
     def _apply_delete(self, para_elem, violation_text: str,
+                     violation_reason: str,
                      orig_runs_info: List[Dict],
                      orig_match_start: int,
                      author: str) -> str:
         """
-        Apply delete operation with track changes.
-        
+        Apply delete operation with track changes and comment annotation.
+
         Args:
             para_elem: Paragraph element
             violation_text: Text to delete
+            violation_reason: Reason for violation (used as comment text)
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
             author: Track change author (base author + category suffix)
-        
+
         Returns:
             'success': Deletion applied successfully
             'fallback': Should fallback to comment annotation
@@ -746,65 +748,94 @@ class AuditEditApplier:
         match_start = orig_match_start
         match_end = match_start + len(violation_text)
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
-        
+
         if not affected:
             return 'fallback'
-        
+
         # Check if text overlaps with previous modifications
         if self._check_overlap_with_revisions(affected):
             return 'conflict'
-        
+
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         change_id = self._get_next_change_id()
-        
+
+        # Allocate comment ID for wrapping the deleted text
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+
         # Calculate split points
         first_run = affected[0]
         last_run = affected[-1]
         before_text = first_run['text'][:match_start - first_run['start']]
         after_text = last_run['text'][match_end - last_run['start']:]
-        
+
         new_elements = []
-        
+
         # Before text (unchanged)
         if before_text:
             new_elements.append(self._create_run(before_text, rPr_xml))
-        
+
+        # Comment range start (before deleted text)
+        comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        new_elements.append(etree.fromstring(comment_start_xml))
+
         # Deleted text
         del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
             <w:r>{rPr_xml}<w:delText>{self._escape_xml(violation_text)}</w:delText></w:r>
         </w:del>'''
         new_elements.append(etree.fromstring(del_xml))
-        
+
+        # Comment range end and reference (after deleted text)
+        comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        new_elements.append(etree.fromstring(comment_end_xml))
+
+        comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        new_elements.append(etree.fromstring(comment_ref_xml))
+
         # After text (unchanged)
         if after_text:
             new_elements.append(self._create_run(after_text, rPr_xml))
-        
+
         self._replace_runs(para_elem, affected, new_elements)
+
+        # Record comment with violation_reason as content
+        # Use "-R" suffix to distinguish comment author from track change author
+        self.comments.append({
+            'id': comment_id,
+            'text': violation_reason,
+            'author': f"{author}-R"
+        })
+
         return 'success'
-    
+
     # ==================== Replace Operation ====================
     
     def _apply_replace(self, para_elem, violation_text: str,
                       revised_text: str,
+                      violation_reason: str,
                       orig_runs_info: List[Dict],
                       orig_match_start: int,
                       author: str) -> str:
         """
-        Apply replace operation with diff-based track changes.
-        
+        Apply replace operation with diff-based track changes and comment annotation.
+
         Strategy: Build all elements in a single pass, preserving original elements
         for 'equal' portions (to keep formatting, images, etc.) and creating
         track changes for delete/insert portions.
-        
+
         Args:
             para_elem: Paragraph element
             violation_text: Text to replace
             revised_text: New text
+            violation_reason: Reason for violation (used as comment text)
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
             author: Track change author (base author + category suffix)
-        
+
         Returns:
             'success': Replace applied (may be partial)
             'fallback': Should fallback to comment annotation
@@ -814,20 +845,20 @@ class AuditEditApplier:
         match_start = orig_match_start
         match_end = match_start + len(violation_text)
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
-        
+
         if not affected:
             return 'fallback'
-        
+
         # Calculate diff
         diff_ops = self._calculate_diff(violation_text, revised_text)
-        
+
         # Check for image handling issues: cannot insert images via revision markup
         for op, text in diff_ops:
             if op == 'insert' and DRAWING_PATTERN.search(text):
                 if self.verbose:
                     print(f"  [Fallback] Cannot insert images via revision markup")
                 return 'fallback'
-        
+
         # Check for conflicts only on delete operations
         current_pos = match_start
         for op, text in diff_ops:
@@ -840,36 +871,44 @@ class AuditEditApplier:
             elif op == 'equal':
                 current_pos += len(text)
             # insert doesn't consume original text position
-        
+
         rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        
+
+        # Allocate comment ID for wrapping the replaced text
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+
         # Calculate split points for before/after text
         first_run = affected[0]
         last_run = affected[-1]
         before_text = first_run['text'][:match_start - first_run['start']]
         after_text = last_run['text'][match_end - last_run['start']:]
-        
+
         # Build new elements in a single pass
         new_elements = []
-        
+
         # Before text (unchanged part before the match)
         if before_text:
             new_elements.append(self._create_run(before_text, rPr_xml))
-        
+
+        # Comment range start (before replaced text)
+        comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        new_elements.append(etree.fromstring(comment_start_xml))
+
         # Process diff operations
         violation_pos = 0  # Position within violation_text
-        
+
         for op, text in diff_ops:
             if op == 'equal':
                 # For equal portions, try to preserve original elements (especially images)
                 equal_start = match_start + violation_pos
                 equal_end = equal_start + len(text)
                 equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
-                
+
                 if equal_runs:
                     # Check if this is a single image run that matches exactly
-                    if (len(equal_runs) == 1 and 
+                    if (len(equal_runs) == 1 and
                         equal_runs[0].get('is_drawing') and
                         equal_runs[0]['start'] == equal_start and
                         equal_runs[0]['end'] == equal_end):
@@ -880,12 +919,12 @@ class AuditEditApplier:
                         # Handle partial runs at boundaries
                         for i, eq_run in enumerate(equal_runs):
                             run_text = eq_run['text']
-                            
+
                             # Calculate the portion of this run that's in our range
                             run_start_in_range = max(0, equal_start - eq_run['start'])
                             run_end_in_range = min(len(run_text), equal_end - eq_run['start'])
                             portion = run_text[run_start_in_range:run_end_in_range]
-                            
+
                             if eq_run.get('is_drawing'):
                                 # Image run - copy entire element if fully contained
                                 if run_start_in_range == 0 and run_end_in_range == len(run_text):
@@ -895,9 +934,9 @@ class AuditEditApplier:
                 else:
                     # No runs found, create text directly
                     new_elements.append(self._create_run(text, rPr_xml))
-                
+
                 violation_pos += len(text)
-                
+
             elif op == 'delete':
                 change_id = self._get_next_change_id()
                 del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
@@ -905,7 +944,7 @@ class AuditEditApplier:
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
                 violation_pos += len(text)
-                
+
             elif op == 'insert':
                 change_id = self._get_next_change_id()
                 ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{timestamp}">
@@ -913,15 +952,34 @@ class AuditEditApplier:
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
                 # insert doesn't consume violation_pos
-        
+
+        # Comment range end and reference (after replaced text)
+        comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        new_elements.append(etree.fromstring(comment_end_xml))
+
+        comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        new_elements.append(etree.fromstring(comment_ref_xml))
+
         # After text (unchanged part after the match)
         if after_text:
             new_elements.append(self._create_run(after_text, rPr_xml))
-        
+
         # Single DOM operation to replace all affected runs
         self._replace_runs(para_elem, affected, new_elements)
+
+        # Record comment with violation_reason as content
+        # Use "-R" suffix to distinguish comment author from track change author
+        self.comments.append({
+            'id': comment_id,
+            'text': violation_reason,
+            'author': f"{author}-R"
+        })
+
         return 'success'
-    
+
     # ==================== Manual (Comment) Operation ====================
     
     def _apply_error_comment(self, para_elem, item: EditItem, author_override: str = None) -> bool:
@@ -1352,13 +1410,13 @@ class AuditEditApplier:
                     # Get affected runs in the matched range
                     match_end = matched_start + len(violation_text)
                     affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
-                    
+
                     # Filter out paragraph boundary markers
                     real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
-                    
+
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
-                    
+
                     if len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
@@ -1372,12 +1430,14 @@ class AuditEditApplier:
                             print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with delete")
                         success_status = self._apply_delete(
                             target_para, violation_text,
+                            item.violation_reason,
                             matched_runs_info, matched_start,
                             item_author
                         )
                 else:
                     success_status = self._apply_delete(
                         target_para, violation_text,
+                        item.violation_reason,
                         matched_runs_info, matched_start,
                         item_author
                     )
@@ -1387,13 +1447,13 @@ class AuditEditApplier:
                     # Get affected runs in the matched range
                     match_end = matched_start + len(violation_text)
                     affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
-                    
+
                     # Filter out paragraph boundary markers
                     real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
-                    
+
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
-                    
+
                     if len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
@@ -1407,12 +1467,14 @@ class AuditEditApplier:
                             print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with replace")
                         success_status = self._apply_replace(
                             target_para, violation_text, revised_text,
+                            item.violation_reason,
                             matched_runs_info, matched_start,
                             item_author
                         )
                 else:
                     success_status = self._apply_replace(
                         target_para, violation_text, revised_text,
+                        item.violation_reason,
                         matched_runs_info, matched_start,
                         item_author
                     )
