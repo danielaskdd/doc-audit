@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "description": "Additional audit rules for bidding document verification",
+  "description": "Additional audit rules for bidding document verification in electronic and communication systems",
   "type": "block",
   "rules": [
     {
@@ -23,12 +23,30 @@
     },
     {
       "id": "B004",
-      "description": "专业术语使用不正确或不严谨。例如应该明确使用现场可编程阵列FPGA的使用使用了泛称PLD；混淆“单片机 (MCU)”与“微处理器 (MPU)； 混肴波特率 (Baud Rate)”与“比特率 (Bit Rate)",
+      "description": "招标要求产品交货出现质量问题（失效问题）如果与批次有关，则拒收整个批次，不得修复后继续交货。检查内容中是否有涉及与此要求矛盾的地方。",
       "severity": "medium",
       "category": "consistency"
     },
     {
       "id": "B005",
+      "description": "专业术语使用不正确或不严谨。例如应该明确使用现场可编程阵列FPGA的使用使用了泛称PLD；混淆“单片机 (MCU)”与“微处理器 (MPU)。",
+      "severity": "medium",
+      "category": "technical"
+    },
+    {
+      "id": "B006",
+      "description": "计量单位使用不正确或不严谨。例如混淆存储容量单位 KB 和 Kb；混肴波特率 (Baud Rate)与比特率 (Bit Rate)；频率单位 mHz 与 MHz；混淆能量与功率 kW 和 kWh；混淆功率电平 dB 与 dBm",
+      "severity": "medium",
+      "category": "technical"
+    },
+    {
+      "id": "B007",
+      "description": "同一个型号的电子元器件的参数应该保持一致。例如，型号为 SM29LV256MC 的芯片工作温度范围应该保持一致。如果是因为不同的生产厂家导致参数不同，应该在标注出来要求人工确认。",
+      "severity": "medium",
+      "category": "consistency"
+    },
+    {
+      "id": "B008",
       "description": "同一个型号的电子元器件的参数应该保持一致。例如，型号为 SM29LV256MC 的芯片工作温度范围应该保持一致。如果是因为不同的生产厂家导致参数不同，应该在标注出来要求人工确认。",
       "severity": "medium",
       "category": "consistency"
