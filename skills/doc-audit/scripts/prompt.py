@@ -169,7 +169,7 @@ Types of inconsistencies to check (only for same entity):
 Instructions:
 1. Group items by entity name (similar names = same entity)
 2. Within each entity group, cross-reference all fields based on the verification criteria
-3. Report conflicts only when the SAME entity shows inconsistent information
+3. Report conflicts only when the SAME entity shows inconsistent information; An empty value should not be treated as an inconsistency unless specifically required by the verification criteria
 4. Use the uuid and uuid_end from the INPUT items when reporting violations
 5. violation_text MUST be a verbatim evidence quote from the input items
 6. Mark fix_action as "manual" since resolution requires human judgment
