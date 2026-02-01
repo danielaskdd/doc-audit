@@ -54,10 +54,11 @@
     },
     {
       "id": "R006",
-      "description": "检查金额数值中是否缺失具体的货币单位或币种规范。",
+      "description": "检查金额的大小写是否一致，金额是否缺失具体的货币单位或币种规范。",
       "severity": "high",
       "category": "money",
       "examples": [
+        {"violation": "单套投标报价人民币伍仟贰佰元（小写¥5,000元）。", "correction": "单套投标报价人民币伍仟贰佰元（小写¥5,200元）"},
         {"violation": "违约金总额为5万。", "correction": "违约金总额为人民币5万元。"},
         {"violation": "本合同总金额为500,000元”。", "correction": "本合同总金额为人民币¥500,000元。"}
       ]
