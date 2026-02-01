@@ -367,8 +367,8 @@ class AuditEditApplier:
         """
         Collect run info across multiple paragraphs (uuid → uuid_end range).
         Paragraph boundaries are represented as '\n' in the combined text.
-        
-        This method supports cross-paragraph text search for table cells with multiple paragraphs.
+
+        This method supports cross-paragraph text search within a text block boundary.
         
         Args:
             start_para: Starting paragraph element
@@ -1361,7 +1361,7 @@ class AuditEditApplier:
                             
                             break
             
-            # Fallback 2: Try cross-paragraph search (for table cells with multiple paragraphs)
+            # Fallback 2: Try cross-paragraph search (within uuid → uuid_end range)
             if target_para is None:
                 if self.verbose:
                     print(f"  [Fallback] Trying cross-paragraph search...")
