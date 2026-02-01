@@ -369,21 +369,28 @@ Execute LLM-based audit on each text block against audit rules. This tool is aut
 ### Usage Examples
 
 ```bash
-# Basic usage with single rule file
+# Basic usage with single rule file (filename auto-resolves to assets dir)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/blocks.jsonl \
+  --rules default_rules.json
+
+# Use multiple rule files (auto-merge, checks for duplicate IDs)
+# Rule files without path are searched in: current dir → assets dir
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/blocks.jsonl \
+  -r default_rules.json \
+  -r bidding_rules.json
+
+# Mix local rules with built-in rules
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  --document .claude-work/doc-audit/blocks.jsonl \
+  -r ./my_custom_rules.json \
+  -r default_rules.json
+
+# Explicit full paths still work
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/blocks.jsonl \
   --rules $DOC_AUDIT_SKILL_PATH/assets/default_rules.json
-
-# Use multiple rule files (auto-merge, checks for duplicate IDs)
-python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
-  --document .claude-work/doc-audit/blocks.jsonl \
-  -r $DOC_AUDIT_SKILL_PATH/assets/default_rules.json \
-  -r $DOC_AUDIT_SKILL_PATH/assets/bidding_rules.json
-
-# Another way to specify multiple files
-python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
-  --document .claude-work/doc-audit/blocks.jsonl \
-  --rules rules1.json rules2.json rules3.json
 
 # Specify model explicitly
 python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
@@ -435,7 +442,7 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `--document` / `-d` | path | Yes | Path to document blocks file (JSONL or JSON from `parse_document.py`) |
-| `--rules` / `-r` | path | Yes | Path to audit rules JSON file(s). Can be specified multiple times to merge rules. |
+| `--rules` / `-r` | path | Yes | Path to audit rules JSON file(s). Can be specified multiple times to merge rules. Filenames without path are searched in: 1) current directory, 2) default assets directory. Explicit paths (e.g., `./`, `../`, absolute, or with directories) are used as-is without fallback. |
 | `--output` / `-o` | path | No | Output manifest file path (default: `manifest.jsonl`) |
 | `--provider` | choice | No | Force LLM provider: `auto` (default), `gemini`, `openai` |
 | `--model` | text | No | LLM model: `auto` (default), `gemini-2.5-flash`, `gpt-5.2`, etc. |
@@ -448,6 +455,45 @@ python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
 | `--thinking-level` | choice | No | Gemini 3 thinking level: `minimal`, `low`, `medium`, `high` (env: `GEMINI_THINKING_LEVEL`) |
 | `--thinking-budget` | int | No | Gemini 2.5 thinking token budget, 0 to disable (env: `GEMINI_THINKING_BUDGET`) |
 | `--reasoning-effort` | choice | No | OpenAI o-series reasoning effort: `low`, `medium`, `high` (env: `OPENAI_REASONING_EFFORT`) |
+
+### Rule File Resolution
+
+When specifying rule files with `--rules` / `-r`, the script uses a search order for filenames without directory paths. Explicit paths (e.g., `./`, `../`, absolute, or with directories) are used as-is without fallback.
+
+1. **Current working directory** - First checks if the file exists in the current directory
+2. **Default assets directory** - Falls back to `scripts/../assets/` (the skill's assets folder)
+
+**Examples:**
+
+```bash
+# Explicit path - uses exactly as specified (no fallback)
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl \
+  -r ./my_rules.json \
+  -r /path/to/other_rules.json
+
+# Filename only - searches current dir, then assets dir
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl \
+  -r custom_rules.json \
+  -r default_rules.json
+
+# Mixed usage - bidding_rules.json will be found in assets dir if not in current dir
+python $DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
+  -d blocks.jsonl \
+  -r ./local_rules.json \
+  -r bidding_rules.json
+```
+
+**Output shows resolved paths:**
+```
+Rules: 2 file(s)
+  - custom_rules.json
+  - bidding_rules.json → /path/to/skills/doc-audit/assets/bidding_rules.json
+  → 15 rules total
+```
+
+This feature simplifies command-line usage by allowing you to reference built-in rules (like `default_rules.json`, `bidding_rules.json`) by filename only, without needing to specify the full path.
 
 ### Thinking/Reasoning Configuration
 

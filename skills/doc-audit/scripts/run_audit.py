@@ -52,6 +52,9 @@ from prompt import (  # noqa: E402
 # Maximum number of concurrent LLM API calls
 MAX_PARALLEL_WORKERS = 8
 
+# Default assets directory (relative to script)
+DEFAULT_ASSETS_DIR = _SCRIPT_DIR / ".." / "assets"
+
 # Retry configuration
 DEFAULT_MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # Initial backoff time in seconds
@@ -409,6 +412,54 @@ def load_blocks(file_path: str) -> tuple:
     return metadata, blocks
 
 
+def resolve_rule_path(rule_path: str) -> str:
+    """
+    Resolve rule file path with fallback to default assets directory.
+
+    For a bare filename (no path component), search order is:
+    1. Current working directory
+    2. Skill's default assets directory
+
+    For an explicit path (e.g., ./, ../, absolute, or containing a directory),
+    the path is used as-is with no fallback.
+
+    Args:
+        rule_path: Path to rules file (may be just a filename)
+
+    Returns:
+        Resolved absolute path to the rule file
+
+    Raises:
+        FileNotFoundError: If rule file not found in any search location
+    """
+    path = Path(rule_path)
+
+    # If explicit path is provided, use as-is (no fallback)
+    if rule_path != path.name:
+        if path.exists():
+            return str(path.resolve())
+        raise FileNotFoundError(f"Rule file not found: {rule_path}")
+
+    # Bare filename - search in order
+    # 1. Current working directory
+    cwd_path = Path.cwd() / path.name
+    if cwd_path.exists():
+        return str(cwd_path.resolve())
+
+    # 2. Default assets directory
+    assets_path = DEFAULT_ASSETS_DIR / path.name
+    if assets_path.exists():
+        return str(assets_path.resolve())
+
+    # Not found in any location
+    raise FileNotFoundError(
+        f"Rule file '{rule_path}' not found.\n"
+        f"  Searched in:\n"
+        f"    1. Current directory: {Path.cwd()}\n"
+        f"    2. Default assets: {DEFAULT_ASSETS_DIR.resolve()}"
+    )
+
+
 def load_rules(file_path: str) -> list:
     """
     Load audit rules from JSON file.
@@ -445,40 +496,40 @@ def load_rules(file_path: str) -> list:
     return rules
 
 
-def merge_rules(rule_files: list) -> list:
+def merge_rules(resolved_paths: list) -> list:
     """
-    Load and merge rules from multiple JSON files.
+    Load and merge rules from multiple resolved JSON file paths.
     Checks for duplicate rule IDs and exits if found.
-    
+
     Args:
-        rule_files: List of paths to rules JSON files
-        
+        resolved_paths: List of resolved (absolute) paths to rules JSON files
+
     Returns:
         Merged list of rule dictionaries
-        
+
     Exits:
         If duplicate rule IDs are found
     """
     merged_rules = []
     seen_ids = {}  # rule_id -> source_file
-    
-    for file_path in rule_files:
+
+    for file_path in resolved_paths:
         rules = load_rules(file_path)
         for rule in rules:
             rule_id = rule.get('id', '')
             if not rule_id:
                 print(f"Warning: Rule without ID found in {file_path}, skipping", file=sys.stderr)
                 continue
-            
+
             if rule_id in seen_ids:
                 print(f"Error: Duplicate rule ID '{rule_id}' found.", file=sys.stderr)
                 print(f"  First occurrence: {seen_ids[rule_id]}", file=sys.stderr)
                 print(f"  Duplicate in: {file_path}", file=sys.stderr)
                 sys.exit(1)
-            
+
             seen_ids[rule_id] = file_path
             merged_rules.append(rule)
-    
+
     return merged_rules
 
 
@@ -1558,7 +1609,10 @@ def main():
         action='extend',
         nargs='+',
         required=True,
-        help="Path to audit rules JSON file(s). Multiple files will be merged."
+        help="Path to audit rules JSON file(s). Multiple files will be merged. "
+             "Filenames without path are searched in: 1) current directory, "
+             "2) default assets directory (scripts/../assets). "
+             "Explicit paths (./, ../, absolute, or with directories) are used as-is."
     )
     parser.add_argument(
         "--output", "-o",
@@ -1850,10 +1904,21 @@ def main():
         print(f"  Hash: {metadata.get('source_hash', 'Unknown')[:16]}...")
 
     # Load and merge rules from multiple files
+    # Resolve all paths first (for display and to pass to merge_rules)
     print(f"Rules: {len(args.rules)} file(s)")
+    resolved_rule_paths = []
     for rule_file in args.rules:
-        print(f"  - {rule_file}")
-    rules = merge_rules(args.rules)
+        try:
+            resolved = resolve_rule_path(rule_file)
+            resolved_rule_paths.append(resolved)
+            if rule_file != resolved:
+                print(f"  - {rule_file} → {resolved}")
+            else:
+                print(f"  - {rule_file}")
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    rules = merge_rules(resolved_rule_paths)
     print(f"  → {len(rules)} rules total")
 
     block_rules = [r for r in rules if r.get("type", "block") == "block"]
