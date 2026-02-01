@@ -186,6 +186,74 @@ Use doc-audit to ONLY check if the following file contains imprecise contract te
 
 ---
 
+### Example 4: Multiple Rule Sets
+
+Use multiple rule files together for comprehensive audits:
+
+```bash
+# Default rules + custom bidding rules
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r bidding_rules.json
+
+# Default rules + multiple custom rule files
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r bidding_rules.json -r project_rules.json
+
+# Only specified rule files (exclude defaults)
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx --rules-only -r custom.json
+```
+
+**What happens:**
+1. All specified rule files are merged (duplicate rule IDs will cause an error)
+2. Default rules are automatically included unless `--rules-only` is specified
+3. Rule files are searched in this order:
+   - Exact path (if absolute or relative path provided)
+   - Current working directory
+   - `.claude-work/doc-audit/` directory
+   - `skills/doc-audit/assets/` directory
+
+✅ **Use when:** You have domain-specific rule files (e.g., bidding documents, technical specifications) that you want to combine with default rules
+
+---
+
+### Example 5: Global Rules (Cross-Reference Verification)
+
+Global rules perform cross-document consistency checks by extracting information from all sections and verifying consistency:
+
+```bash
+# Use global rules for cross-reference verification
+$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r global_rules.json
+```
+
+**What happens:**
+1. **Extraction Phase**: Extracts structured data from each document section based on rule schemas
+2. **Verification Phase**: Checks consistency across all extracted data (e.g., same organization name everywhere)
+3. Global violations are merged with block-level violations in the report
+
+**Global Rule Structure:**
+```json
+{
+  "type": "global",
+  "rules": [
+    {
+      "id": "G001",
+      "category": "consistency",
+      "topic": "Organization Information",
+      "extraction": "Extract organization names and contact info",
+      "verification": "Organization names must be consistent across sections",
+      "extracted_entity": "Organization Type",
+      "extracted_fields": [
+        {"org_name": "Organization name", "evidence": "Source text"}
+      ]
+    }
+  ]
+}
+```
+
+⚠️ **Note:** Global rules must be manually created following the schema above. LLM-based rule generation (`parse_rules.py`) currently only supports block-level rules (type: `block`).
+
+✅ **Use when:** You need to verify consistency across different sections (e.g., bidding numbers, organization names, delivery schedules)
+
+---
+
 ## Workflow Overview
 
 ```mermaid
@@ -286,6 +354,8 @@ doc-audit/
 - **Custom Rules**: Natural language → LLM generates structured audit criteria
 - **Iterative Refinement**: Add, remove, or modify rules through conversation
 - **Smart Merging**: Automatically combines custom + default rules (unless explicitly excluded)
+- **Multi-Rule Support**: Combine multiple rule files for comprehensive audits
+- **Global Rules**: Cross-reference verification across document sections
 
 ### Robust Document Parsing
 
