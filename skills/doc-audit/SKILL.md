@@ -1,6 +1,6 @@
 ---
 name: doc-audit
-description: Intelligent document audit system for syntax and semantic verification, legal or technical document compliance review using LLM (exclusive .docx support).
+description: Document Audit Skill - Proficient semantic verification and customizable rules for Microsoft Word (.docx) files.
 type: active
 version: 1.0.0
 ---
