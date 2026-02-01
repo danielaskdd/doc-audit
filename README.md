@@ -399,6 +399,14 @@ doc-audit/
 - **Table Support**: Embeds tables as JSON within text blocks
 - **Stable UUIDs**: Uses Word's `w14:paraId` for reliable block identification
 
+### Track Changes & Comments
+
+- **Revision Markup**: Apply fixes as Word track changes (insertions/deletions) for easy review and acceptance
+- **Diff-Based Edits**: Minimal changes calculated via diff algorithm, preserving original formatting and images
+- **Comment Annotations**: Violation reasons attached as Word comments with timestamps and author attribution
+- **Category-Based Authors**: Track changes grouped by rule category (e.g., "AI-grammar", "AI-semantic") for selective review
+- **Conflict Detection**: Overlapping edits from multiple rules automatically fall back to comment-only mode
+
 ### Interactive Reports
 
 - **Issue Filtering**: By severity, category, or rule ID
