@@ -131,10 +131,16 @@ RULE_SCHEMA = {
             "description": "Rule category"
         },
         "examples": {
-            "type": "object",
-            "properties": {
-                "violation": {"type": "string"},
-                "correction": {"type": "string"}
+            "type": "array",
+            "description": "Array of example violation/correction pairs",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "violation": {"type": "string", "description": "Example text that violates the rule"},
+                    "correction": {"type": "string", "description": "Corrected version of the violation"}
+                },
+                "required": ["violation", "correction"],
+                "additionalProperties": False
             }
         }
     },
@@ -256,7 +262,7 @@ Each rule must have:
 - severity: "high", "medium", or "low"
 - category: Suggested values: "grammar", "clarity", "logic", "compliance", "format", "semantic", "other"
   You may also use custom categories if they better fit the rule type.
-- examples: Optional object with "violation" and "correction" examples
+- examples: Optional array of example objects. Each object has "violation" (problematic text) and "correction" (corrected text). Multiple examples help illustrate the rule.
 
 IMPORTANT: All rule descriptions, violation examples, correction examples, and any other textual content MUST be written in {output_language}.
 
@@ -280,7 +286,7 @@ Each rule must have:
 - severity: "high", "medium", or "low"
 - category: Suggested values: "grammar", "clarity", "logic", "compliance", "format", "semantic", "other"
   You may also use custom categories if they better fit the rule type.
-- examples: Optional object with "violation" and "correction" examples
+- examples: Optional array of example objects. Each object has "violation" (problematic text) and "correction" (corrected text). Multiple examples help illustrate the rule.
 
 IMPORTANT: All rule descriptions, violation examples, correction examples, and any other textual content MUST be written in {output_language}.
 

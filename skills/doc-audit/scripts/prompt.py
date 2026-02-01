@@ -291,14 +291,23 @@ def format_rules_for_prompt(rules: list) -> str:
     """
     lines = ["Audit Rules:"]
     for rule in rules:
-        severity = rule.get('severity', 'medium').upper()
-        lines.append(f"- [{rule['id']}] ({severity}) {rule['description']}")
+        lines.append(f"- [{rule['id']}] {rule['description']}")
         # Include examples if available for better rule understanding
-        examples = rule.get('examples', {})
-        if examples.get('violation'):
-            lines.append(f"  ✗ Example violation: {examples['violation']}")
-        if examples.get('correction'):
-            lines.append(f"  ✓ Correct form: {examples['correction']}")
+        examples = rule.get('examples', [])
+        # Support legacy dict format (auto-convert to list)
+        if isinstance(examples, dict):
+            examples = [examples]
+        
+        for i, example in enumerate(examples):
+            violation = example.get('violation', '')
+            correction = example.get('correction', '')
+            
+            if violation or correction:
+                lines.append(f"  - Example {i + 1}:")
+                if violation:
+                    lines.append(f"       ✗ violation: {violation}")
+                if correction:
+                    lines.append(f"       ✓ correction: {correction}")
 
     return "\n".join(lines)
 
