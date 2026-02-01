@@ -27,9 +27,7 @@ doc-audit skill require uv package manager setup environment for helper script t
 - Google Gemini API key OR OpenAI API key
 - Word documents created in Microsoft Word 2013+ (requires `w14:paraId` attributes)
 
-### Setup
-
-1. **Install uv** (if not already installed):
+**Install uv** (if not already installed):
 
 ```bash
 # macOS/Linux
@@ -42,35 +40,251 @@ brew install uv
 pip install uv
 ```
 
-2. **Set up environment variables**:
+## Install into Claude Code
+
+doc-audit is an [Agent Skill](https://agentskills.io/specification) that integrates with Claude Code. Choose the installation method that fits your workflow:
+
+### Method 1: Per-Project Installation
+
+Install doc-audit for use in a specific project:
 
 ```bash
-# For Google Gemini with AI Studio
-export GOOGLE_API_KEY="your_api_key_here"
-
-# For Google Gemini with Vertex AI
-export GOOGLE_GENAI_USE_VERTEXAI=true
-export GOOGLE_CLOUD_PROJECT="your-project-id"
-export GOOGLE_CLOUD_LOCATION="us-central1"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
-# For proxy or public models available general
-# export GOOGLE_VERTEX_BASE_URL='https://aiplatform.googleapis.com'
-
-# OR for OpenAI (requires gpt-4o-2024-08-06+, gpt-4o-mini, or gpt-5.x)
-export OPENAI_API_KEY="your_api_key_here"
+# Copy doc-audit to your project's skill directory
+mkdir -p .claude/skills
+cp -r /path/to/doc-audit .claude/skills/
 ```
 
-3. **Initialize the audit environment** (first time only):
+Claude Code will automatically discover the skill when working in this project.
+
+### Method 2: Global Installation
+
+Install doc-audit for use across all projects:
 
 ```bash
-bash skills/doc-audit/scripts/setup_project_env.sh
-source .claude-work/doc-audit/env.sh
+# Copy doc-audit to Claude Code's global skill directory
+mkdir -p ~/.claude/skills
+cp -r /path/to/doc-audit ~/.claude/skills/
 ```
 
-This creates:
-- `.claude-work/venv/` - Python virtual environment with all dependencies
-- `.claude-work/doc-audit/` - Working directory for intermediate audit files
-- `.claude-work/doc-audit/env.sh` - Environment activation script
+The skill will be available in all Claude Code sessions.
+
+### Verify Installation
+
+After installation, start Claude Code and type:
+
+```
+/doc-audit
+```
+
+Claude should recognize the skill and display its description. Environment variables must be set up before using this skill.
+
+## Environment Variables
+
+### API Keys (Required - choose one)
+
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_API_KEY` | Google AI Studio API key (recommended) |
+| `OPENAI_API_KEY` | OpenAI API key |
+
+> **Note:** If both Gemini and OpenAI keys are set, Gemini is used by default.
+
+### Google Vertex AI Mode (Alternative to AI Studio)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GOOGLE_GENAI_USE_VERTEXAI` | Yes | Set to `true` to enable Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | Yes | GCP project ID |
+| `GOOGLE_CLOUD_LOCATION` | No | GCP region (default: `us-central1`) |
+| `GOOGLE_VERTEX_BASE_URL` | No | Custom API endpoint for proxy |
+| `GOOGLE_APPLICATION_CREDENTIALS` | No* | Path to service account JSON |
+
+\* Not required if using `gcloud auth application-default login` or running on GCP
+
+### Model Configuration (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOC_AUDIT_GEMINI_MODEL` | `gemini-3-flash-preview` | Gemini model name |
+| `DOC_AUDIT_OPENAI_MODEL` | `gpt-5.2` | OpenAI model name |
+| `AUDIT_LANGUAGE` | `Chinese` | Output language for audit results |
+
+### Custom Endpoints (Optional)
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_BASE_URL` | Custom OpenAI API endpoint (for proxies, Azure, etc.) |
+
+### Thinking/Reasoning Configuration (Optional)
+
+For models that support extended reasoning capabilities:
+
+| Variable | Model | Values | Description |
+|----------|-------|--------|-------------|
+| `GEMINI_THINKING_LEVEL` | Gemini 3 | minimal, low, medium, high | Thinking intensity |
+| `GEMINI_THINKING_BUDGET` | Gemini 2.5 | Token count (0 to disable) | Thinking token budget |
+| `OPENAI_REASONING_EFFORT` | OpenAI o-series | low, medium, high | Reasoning effort level |
+
+### OpenAI Model Compatibility
+
+Scripts use Structured Outputs (`json_schema`), which requires:
+- ✅ `gpt-4o-2024-08-06` or later
+- ✅ `gpt-4o-mini` or later
+- ✅ `gpt-5.x` series
+
+Older models are **NOT supported** and will cause API errors.
+
+## Usage Examples (Claude-Code)
+
+### Audit Stage
+
+#### Example 1: Basic Audit with Default Rules
+
+Simply ask Claude to audit a document without specifying custom requirements:
+
+```
+Use doc-audit to review the following file: test.docx
+```
+
+**What happens:**
+
+1. Claude uses default audit rules (grammar, typos, ambiguous references, etc.)
+2. Parses document into text blocks
+3. Runs LLM audit on each block
+4. Generates `test_audit_report.html` in the same directory as the source file
+
+✅ **Use when:** You want comprehensive document review with standard quality checks
+
+---
+
+#### Example 2: Custom Rules Merged with Defaults
+
+Ask Claude to audit for specific issues while keeping default rules:
+
+```
+Use doc-audit to check if the following file contains imprecise contract terms: contract.docx
+```
+
+**What happens:**
+1. Claude generates custom rules for "imprecise contract terms" using LLM
+
+3. Presents all rules for your confirmation:
+   ```
+   [R001] Check for vague or ambiguous monetary amounts
+   [R002] Check for unclear time specifications
+   ...
+   [R025] Check for imprecise payment terms
+   Total: 25 rules
+   ```
+
+4. After you approve, proceeds audit with custom rules and default rules
+
+✅ **Use when:** You have domain-specific requirements but still want general quality checks
+
+---
+
+#### Example 3: Custom Rules ONLY (No Defaults)
+
+Explicitly request audit with ONLY your specific rules, excluding defaults:
+
+```
+Use doc-audit to ONLY check if the following file contains imprecise contract terms (do not include default rules): contract.docx
+```
+
+**What happens:**
+1. Claude generates rules with `--no-base` flag (excludes defaults)
+2. Presents ONLY your custom rules for confirmation:
+   ```
+   [R001] Check for imprecise payment terms
+   [R002] Check for ambiguous delivery clauses
+   Total: 2 rules
+   ```
+3. After approval, proceeds with targeted audit
+
+✅ **Use when:** You want laser-focused audit on specific criteria without noise from other checks
+
+---
+
+#### Example 4: Multiple Predifined Rule Sets
+
+Use multiple rule files together for comprehensive audits:
+
+```bash
+use bidding_rules and global_rules to audit the following file: test.docx
+```
+
+**What happens:**
+1. All specified rule files are merged (duplicate rule IDs will cause an error)
+3. Rule files are searched in this order:
+   - Exact path (if absolute or relative path provided)
+   - Current working directory
+   - `skills/doc-audit/assets/` directory
+3. Default rules are automatically included unless ONLY is specified in your request
+
+✅ **Use when:** You have domain-specific rule files (e.g., bidding documents, technical specifications) that you want to combine with default rules
+
+#### Audit Stage Workflow
+
+```mermaid
+flowchart LR
+    A[Setup<br/>Environment] --> B{Request<br/>Type}
+    B -->|Simple Audit| C[Use Default or Predefined Rules]
+    B -->|Custom Audit| D[Generate<br/>Rules]
+    D --> E{Approve?}
+    E -->|No| D
+    E -->|Yes| F[Parse & Audit<br/>Generate Report]
+    C --> F
+    F --> G["HTML Report<br/>Excel Report<br/>(With Manifest)"]
+    
+    style A fill:#e1f5ff
+    style G fill:#e8f5e9
+```
+
+### Apply Stage
+
+#### Apply Directly
+
+After the audit stage completes, you can apply audit results to the document.
+
+```
+Apply audit result to Word directly
+```
+
+Claude Code will apply revisions and comments to the original Word document based on the audit results. The output is saved to a new document with `_edited` suffix, preserving the original file.
+
+#### Apply With HTML Report Exported
+
+1. Open the HTML report in a browser and review findings
+2. Mark false positives as "blocked" using the UI controls
+3. Export the filtered results to JSONL
+4. Ask Claude Code to apply only the exported issues:
+   ```
+   Apply the exported audit results from exported_issues.jsonl to reviewed.docx
+   ```
+
+You can run the script provide by doc-audit to apply fixes and comments directly to Word document without bothering to ask Claude Code：
+
+```bash
+source ./.claude-work/doc-audit/env.sh
+$DOC_AUDIT_SKILL_PATH/cripts/apply_audit_edits.py exported_issues.jsonl -o reviewed.docx
+```
+
+> The original Word file location is embedded in exported_issues.jsonl.
+
+## Global Rules (Cross-Reference Verification)
+
+Global rules perform cross-document consistency checks by extracting information from all sections and verifying consistency.
+
+**What happens:**
+1. **Extraction Phase**: Extracts structured data from each document section based on rule schemas
+2. **Verification Phase**: Checks consistency across all extracted data (e.g., same organization name everywhere)
+3. Global violations are merged with block-level violations in the report
+
+**Global Rule Sample File:** [global_rules.json](skills/doc-audit/assets/global_rules.json)
+
+⚠️ **Note:** Global rules must be manually created following the schema above. LLM-based rule generation (`parse_rules.py`) currently only supports block-level rules (type: `block`).
+
+✅ **Use when:** You need to verify consistency across different sections (e.g., bidding numbers, organization names, delivery schedules)
 
 ## Word Document Best Practices
 
@@ -111,165 +325,13 @@ This creates:
 
 ### Document Compatibility
 
-| Source | Compatible | Action Required |
-|--------|------------|-----------------|
-| Microsoft Word 2013+ | ✅ Yes | None |
-| Word Online | ⚠️ Maybe | Download and save in desktop Word |
-| LibreOffice | ❌ No | Open and save in Microsoft Word |
-| Google Docs | ❌ No | Export to DOCX, then save in Word |
-| python-docx generated | ❌ No | Open and save in Microsoft Word |
-
-## Usage Examples (Claude-Code)
-
-### Example 1: Basic Audit with Default Rules
-
-Simply ask Claude to audit a document without specifying custom requirements:
-
-```
-Use doc-audit to review the following file: test.docx
-```
-
-**What happens:**
-1. Claude uses default audit rules (grammar, typos, ambiguous references, etc.)
-2. Parses document into text blocks
-3. Runs LLM audit on each block
-4. Generates `test_audit_report.html` in the same directory as the source file
-
-✅ **Use when:** You want comprehensive document review with standard quality checks
-
----
-
-### Example 2: Custom Rules Merged with Defaults
-
-Ask Claude to audit for specific issues while keeping default rules:
-
-```
-Use doc-audit to check if the following file contains imprecise contract terms: contract.docx
-```
-
-**What happens:**
-1. Claude generates custom rules for "imprecise contract terms" using LLM
-2. Merges custom rules WITH default rules automatically
-3. Presents all rules for your confirmation:
-   ```
-   [R001] Check for vague or ambiguous monetary amounts
-   [R002] Check for unclear time specifications
-   ...
-   [R025] Check for imprecise payment terms
-   Total: 25 rules
-   ```
-4. After you approve, proceeds with parse → audit → report
-
-✅ **Use when:** You have domain-specific requirements but still want general quality checks
-
----
-
-### Example 3: Custom Rules ONLY (No Defaults)
-
-Explicitly request audit with ONLY your specific rules, excluding defaults:
-
-```
-Use doc-audit to ONLY check if the following file contains imprecise contract terms (do not include default rules): contract.docx
-```
-
-**What happens:**
-1. Claude generates rules with `--no-base` flag (excludes defaults)
-2. Presents ONLY your custom rules for confirmation:
-   ```
-   [R001] Check for imprecise payment terms
-   [R002] Check for ambiguous delivery clauses
-   Total: 2 rules
-   ```
-3. After approval, proceeds with targeted audit
-
-✅ **Use when:** You want laser-focused audit on specific criteria without noise from other checks
-
----
-
-### Example 4: Multiple Rule Sets
-
-Use multiple rule files together for comprehensive audits:
-
-```bash
-# Default rules + custom bidding rules
-$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r bidding_rules.json
-
-# Default rules + multiple custom rule files
-$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r bidding_rules.json -r project_rules.json
-
-# Only specified rule files (exclude defaults)
-$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx --rules-only -r custom.json
-```
-
-**What happens:**
-1. All specified rule files are merged (duplicate rule IDs will cause an error)
-2. Default rules are automatically included unless `--rules-only` is specified
-3. Rule files are searched in this order:
-   - Exact path (if absolute or relative path provided)
-   - Current working directory
-   - `.claude-work/doc-audit/` directory
-   - `skills/doc-audit/assets/` directory
-
-✅ **Use when:** You have domain-specific rule files (e.g., bidding documents, technical specifications) that you want to combine with default rules
-
----
-
-### Example 5: Global Rules (Cross-Reference Verification)
-
-Global rules perform cross-document consistency checks by extracting information from all sections and verifying consistency:
-
-```bash
-# Use global rules for cross-reference verification
-$DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r global_rules.json
-```
-
-**What happens:**
-1. **Extraction Phase**: Extracts structured data from each document section based on rule schemas
-2. **Verification Phase**: Checks consistency across all extracted data (e.g., same organization name everywhere)
-3. Global violations are merged with block-level violations in the report
-
-**Global Rule Structure:**
-```json
-{
-  "type": "global",
-  "rules": [
-    {
-      "id": "G001",
-      "category": "consistency",
-      "topic": "Organization Information",
-      "extraction": "Extract organization names and contact info",
-      "verification": "Organization names must be consistent across sections",
-      "extracted_entity": "Organization Type",
-      "extracted_fields": [
-        {"org_name": "Organization name", "evidence": "Source text"}
-      ]
-    }
-  ]
-}
-```
-
-⚠️ **Note:** Global rules must be manually created following the schema above. LLM-based rule generation (`parse_rules.py`) currently only supports block-level rules (type: `block`).
-
-✅ **Use when:** You need to verify consistency across different sections (e.g., bidding numbers, organization names, delivery schedules)
-
----
-
-## Workflow Overview
-
-```mermaid
-flowchart LR
-    A[Setup Environment] --> B{Request Type}
-    B -->|Simple Audit| C[Use Default Rules]
-    B -->|Custom Audit| D[Generate Rules]
-    D --> E{Approve?}
-    E -->|No| D
-    E -->|Yes| F[Parse & Audit]
-    C --> F
-    F --> G[HTML Report]
-    
-    style A fill:#e1f5ff
-    style G fill:#e8f5e9
-```
+| Source                | Compatible | Action Required                   |
+| --------------------- | ---------- | --------------------------------- |
+| Microsoft Word 2013+  | ✅ Yes      | None                              |
+| Word Online           | ⚠️ Maybe    | Download and save in desktop Word |
+| LibreOffice           | ❌ No       | Open and save in Microsoft Word   |
+| Google Docs           | ❌ No       | Export to DOCX, then save in Word |
+| python-docx generated | ❌ No       | Open and save in Microsoft Word   |
 
 ## Core Scripts
 
@@ -284,33 +346,6 @@ flowchart LR
 | `apply_audit_edits.py` | Apply fixes with track changes | Manual post-processing |
 
 📖 **Detailed documentation**: See [skills/doc-audit/SKILL.md](skills/doc-audit/SKILL.md) and [skills/doc-audit/TOOLS.md](skills/doc-audit/TOOLS.md)
-
-## Environment Variables
-
-```bash
-# ──────────────────────────────────────────────────────────
-# API Keys (Required)
-# ──────────────────────────────────────────────────────────
-export GOOGLE_API_KEY="your_gemini_key"     # Gemini (recommended)
-export OPENAI_API_KEY="your_openai_key"     # OpenAI (requires gpt-4o+ or gpt-5.x)
-
-# ──────────────────────────────────────────────────────────
-# Model Configuration (Optional)
-# ──────────────────────────────────────────────────────────
-export DOC_AUDIT_GEMINI_MODEL="gemini-3-flash"    # Default
-export DOC_AUDIT_OPENAI_MODEL="gpt-5.2"           # Default
-
-# ──────────────────────────────────────────────────────────
-# Output Language (Optional)
-# ──────────────────────────────────────────────────────────
-export AUDIT_LANGUAGE="Chinese"    # Default (also: English, Japanese, etc.)
-```
-
-⚠️ **OpenAI Compatibility**: Only models supporting Structured Outputs are supported:
-- ✅ `gpt-4o-2024-08-06` or later
-- ✅ `gpt-4o-mini`
-- ✅ `gpt-5.x` series
-- ❌ Older models will cause API errors
 
 ## Project Structure
 
@@ -404,7 +439,7 @@ uv pip install google-genai>=0.2.0  # For Gemini
 uv pip install openai>=1.0.0         # For OpenAI
 ```
 
-**Development Workflow:**
+### Development Workflow
 
 ```bash
 # 1. Create isolated virtual environment (optional but recommended)
@@ -426,15 +461,50 @@ python skills/doc-audit/scripts/run_audit.py --dry-run --document blocks.jsonl -
 
 **Note:** The `requirements.txt` file lists LLM packages as commented-out by default. Uncomment the one(s) you need for development.
 
----
+### Debug with Claude Code
+
+For MacOS or Linux user, you can add symbol link to Claude Code skill directory to debug doc-audit immediately after code modification:
+
+```
+# In root directory of this project
+mkdir -p .claude/skills
+ln -s skills/doc-audit .claude/skills/doc-audit
+```
+
+After installation, start Claude Code and type:
+
+```
+/doc-audit
+```
+
+Claude should recognize the skill and display its description.
 
 ## Advanced Usage
+
+Before running the scripts below, set up the runtime environment:
+
+**If you have previously run doc-audit via Claude Code in this directory:**
+
+```bash
+source ./.claude-work/doc-audit/env.sh
+```
+
+**If this is your first time running doc-audit in this directory:**
+
+```bash
+# Initialize the working environment using doc-audit's setup script
+.claude/skills/doc-audit/scripts/setup_project_env.sh
+# or
+~/.claude/skills/doc-audit/scripts/setup_project_env.sh
+
+source ./.claude-work/doc-audit/env.sh
+```
 
 ### Manual Workflow Control
 
 ```bash
 # Step 1: Generate custom rules
-python scripts/parse_rules.py \
+$DOC_AUDIT_SKILL_PATH/scripts/parse_rules.py \
   --input "Check for ambiguous payment terms and missing signatures" \
   --output .claude-work/doc-audit/contract_custom_rules.json
 
@@ -448,7 +518,7 @@ cat .claude-work/doc-audit/contract_custom_rules.json
 ### Resume Interrupted Audits
 
 ```bash
-python scripts/run_audit.py \
+$DOC_AUDIT_SKILL_PATH/scripts/run_audit.py \
   --document .claude-work/doc-audit/report_blocks.jsonl \
   --rules .claude-work/doc-audit/report_custom_rules.json \
   --resume  # Skips already-audited blocks
@@ -461,7 +531,7 @@ python scripts/run_audit.py \
 # 2. Mark false positives as blocked
 # 3. Export to JSONL
 # 4. Apply edits with track changes
-python scripts/apply_audit_edits.py exported_issues.jsonl -o reviewed.docx
+$DOC_AUDIT_SKILL_PATH/cripts/apply_audit_edits.py exported_issues.jsonl -o reviewed.docx
 ```
 
 ## Contributing

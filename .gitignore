@@ -4,7 +4,12 @@ __pycache__/
 .vscode/
 
 # working files
+/.claude-work/
 /*.docx
 /*.xlsx
 /*.html
 /*.jsonl
+
+# AI Agents
+/.claude/
+/memory-bank/

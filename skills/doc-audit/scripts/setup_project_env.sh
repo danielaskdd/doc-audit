@@ -50,7 +50,26 @@ source "$VENV_DIR/bin/activate"
 export DOC_AUDIT_SKILL_PATH="$SKILL_PATH"
 export PYTHONPATH="\$DOC_AUDIT_SKILL_PATH:\$PYTHONPATH"
 
-# Default LLM Model Configuration
+# =============================================================================
+# API Keys (Required - choose one)
+# =============================================================================
+# export GOOGLE_API_KEY="your_key"     # Google AI Studio (recommended)
+# export OPENAI_API_KEY="your_key"     # OpenAI API
+# Note: If both are set, Gemini is used by default
+
+# =============================================================================
+# Google Vertex AI Mode (Alternative to AI Studio)
+# =============================================================================
+# export GOOGLE_GENAI_USE_VERTEXAI=true           # Enable Vertex AI mode
+# export GOOGLE_CLOUD_PROJECT="your-project-id"   # GCP project ID (required)
+# export GOOGLE_CLOUD_LOCATION="us-central1"      # GCP region (optional)
+# export GOOGLE_VERTEX_BASE_URL=""                # Custom API endpoint for proxy
+# export GOOGLE_APPLICATION_CREDENTIALS=""        # Path to service account JSON
+#                                                 # (not required if using gcloud auth)
+
+# =============================================================================
+# Model Configuration (Optional)
+# =============================================================================
 # Change these to use different models across all scripts
 export DOC_AUDIT_GEMINI_MODEL="\${DOC_AUDIT_GEMINI_MODEL:-gemini-3-flash-preview}"
 
@@ -62,6 +81,19 @@ export DOC_AUDIT_OPENAI_MODEL="\${DOC_AUDIT_OPENAI_MODEL:-gpt-5.2}"
 # Specifies the language for LLM-generated rules and audit results
 # Examples: "Chinese", "English", "Japanese", "Korean", etc.
 export AUDIT_LANGUAGE="\${AUDIT_LANGUAGE:-Chinese}"
+
+# =============================================================================
+# Custom Endpoints (Optional)
+# =============================================================================
+# export OPENAI_BASE_URL=""            # Custom OpenAI API endpoint (for proxies, Azure, etc.)
+
+# =============================================================================
+# Thinking/Reasoning Configuration (Optional)
+# =============================================================================
+# For models that support extended reasoning capabilities:
+# export GEMINI_THINKING_LEVEL=""      # Gemini 3: minimal, low, medium, high
+# export GEMINI_THINKING_BUDGET=""     # Gemini 2.5: Token count (0 to disable)
+# export OPENAI_REASONING_EFFORT=""    # OpenAI o-series: low, medium, high
 
 # Show current environment
 echo "Doc-Audit Environment Activated"
@@ -98,6 +130,7 @@ This directory is automatically created by Claude for document audit work.
 $DOC_AUDIT_SKILL_PATH/assets/
 ├── default_rules.json              # Default audit rules
 ├── bidding_rules.json              # Additional audit rules for bidding document
+├── global_rules.json               # Cross-reference verification rules
 └── report_template.html            # Report template
 ```
 
@@ -166,24 +199,48 @@ $DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx -r .claude-work/doc-audi
 
 ## Environment Variables
 
-The following environment variables can be set:
+The following environment variables can be configured. Edit `.claude-work/doc-audit/env.sh` or export before sourcing.
 
-```bash
-# API Keys (required - choose one or both)
-# For Gemini (recommended - used by default if both are set)
-export GOOGLE_API_KEY=your_api_key
+### API Keys (Required - choose one)
 
-# For OpenAI
-export OPENAI_API_KEY=your_api_key
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_API_KEY` | Google AI Studio API key (recommended) |
+| `OPENAI_API_KEY` | OpenAI API key |
 
-# Custom skill path (optional)
-export DOC_AUDIT_SKILL_PATH=/path/to/skills/doc-audit
+> If both are set, Gemini is used by default.
 
-# Model Configuration (optional - already set in env.sh)
-# Override these to use different models across all scripts
-export DOC_AUDIT_GEMINI_MODEL=gemini-3-flash    # Default Gemini model
-export DOC_AUDIT_OPENAI_MODEL=gpt-5.2           # Default OpenAI model
-```
+### Google Vertex AI Mode (Alternative to AI Studio)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GOOGLE_GENAI_USE_VERTEXAI` | Yes | Set to \`true\` to enable Vertex AI |
+| `GOOGLE_CLOUD_PROJECT` | Yes | GCP project ID |
+| `GOOGLE_CLOUD_LOCATION` | No | GCP region (default: \`us-central1\`) |
+| `GOOGLE_VERTEX_BASE_URL` | No | Custom API endpoint for proxy |
+| `GOOGLE_APPLICATION_CREDENTIALS` | No | Path to service account JSON |
+
+### Model Configuration (Optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DOC_AUDIT_GEMINI_MODEL` | \`gemini-3-flash-preview\` | Gemini model name |
+| `DOC_AUDIT_OPENAI_MODEL` | \`gpt-5.2\` | OpenAI model name |
+| `AUDIT_LANGUAGE` | \`Chinese\` | Output language for audit results |
+
+### Custom Endpoints (Optional)
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_BASE_URL` | Custom OpenAI API endpoint (for proxies, Azure, etc.) |
+
+### Thinking/Reasoning Configuration (Optional)
+
+| Variable | Model | Values |
+|----------|-------|--------|
+| `GEMINI_THINKING_LEVEL` | Gemini 3 | minimal, low, medium, high |
+| `GEMINI_THINKING_BUDGET` | Gemini 2.5 | Token count (0 to disable) |
+| `OPENAI_REASONING_EFFORT` | OpenAI o-series | low, medium, high |
 
 ## Changing Default Models
 
@@ -191,13 +248,13 @@ The default LLM models are configured in `.claude-work/doc-audit/env.sh`. To use
 
 1. **Edit `.claude-work/doc-audit/env.sh`** - Change the model environment variables:
    ```bash
-   export DOC_AUDIT_GEMINI_MODEL="gemini-2.5-flash"
+   export DOC_AUDIT_GEMINI_MODEL="gemini-3-flash"
    export DOC_AUDIT_OPENAI_MODEL="gpt-4o-mini"
    ```
 
 2. **Or set before activating** - Export variables before sourcing env.sh:
    ```bash
-   export DOC_AUDIT_GEMINI_MODEL="gemini-2.0-flash-exp"
+   export DOC_AUDIT_GEMINI_MODEL="gemini-3-flash"
    source .claude-work/doc-audit/env.sh
    ```
 
