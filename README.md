@@ -1,4 +1,4 @@
-# doc-audit Agent Skill
+# doc-audit - A Simple Document Audit Agent Skills for Word
 
 > Intelligent document audit system for compliance review, legal and technical document verification using LLM
 
