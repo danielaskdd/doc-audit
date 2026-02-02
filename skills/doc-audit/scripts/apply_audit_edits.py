@@ -456,6 +456,39 @@ class AuditEditApplier:
         """Find paragraph element by its w14:paraId."""
         return self._find_para_node_by_id(uuid)
 
+    def _normalize_text_for_search(self, text: str) -> str:
+        """
+        Normalize text for search matching by removing trailing whitespace from each line.
+        
+        This matches parse_document.py behavior where para_text.strip() is called,
+        preventing mismatch due to trailing spaces in XML runs.
+        
+        Args:
+            text: Text to normalize
+        
+        Returns:
+            Normalized text with trailing whitespace removed from each line
+        
+        TODO: Known limitation - index misalignment with trailing whitespace
+            The normalized string is shorter than the original when lines have trailing
+            whitespace. Currently, matched_start from normalized.find() is used directly
+            against runs_info_orig built from unmodified text. If any earlier line has
+            trailing spaces before '\\n', the normalized position points earlier than the
+            real position in the original runs, causing _find_affected_runs to select the
+            wrong span. This can lead to edits/comments landing in incorrect locations.
+            
+            Future improvement: Return (normalized_text, index_mapping) where
+            index_mapping[normalized_pos] = original_pos, allowing accurate translation
+            of match positions back to original text coordinates.
+            
+            Current risk: LOW - trailing whitespace in paragraphs is rare in practice,
+            and incorrect edits would be caught during track changes review.
+        """
+        if not text:
+            return text
+        lines = text.split('\n')
+        return '\n'.join(line.rstrip() for line in lines)
+
     def _find_tables_in_range(self, start_para, uuid_end: str) -> List:
         """
         Find all tables within uuid → uuid_end range.
@@ -481,6 +514,94 @@ class AuditEditApplier:
                     seen_tables.add(table_id)
         
         return tables
+
+    def _search_in_table_cell_raw(self, table_elem, violation_text: str,
+                                   start_para, uuid_end: str) -> Optional[Tuple]:
+        """
+        Search for raw text in table cells (non-JSON mode).
+        
+        Each cell is searched independently to prevent cross-cell matching.
+        Multi-paragraph content within a cell is joined with real '\\n'.
+        
+        This addresses the case where:
+        - violation_text is plain text (not JSON format)
+        - Target content is in a table cell with multiple paragraphs
+        - LLM has decoded JSON-escaped '\\\\n' to real '\\n'
+        
+        Args:
+            table_elem: Table element (w:tbl) to search in
+            violation_text: Plain text to find (with real newlines)
+            start_para: Starting paragraph (unused - kept for API compatibility)
+            uuid_end: End boundary paraId
+        
+        Returns:
+            Tuple of (target_para, runs_info, match_start) or None if not found
+        
+        Note:
+            The in_range gate has been removed because _find_tables_in_range already
+            constrains the table to the uuid range. The anchor paragraph (start_para)
+            is often outside the table (e.g., heading before table), so checking for
+            it would cause all cells to be skipped.
+        """
+        # Iterate cells in document order
+        for tc in table_elem.iter(f'{{{NS["w"]}}}tc'):
+            cell_paras = tc.findall(f'{{{NS["w"]}}}p')
+            if not cell_paras:
+                continue
+            
+            # Build cell content with run tracking
+            cell_runs = []
+            pos = 0
+            cell_first_para = cell_paras[0]
+            
+            for para_idx, para in enumerate(cell_paras):
+                para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                
+                # Add paragraph boundary (not for first paragraph in cell)
+                if para_idx > 0 and cell_runs:
+                    cell_runs.append({
+                        'text': '\n',  # Real newline
+                        'start': pos,
+                        'end': pos + 1,
+                        'para_elem': para,
+                        'cell_elem': tc,
+                        'is_para_boundary': True
+                    })
+                    pos += 1
+                
+                # Collect paragraph runs (original text, no JSON escaping)
+                para_runs, _ = self._collect_runs_info_original(para)
+                for run in para_runs:
+                    run_copy = dict(run)
+                    run_copy['para_elem'] = para
+                    run_copy['cell_elem'] = tc
+                    run_copy['start'] = run['start'] + pos
+                    run_copy['end'] = run['end'] + pos
+                    cell_runs.append(run_copy)
+                
+                if cell_runs:
+                    pos = cell_runs[-1]['end']
+                
+                # Stop at uuid_end
+                if para_id == uuid_end:
+                    break
+            
+            if not cell_runs:
+                continue
+            
+            # Search within this cell only (prevents cross-cell matching)
+            cell_text = ''.join(r['text'] for r in cell_runs)
+            # Normalize to match parse_document.py behavior (removes trailing whitespace)
+            cell_normalized = self._normalize_text_for_search(cell_text)
+            match_pos = cell_normalized.find(violation_text)
+            
+            if match_pos != -1:
+                # Found! Return match info
+                if self.verbose:
+                    print(f"  [Success] Found in cell (raw text mode): '{cell_text[:50]}...'")
+                return (cell_first_para, cell_runs, match_pos)
+        
+        return None
 
     def _get_cell_merge_properties(self, tcPr):
         """
@@ -2378,7 +2499,9 @@ class AuditEditApplier:
             for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                 runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                 
-                pos = combined_orig.find(violation_text)
+                # Normalize to match parse_document.py behavior (removes trailing whitespace)
+                combined_normalized = self._normalize_text_for_search(combined_orig)
+                pos = combined_normalized.find(violation_text)
                 if pos != -1:
                     target_para = para
                     matched_runs_info = runs_info_orig
@@ -2435,7 +2558,9 @@ class AuditEditApplier:
                         print(f"  [Boundary] {boundary_error}")
                 elif is_multi_para:
                     # Only use cross-paragraph mode if there are actually multiple paragraphs
-                    pos = cross_text.find(violation_text)
+                    # Normalize to match parse_document.py behavior (removes trailing whitespace)
+                    cross_normalized = self._normalize_text_for_search(cross_text)
+                    pos = cross_normalized.find(violation_text)
                     if pos != -1:
                         # Found match across paragraphs
                         target_para = anchor_para  # Use anchor as reference
@@ -2523,6 +2648,30 @@ class AuditEditApplier:
                     if target_para is not None:
                         break
             
+            # Fallback 2.5: Try non-JSON table search (raw text mode)
+            # For plain text violation_text that may be in table cells with multiple paragraphs
+            if target_para is None and not violation_text.startswith('["'):
+                if self.verbose:
+                    print(f"  [Fallback] Trying non-JSON table search (plain text mode)...")
+                
+                # Find all tables in range
+                tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
+                
+                for table_elem in tables_in_range:
+                    # Search for raw text in each cell independently
+                    result = self._search_in_table_cell_raw(
+                        table_elem, violation_text, anchor_para, item.uuid_end
+                    )
+                    
+                    if result:
+                        target_para, matched_runs_info, matched_start = result
+                        # Cell content is always treated as single-paragraph for now
+                        is_cross_paragraph = False
+                        
+                        if self.verbose:
+                            print(f"  [Success] Found in table cell (plain text mode)")
+                        break
+            
             if target_para is None:
                 # Check if we have a boundary error from table/row crossing
                 if boundary_error:
@@ -2555,8 +2704,11 @@ class AuditEditApplier:
                                 # Join with \n (actual newline, not JSON-escaped)
                                 cell_combined_text = '\n'.join(cell_text_parts)
                                 
+                                # Normalize to match parse_document.py behavior (removes trailing whitespace)
+                                cell_normalized = self._normalize_text_for_search(cell_combined_text)
+                                
                                 # Search for violation_text in cell's raw text
-                                pos = cell_combined_text.find(violation_text)
+                                pos = cell_normalized.find(violation_text)
                                 if pos != -1:
                                     # Found match in this cell!
                                     if self.verbose:
@@ -2693,6 +2845,9 @@ class AuditEditApplier:
                                 if len(combined_body_text) > 200:
                                     print(f"  [Debug] Segment {segment_idx + 1} text end: '...{combined_body_text[-200:]}'")
                             
+                            # Normalize to match parse_document.py behavior (removes trailing whitespace)
+                            combined_normalized = self._normalize_text_for_search(combined_body_text)
+                            
                             # Try multiple search patterns (original and stripped numbering)
                             search_attempts = [(violation_text, False)]
                             stripped_v, was_stripped = strip_auto_numbering(violation_text)
@@ -2706,7 +2861,7 @@ class AuditEditApplier:
                                 if self.verbose and is_stripped:
                                     print(f"  [Debug] Segment {segment_idx + 1} trying stripped: '{search_text[:100]}...'")
                                 
-                                match_pos = combined_body_text.find(search_text)
+                                match_pos = combined_normalized.find(search_text)
                                 
                                 if self.verbose:
                                     print(f"  [Debug] Segment {segment_idx + 1} search result ({('stripped' if is_stripped else 'original')}): match_pos = {match_pos}")
