@@ -1132,6 +1132,64 @@ def get_heading_level(para_element, styles_outline_map: dict) -> int:
     return None
 
 
+def extract_text_from_run(run, ns: dict) -> str:
+    """
+    Extract text from a run element, preserving superscript/subscript with markup.
+    
+    Converts Word formatting to HTML-like tags:
+    - Superscript: <sup>text</sup>
+    - Subscript: <sub>text</sub>
+    - Normal text: unchanged
+    
+    Args:
+        run: lxml run element (w:r)
+        ns: XML namespace dictionary
+        
+    Returns:
+        Text string with <sup>/<sub> markup for formatted portions
+    """
+    text = ''
+    
+    # Check for vertAlign in rPr (superscript/subscript)
+    vert_align = None
+    rPr = run.find('w:rPr', ns)
+    if rPr is not None:
+        vert_elem = rPr.find('w:vertAlign', ns)
+        if vert_elem is not None:
+            vert_align = vert_elem.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val')
+    
+    # Extract text content from run children
+    for child in run:
+        tag = child.tag.split('}')[-1]  # Remove namespace
+        if tag == 't' and child.text:
+            text += child.text
+        elif tag == 'tab':
+            text += '\t'
+        elif tag == 'br':
+            # Handle line breaks - textWrapping or no type = soft line break
+            br_type = child.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type')
+            if br_type in (None, 'textWrapping'):
+                text += '\n'
+            # Skip page and column breaks (layout elements)
+        elif tag == 'drawing':
+            # Extract inline images (ignore floating images wp:anchor)
+            inline = child.find('wp:inline', ns)
+            if inline is not None:
+                doc_pr = inline.find('wp:docPr', ns)
+                if doc_pr is not None:
+                    img_id = doc_pr.get('id', '')
+                    img_name = doc_pr.get('name', '')
+                    text += f'<drawing id="{img_id}" name="{img_name}" />'
+    
+    # Apply superscript/subscript markup if needed
+    if text and vert_align == 'superscript':
+        return f'<sup>{text}</sup>'
+    elif text and vert_align == 'subscript':
+        return f'<sub>{text}</sub>'
+    
+    return text
+
+
 def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     """
     Extract text blocks (chunks) from a DOCX file for auditing.
@@ -1142,6 +1200,7 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     3. Convert tables to JSON (2D array)
     4. Validate heading lengths and table sizes
     5. Split long blocks using anchor paragraphs
+    6. Preserve superscript/subscript formatting with <sup>/<sub> markup
     
     Args:
         file_path: Path to the DOCX file
@@ -1174,34 +1233,15 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             continue
         
         if tag == 'p':  # Paragraph
-            # Get paragraph text
+            # Get paragraph text with superscript/subscript markup
             para_text = ''
             ns = {
                 'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
                 'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
             }
             for run in element.findall('.//w:r', ns):
-                for child in run:
-                    tag = child.tag.split('}')[-1]  # Remove namespace
-                    if tag == 't' and child.text:
-                        para_text += child.text
-                    elif tag == 'tab':
-                        para_text += '\t'
-                    elif tag == 'br':
-                        # Handle line breaks - textWrapping or no type = soft line break
-                        br_type = child.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type')
-                        if br_type in (None, 'textWrapping'):
-                            para_text += '\n'
-                        # Skip page and column breaks (layout elements)
-                    elif tag == 'drawing':
-                        # Extract inline images (ignore floating images wp:anchor)
-                        inline = child.find('wp:inline', ns)
-                        if inline is not None:
-                            doc_pr = inline.find('wp:docPr', ns)
-                            if doc_pr is not None:
-                                img_id = doc_pr.get('id', '')
-                                img_name = doc_pr.get('name', '')
-                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
+                # Use new function to extract text with format preservation
+                para_text += extract_text_from_run(run, ns)
             
             para_text = para_text.strip()
             if not para_text:

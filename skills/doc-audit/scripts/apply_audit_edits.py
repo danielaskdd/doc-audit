@@ -1346,6 +1346,63 @@ class AuditEditApplier:
             'cell_runs': cell_runs
         }
 
+    def _extract_text_from_run_element(self, run_elem, rPr) -> str:
+        """
+        Extract text from a single run element with superscript/subscript markup.
+        
+        This matches parse_document.py's extract_text_from_run() behavior to ensure
+        violation_text from LLM matches the text extracted during apply phase.
+        
+        Superscript/subscript detection:
+        - Check w:rPr/w:vertAlign[@w:val="superscript|subscript"]
+        - Wrap text with <sup>...</sup> or <sub>...</sub> markup
+        
+        Args:
+            run_elem: The w:r run element to extract text from
+            rPr: Pre-fetched w:rPr element (may be None)
+        
+        Returns:
+            Extracted text with superscript/subscript markup if applicable
+        """
+        # Check for vertical alignment (superscript/subscript)
+        vert_align = None
+        if rPr is not None:
+            vert_align_elem = rPr.find('w:vertAlign', NS)
+            if vert_align_elem is not None:
+                vert_align = vert_align_elem.get(f'{{{NS["w"]}}}val')
+        
+        # Extract text content from run
+        text_parts = []
+        for elem in run_elem:
+            if elem.tag == f'{{{NS["w"]}}}t':
+                text = elem.text or ''
+                if text:
+                    text_parts.append(text)
+            elif elem.tag == f'{{{NS["w"]}}}delText':
+                # For deleted text in revision markup
+                text = elem.text or ''
+                if text:
+                    text_parts.append(text)
+            elif elem.tag == f'{{{NS["w"]}}}tab':
+                text_parts.append('\t')
+            elif elem.tag == f'{{{NS["w"]}}}br':
+                # Handle line breaks - textWrapping or no type = soft line break
+                br_type = elem.get(f'{{{NS["w"]}}}type')
+                if br_type in (None, 'textWrapping'):
+                    text_parts.append('\n')
+                # Skip page and column breaks (layout elements)
+        
+        combined_text = ''.join(text_parts)
+        
+        # Apply superscript/subscript markup
+        if combined_text and vert_align in ('superscript', 'subscript'):
+            if vert_align == 'superscript':
+                return f'<sup>{combined_text}</sup>'
+            else:  # subscript
+                return f'<sub>{combined_text}</sub>'
+        
+        return combined_text
+
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
         Collect run info representing ORIGINAL text (before track changes).
@@ -1355,11 +1412,12 @@ class AuditEditApplier:
         - Include: <w:delText> in <w:del> elements (deleted text was part of original)
         - Include: Normal <w:t>, <w:tab>, <w:br> NOT inside <w:ins> or <w:del> elements
         - Exclude: <w:t> inside <w:ins> elements (inserted text didn't exist in original)
+        - Superscript/subscript: Wrapped with <sup>/<sub> tags for LLM matching
         
         Returns:
             Tuple of (runs_info, combined_text)
             runs_info: [{'text': str, 'start': int, 'end': int}, ...]
-            combined_text: Full text string
+            combined_text: Full text string with <sup>/<sub> markup
         """
         runs_info = []
         pos = 0
@@ -1370,41 +1428,19 @@ class AuditEditApplier:
                 # Deleted text = part of original document
                 for run in child.findall('.//w:r', NS):
                     rPr = run.find('w:rPr', NS)
-                    # Look for w:delText, w:tab, w:br elements
-                    for elem in run:
-                        if elem.tag == f'{{{NS["w"]}}}delText':
-                            text = elem.text or ''
-                            if text:
-                                runs_info.append({
-                                    'text': text,
-                                    'start': pos,
-                                    'end': pos + len(text),
-                                    'elem': run,
-                                    'rPr': rPr
-                                })
-                                pos += len(text)
-                        elif elem.tag == f'{{{NS["w"]}}}tab':
-                            runs_info.append({
-                                'text': '\t',
-                                'start': pos,
-                                'end': pos + 1,
-                                'elem': run,
-                                'rPr': rPr
-                            })
-                            pos += 1
-                        elif elem.tag == f'{{{NS["w"]}}}br':
-                            # Handle line breaks - textWrapping or no type = soft line break
-                            br_type = elem.get(f'{{{NS["w"]}}}type')
-                            if br_type in (None, 'textWrapping'):
-                                runs_info.append({
-                                    'text': '\n',
-                                    'start': pos,
-                                    'end': pos + 1,
-                                    'elem': run,
-                                    'rPr': rPr
-                                })
-                                pos += 1
-                            # Skip page and column breaks (layout elements)
+                    
+                    # Extract text with superscript/subscript markup
+                    text = self._extract_text_from_run_element(run, rPr)
+                    
+                    if text:
+                        runs_info.append({
+                            'text': text,
+                            'start': pos,
+                            'end': pos + len(text),
+                            'elem': run,
+                            'rPr': rPr
+                        })
+                        pos += len(text)
                             
             elif child.tag == f'{{{NS["w"]}}}ins':
                 # Inserted text = NOT part of original, skip completely
@@ -1413,58 +1449,40 @@ class AuditEditApplier:
             elif child.tag == f'{{{NS["w"]}}}r':
                 # Normal run (not in revision markup)
                 rPr = child.find('w:rPr', NS)
-                for elem in child:
-                    if elem.tag == f'{{{NS["w"]}}}t':
-                        text = elem.text or ''
-                        if text:
+                
+                # Check for drawing (inline images)
+                drawing_elem = child.find(f'{{{NS["w"]}}}drawing')
+                if drawing_elem is not None:
+                    inline = drawing_elem.find(f'{{{NS["wp"]}}}inline')
+                    if inline is not None:
+                        doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
+                        if doc_pr is not None:
+                            img_id = doc_pr.get('id', '')
+                            img_name = doc_pr.get('name', '')
+                            img_str = f'<drawing id="{img_id}" name="{img_name}" />'
                             runs_info.append({
-                                'text': text,
+                                'text': img_str,
                                 'start': pos,
-                                'end': pos + len(text),
+                                'end': pos + len(img_str),
                                 'elem': child,
-                                'rPr': rPr
+                                'rPr': rPr,
+                                'is_drawing': True
                             })
-                            pos += len(text)
-                    elif elem.tag == f'{{{NS["w"]}}}tab':
-                        runs_info.append({
-                            'text': '\t',
-                            'start': pos,
-                            'end': pos + 1,
-                            'elem': child,
-                            'rPr': rPr
-                        })
-                        pos += 1
-                    elif elem.tag == f'{{{NS["w"]}}}br':
-                        # Handle line breaks - textWrapping or no type = soft line break
-                        br_type = elem.get(f'{{{NS["w"]}}}type')
-                        if br_type in (None, 'textWrapping'):
-                            runs_info.append({
-                                'text': '\n',
-                                'start': pos,
-                                'end': pos + 1,
-                                'elem': child,
-                                'rPr': rPr
-                            })
-                            pos += 1
-                        # Skip page and column breaks (layout elements)
-                    elif elem.tag == f'{{{NS["w"]}}}drawing':
-                        # Handle inline images (ignore floating/anchor images)
-                        inline = elem.find(f'{{{NS["wp"]}}}inline')
-                        if inline is not None:
-                            doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
-                            if doc_pr is not None:
-                                img_id = doc_pr.get('id', '')
-                                img_name = doc_pr.get('name', '')
-                                img_str = f'<drawing id="{img_id}" name="{img_name}" />'
-                                runs_info.append({
-                                    'text': img_str,
-                                    'start': pos,
-                                    'end': pos + len(img_str),
-                                    'elem': child,
-                                    'rPr': rPr,
-                                    'is_drawing': True
-                                })
-                                pos += len(img_str)
+                            pos += len(img_str)
+                            continue  # Skip text extraction for image runs
+                
+                # Extract text with superscript/subscript markup
+                text = self._extract_text_from_run_element(child, rPr)
+                
+                if text:
+                    runs_info.append({
+                        'text': text,
+                        'start': pos,
+                        'end': pos + len(text),
+                        'elem': child,
+                        'rPr': rPr
+                    })
+                    pos += len(text)
         
         combined_text = ''.join(r['text'] for r in runs_info)
         return runs_info, combined_text
@@ -1689,10 +1707,129 @@ class AuditEditApplier:
             .replace('>', '&gt;')
             .replace('"', '&quot;'))
     
+    def _parse_formatted_text(self, text: str) -> List[Tuple[str, Optional[str]]]:
+        """
+        Parse text with <sup>/<sub> markup into segments with format info.
+        
+        This function splits text containing superscript/subscript markup into
+        segments, each with its associated vertical alignment type.
+        
+        Args:
+            text: Text possibly containing <sup>...</sup> or <sub>...</sub> markup
+        
+        Returns:
+            List of (text_content, vert_align) tuples where:
+            - text_content: The actual text without markup tags
+            - vert_align: 'superscript' | 'subscript' | None
+        
+        Examples:
+            "x<sup>2</sup>" -> [("x", None), ("2", "superscript")]
+            "H<sub>2</sub>O" -> [("H", None), ("2", "subscript"), ("O", None)]
+            "normal text" -> [("normal text", None)]
+        """
+        if '<sup>' not in text and '<sub>' not in text:
+            # Fast path: no markup
+            return [(text, None)]
+        
+        segments = []
+        pos = 0
+        
+        # Pattern to match <sup>...</sup> or <sub>...</sub>
+        # Non-greedy match to handle multiple tags correctly
+        pattern = re.compile(r'<(sup|sub)>(.*?)</\1>', re.DOTALL)
+        
+        for match in pattern.finditer(text):
+            # Add text before this tag (if any)
+            if match.start() > pos:
+                segments.append((text[pos:match.start()], None))
+            
+            # Add the tagged content
+            tag_type = match.group(1)  # 'sup' or 'sub'
+            tag_content = match.group(2)
+            vert_align = 'superscript' if tag_type == 'sup' else 'subscript'
+            segments.append((tag_content, vert_align))
+            
+            pos = match.end()
+        
+        # Add remaining text after last tag (if any)
+        if pos < len(text):
+            segments.append((text[pos:], None))
+        
+        return segments
+    
     def _create_run(self, text: str, rPr_xml: str = '') -> etree.Element:
-        """Create a new w:r element with text"""
-        run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
-        return etree.fromstring(run_xml)
+        """
+        Create new w:r element(s) with text, supporting <sup>/<sub> markup.
+        
+        If text contains superscript/subscript markup, returns a document fragment
+        with multiple runs (each with appropriate w:vertAlign in w:rPr).
+        
+        Args:
+            text: Text to insert, may contain <sup>...</sup> or <sub>...</sub>
+            rPr_xml: Base run properties XML (will be modified to add w:vertAlign)
+        
+        Returns:
+            Single w:r element or document fragment containing multiple w:r elements
+        """
+        segments = self._parse_formatted_text(text)
+        
+        if len(segments) == 1 and segments[0][1] is None:
+            # Simple case: no formatting, return single run
+            run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
+            return etree.fromstring(run_xml)
+        
+        # Complex case: need multiple runs with different formatting
+        # Parse base rPr to potentially modify it
+        if rPr_xml:
+            # Check if rPr_xml is already a complete <w:rPr> element
+            # _get_rPr_xml() returns the full element, so parse it directly
+            if rPr_xml.strip().startswith('<w:rPr') or rPr_xml.strip().startswith('<rPr'):
+                # Already a complete element, parse directly
+                base_rPr = etree.fromstring(rPr_xml)
+            else:
+                # Just inner content, wrap in <w:rPr>
+                base_rPr = etree.fromstring(f'<w:rPr xmlns:w="{NS["w"]}">{rPr_xml}</w:rPr>')
+        else:
+            base_rPr = None
+        
+        # Create a container for multiple runs
+        container = etree.Element('container')
+        
+        for segment_text, vert_align in segments:
+            if not segment_text:
+                continue  # Skip empty segments
+            
+            # Start with a copy of base rPr
+            if base_rPr is not None:
+                run_rPr = etree.fromstring(etree.tostring(base_rPr, encoding='unicode'))
+            else:
+                run_rPr = etree.Element(f'{{{NS["w"]}}}rPr')
+            
+            # Add or update w:vertAlign if needed
+            if vert_align:
+                # Remove existing w:vertAlign if present
+                for existing in run_rPr.findall('w:vertAlign', NS):
+                    run_rPr.remove(existing)
+                
+                # Add new w:vertAlign
+                vert_align_elem = etree.SubElement(run_rPr, f'{{{NS["w"]}}}vertAlign')
+                vert_align_elem.set(f'{{{NS["w"]}}}val', vert_align)
+            
+            # Create run with modified rPr
+            run = etree.Element(f'{{{NS["w"]}}}r')
+            run.append(run_rPr)
+            
+            t_elem = etree.SubElement(run, f'{{{NS["w"]}}}t')
+            t_elem.text = segment_text
+            
+            container.append(run)
+        
+        # If only one run was created, return it directly
+        if len(container) == 1:
+            return container[0]
+        
+        # Otherwise return the container (caller will need to extract children)
+        return container
     
     def _replace_runs(self, _para_elem, affected_runs: List[Dict],
                      new_elements: List[etree.Element]):
@@ -1838,7 +1975,11 @@ class AuditEditApplier:
 
         # Before text (unchanged)
         if before_text:
-            new_elements.append(self._create_run(before_text, rPr_xml))
+            run_or_container = self._create_run(before_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         # Comment range start (before deleted text)
         comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
@@ -1868,7 +2009,11 @@ class AuditEditApplier:
 
         # After text (unchanged)
         if after_text:
-            new_elements.append(self._create_run(after_text, rPr_xml))
+            run_or_container = self._create_run(after_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         self._replace_runs(para_elem, real_runs, new_elements)
 
@@ -1973,7 +2118,11 @@ class AuditEditApplier:
 
         # Before text (unchanged part before the match)
         if before_text:
-            new_elements.append(self._create_run(before_text, rPr_xml))
+            run_or_container = self._create_run(before_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         # Comment range start (before replaced text)
         comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
@@ -2022,12 +2171,20 @@ class AuditEditApplier:
                                 if escaped_start == 0 and escaped_end == len(escaped_text):
                                     new_elements.append(copy.deepcopy(eq_run['elem']))
                             elif portion:
-                                new_elements.append(self._create_run(portion, rPr_xml))
+                                run_or_container = self._create_run(portion, rPr_xml)
+                                if run_or_container.tag == 'container':
+                                    new_elements.extend(list(run_or_container))
+                                else:
+                                    new_elements.append(run_or_container)
                 else:
                     # No runs found, create text directly
                     # Decode if in table mode
                     equal_text = self._decode_json_escaped(text) if is_table_mode else text
-                    new_elements.append(self._create_run(equal_text, rPr_xml))
+                    run_or_container = self._create_run(equal_text, rPr_xml)
+                    if run_or_container.tag == 'container':
+                        new_elements.extend(list(run_or_container))
+                    else:
+                        new_elements.append(run_or_container)
 
                 violation_pos += len(text)
 
@@ -2063,7 +2220,11 @@ class AuditEditApplier:
 
         # After text (unchanged part after the match)
         if after_text:
-            new_elements.append(self._create_run(after_text, rPr_xml))
+            run_or_container = self._create_run(after_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         # Single DOM operation to replace all real runs (not boundary markers)
         self._replace_runs(para_elem, real_runs, new_elements)
@@ -2266,9 +2427,15 @@ class AuditEditApplier:
             
             if before_text:
                 # Need to split: create run for before_text, insert before first_run
-                before_run = self._create_run(before_text, rPr_xml)
-                parent.insert(idx, before_run)
-                idx += 1
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    # Unwrap container: insert each child run
+                    for child_run in run_or_container:
+                        parent.insert(idx, child_run)
+                        idx += 1
+                else:
+                    parent.insert(idx, run_or_container)
+                    idx += 1
                 
                 # Update first_run's text content (remove before_text portion)
                 t_elem = first_run.find('w:t', NS)
@@ -2311,8 +2478,15 @@ class AuditEditApplier:
                 # Insert commentReference after range_end
                 parent.insert(idx + 2, comment_ref)
                 # Create after_run and insert after comment_ref
-                after_run = self._create_run(after_text, rPr_xml)
-                parent.insert(idx + 3, after_run)
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    # Unwrap container: insert each child run
+                    insert_pos = idx + 3
+                    for child_run in run_or_container:
+                        parent.insert(insert_pos, child_run)
+                        insert_pos += 1
+                else:
+                    parent.insert(idx + 3, run_or_container)
             else:
                 # No split needed: insert commentRangeEnd and reference after last_run
                 parent.insert(idx + 1, range_end)
