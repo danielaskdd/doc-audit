@@ -595,6 +595,16 @@ class AuditEditApplier:
             cell_normalized = self._normalize_text_for_search(cell_text)
             match_pos = cell_normalized.find(violation_text)
             
+            # Fallback: If violation_text contains \\n literal (LLM didn't decode JSON escape),
+            # try converting to real newline
+            if match_pos == -1 and '\\n' in violation_text:
+                normalized_violation = violation_text.replace('\\n', '\n')
+                match_pos = cell_normalized.find(normalized_violation)
+                if match_pos != -1:
+                    violation_text = normalized_violation
+                    if self.verbose:
+                        print(f"  [Fallback] Matched after converting \\\\n to real newline")
+            
             if match_pos != -1:
                 # Found! Return match info
                 if self.verbose:
