@@ -1344,14 +1344,18 @@ class AuditEditApplier:
                             })
                             pos += 1
                         elif elem.tag == f'{{{NS["w"]}}}br':
-                            runs_info.append({
-                                'text': '\n',
-                                'start': pos,
-                                'end': pos + 1,
-                                'elem': run,
-                                'rPr': rPr
-                            })
-                            pos += 1
+                            # Handle line breaks - textWrapping or no type = soft line break
+                            br_type = elem.get(f'{{{NS["w"]}}}type')
+                            if br_type in (None, 'textWrapping'):
+                                runs_info.append({
+                                    'text': '\n',
+                                    'start': pos,
+                                    'end': pos + 1,
+                                    'elem': run,
+                                    'rPr': rPr
+                                })
+                                pos += 1
+                            # Skip page and column breaks (layout elements)
                             
             elif child.tag == f'{{{NS["w"]}}}ins':
                 # Inserted text = NOT part of original, skip completely
@@ -1382,14 +1386,18 @@ class AuditEditApplier:
                         })
                         pos += 1
                     elif elem.tag == f'{{{NS["w"]}}}br':
-                        runs_info.append({
-                            'text': '\n',
-                            'start': pos,
-                            'end': pos + 1,
-                            'elem': child,
-                            'rPr': rPr
-                        })
-                        pos += 1
+                        # Handle line breaks - textWrapping or no type = soft line break
+                        br_type = elem.get(f'{{{NS["w"]}}}type')
+                        if br_type in (None, 'textWrapping'):
+                            runs_info.append({
+                                'text': '\n',
+                                'start': pos,
+                                'end': pos + 1,
+                                'elem': child,
+                                'rPr': rPr
+                            })
+                            pos += 1
+                        # Skip page and column breaks (layout elements)
                     elif elem.tag == f'{{{NS["w"]}}}drawing':
                         # Handle inline images (ignore floating/anchor images)
                         inline = elem.find(f'{{{NS["wp"]}}}inline')

@@ -146,6 +146,8 @@ class TableExtractor:
                                     tag = child.tag.split('}')[-1]
                                     if tag == 't' and child.text:
                                         para_text += child.text
+                                    elif tag == 'tab':
+                                        para_text += '\t'
                                     elif tag == 'br':
                                         # Handle line breaks - textWrapping or no type = soft line break
                                         br_type = child.get(qn('w:type'))
@@ -194,6 +196,8 @@ class TableExtractor:
                                     tag = child.tag.split('}')[-1]
                                     if tag == 't' and child.text:
                                         para_text += child.text
+                                    elif tag == 'tab':
+                                        para_text += '\t'
                                     elif tag == 'br':
                                         # Handle line breaks - textWrapping or no type = soft line break
                                         br_type = child.get(qn('w:type'))

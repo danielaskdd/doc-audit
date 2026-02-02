@@ -1185,6 +1185,8 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
                     tag = child.tag.split('}')[-1]  # Remove namespace
                     if tag == 't' and child.text:
                         para_text += child.text
+                    elif tag == 'tab':
+                        para_text += '\t'
                     elif tag == 'br':
                         # Handle line breaks - textWrapping or no type = soft line break
                         br_type = child.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}type')
