@@ -593,6 +593,10 @@ class AuditEditApplier:
             # Collect runs for this paragraph
             para_runs, para_text = self._collect_runs_info_original(para)
 
+            # Skip empty paragraphs to match parse_document.py behavior
+            if not para_text.strip():
+                continue
+
             # Add paragraph element reference to each run
             for run in para_runs:
                 run['para_elem'] = para
@@ -1043,6 +1047,255 @@ class AuditEditApplier:
             if row is not None:
                 rows.add(id(row))
         return len(rows) > 1
+
+    def _try_extract_single_cell_edit(self, violation_text: str, revised_text: str,
+                                       affected_runs: List[Dict], match_start: int) -> Optional[Dict]:
+        """
+        Try to extract single-cell edit when text spans multiple cells.
+
+        This method analyzes the diff between violation_text and revised_text to
+        determine if all changes are confined to a single table cell. If so, it
+        extracts the cell-specific violation and revised text.
+
+        Args:
+            violation_text: Original violation text (may span multiple cells)
+            revised_text: Revised text (may span multiple cells)
+            affected_runs: List of run info dicts that would be affected
+            match_start: Absolute position where violation_text starts in document
+
+        Returns:
+            Dict with keys: 'cell_violation', 'cell_revised', 'cell_elem', 'cell_runs'
+            Or None if changes span multiple cells
+        """
+        if self.verbose:
+            print(f"  [Debug] _try_extract_single_cell_edit called")
+            print(f"  [Debug]   violation_text: {violation_text[:100]}...")
+            print(f"  [Debug]   revised_text: {revised_text[:100]}...")
+            print(f"  [Debug]   affected_runs count: {len(affected_runs)}")
+        
+        # Calculate diff to find changed positions
+        diff_ops = self._calculate_diff(violation_text, revised_text)
+        
+        if self.verbose:
+            print(f"  [Debug] Diff operations:")
+            for i, (op, text) in enumerate(diff_ops):
+                print(f"  [Debug]   {i}: {op} - {text[:50]}...")
+        
+        # Track positions of all changes (delete/insert operations)
+        change_positions = []
+        current_pos = 0
+        
+        for op, text in diff_ops:
+            if op == 'delete':
+                # Record the position range of deleted text
+                change_positions.append((current_pos, current_pos + len(text)))
+                current_pos += len(text)
+            elif op == 'insert':
+                # Record the insertion point (zero-length range)
+                change_positions.append((current_pos, current_pos))
+                # insert doesn't consume original text position
+            elif op == 'equal':
+                current_pos += len(text)
+        
+        if self.verbose:
+            print(f"  [Debug] Change positions: {change_positions}")
+        
+        if not change_positions:
+            # No changes detected
+            if self.verbose:
+                print(f"  [Debug] No changes detected - returning None")
+            return None
+        
+        # Find the cell(s) containing all changes
+        cells_with_changes = set()
+        
+        # Use match_start as base offset for coordinate translation
+        # change_positions are relative to violation_text (0-based)
+        # match_start is the absolute position where violation_text starts in document
+        base_offset = match_start
+        
+        if self.verbose:
+            print(f"  [Debug] Base offset (match_start): {base_offset}")
+        
+        for change_idx, (change_start_rel, change_end_rel) in enumerate(change_positions):
+            # Translate relative positions to absolute positions
+            change_start = base_offset + change_start_rel
+            change_end = base_offset + change_end_rel
+            
+            if self.verbose:
+                print(f"  [Debug] Analyzing change {change_idx}:")
+                print(f"  [Debug]   Relative pos: {change_start_rel}-{change_end_rel}")
+                print(f"  [Debug]   Absolute pos: {change_start}-{change_end}")
+            
+            # Determine if this is an insert (zero-length) or delete operation
+            is_insert = (change_start == change_end)
+            if self.verbose:
+                print(f"  [Debug]   Operation type: {'insert' if is_insert else 'delete'}")
+            
+            # Find runs affected by this change
+            change_run_count = 0
+            if self.verbose:
+                print(f"  [Debug]   Examining {len(affected_runs)} affected_runs:")
+            
+            for run_idx, run in enumerate(affected_runs):
+                if self.verbose:
+                    # Print info about every run for debugging
+                    run_text = run.get('text', '')
+                    print(f"  [Debug]     Run {run_idx}: [{run['start']}-{run['end']}] text='{run_text[:20]}...'")
+                    print(f"  [Debug]       is_json_boundary={run.get('is_json_boundary', False)}, "
+                          f"is_json_escape={run.get('is_json_escape', False)}, "
+                          f"is_para_boundary={run.get('is_para_boundary', False)}")
+                
+                # Skip synthetic boundary markers
+                if (run.get('is_json_boundary') or 
+                    run.get('is_json_escape') or 
+                    run.get('is_para_boundary')):
+                    if self.verbose:
+                        print(f"  [Debug]       → Skipped (synthetic marker)")
+                    continue
+                
+                # Check if this run is affected by the change (using absolute positions)
+                is_affected = False
+                if is_insert:
+                    # Insert operation: check if insertion point is within run boundaries
+                    # A run contains the insertion point if start <= pos <= end
+                    if run['start'] <= change_start <= run['end']:
+                        is_affected = True
+                        if self.verbose:
+                            print(f"  [Debug]       → Affected by insert at absolute pos {change_start}")
+                else:
+                    # Delete operation: check if run overlaps with the deletion range
+                    if run['end'] > change_start and run['start'] < change_end:
+                        is_affected = True
+                        if self.verbose:
+                            print(f"  [Debug]       → Affected by delete range {change_start}-{change_end}")
+                
+                if is_affected:
+                    change_run_count += 1
+                    cell = run.get('cell_elem')
+                    if self.verbose:
+                        print(f"  [Debug]       → cell_elem: {cell is not None}")
+                    if cell is not None:
+                        cells_with_changes.add(id(cell))
+                elif self.verbose:
+                    print(f"  [Debug]       → Not affected (position check failed)")
+            
+            if self.verbose:
+                print(f"  [Debug]   Change {change_idx} affected {change_run_count} runs")
+        
+        if self.verbose:
+            print(f"  [Debug] cells_with_changes count: {len(cells_with_changes)}")
+        
+        if len(cells_with_changes) != 1:
+            # Changes span multiple cells or no cell found
+            if self.verbose:
+                print(f"  [Debug] Changes span {len(cells_with_changes)} cells - returning None")
+            return None
+        
+        # All changes are in a single cell - extract cell-specific content
+        # Find the target cell element
+        target_cell_id = next(iter(cells_with_changes))
+        target_cell = None
+        cell_runs = []
+        
+        for run in affected_runs:
+            if run.get('is_json_boundary') or run.get('is_json_escape') or run.get('is_para_boundary'):
+                continue
+            cell = run.get('cell_elem')
+            if cell is not None and id(cell) == target_cell_id:
+                target_cell = cell
+                cell_runs.append(run)
+        
+        if self.verbose:
+            print(f"  [Debug] Found {len(cell_runs)} runs in target cell")
+        
+        if target_cell is None or not cell_runs:
+            if self.verbose:
+                print(f"  [Debug] No target cell or cell runs - returning None")
+            return None
+        
+        # Extract the portion of violation_text and revised_text within this cell
+        cell_start = min(r['start'] for r in cell_runs)
+        cell_end = max(r['end'] for r in cell_runs)
+        
+        if self.verbose:
+            print(f"  [Debug] Cell text range: {cell_start}-{cell_end}")
+        
+        # Convert absolute positions to relative offsets within violation_text
+        # cell_start/cell_end are absolute positions in combined_text
+        # violation_text starts at match_start, so we need relative offsets
+        relative_start = cell_start - match_start
+        relative_end = cell_end - match_start
+        
+        if self.verbose:
+            print(f"  [Debug] Relative offsets: {relative_start}-{relative_end}")
+        
+        # Extract cell_violation using relative offsets
+        # Account for JSON escaping if in table mode
+        if self._is_table_mode(affected_runs):
+            cell_violation_escaped = violation_text[relative_start:relative_end]
+            cell_violation = self._decode_json_escaped(cell_violation_escaped)
+            
+            if self.verbose:
+                print(f"  [Debug] Table mode - extracting cell_violation")
+                print(f"  [Debug]   cell_violation_escaped: {cell_violation_escaped[:50]}...")
+                print(f"  [Debug]   cell_violation (decoded): {cell_violation[:50]}...")
+        else:
+            cell_violation = violation_text[relative_start:relative_end]
+            
+            if self.verbose:
+                print(f"  [Debug] Non-table mode - extracted cell_violation: {cell_violation[:50]}...")
+        
+        # Build cell_revised by applying diff operations to cell_violation
+        # This handles cases where insertion/deletion changes text length
+        cell_revised = cell_violation
+        
+        # Apply diff operations that fall within the cell range
+        violation_pos = 0
+        revised_accumulator = ''
+        
+        for op, text in diff_ops:
+            if op == 'equal':
+                chunk_start = violation_pos
+                chunk_end = violation_pos + len(text)
+                
+                # Check if this chunk overlaps with cell range [relative_start, relative_end)
+                if chunk_end > relative_start and chunk_start < relative_end:
+                    # Calculate overlap
+                    overlap_start = max(0, relative_start - chunk_start)
+                    overlap_end = min(len(text), relative_end - chunk_start)
+                    revised_accumulator += text[overlap_start:overlap_end]
+                
+                violation_pos += len(text)
+            
+            elif op == 'delete':
+                chunk_start = violation_pos
+                chunk_end = violation_pos + len(text)
+                
+                # Skip deleted text if it falls within cell range
+                # (already handled by not including it in revised_accumulator)
+                violation_pos += len(text)
+            
+            elif op == 'insert':
+                # Insert operations don't have a position in violation_text
+                # Check if insertion point is within cell range
+                if relative_start <= violation_pos < relative_end:
+                    revised_accumulator += text
+        
+        cell_revised = revised_accumulator if revised_accumulator else cell_violation
+        
+        if self.verbose:
+            print(f"  [Debug] Built cell_revised from diff: {cell_revised[:50]}...")
+        
+        if self.verbose:
+            print(f"  [Debug] Successfully extracted single-cell edit - returning result")
+        
+        return {
+            'cell_violation': cell_violation,
+            'cell_revised': cell_revised,
+            'cell_elem': target_cell,
+            'cell_runs': cell_runs
+        }
 
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
@@ -2265,38 +2518,192 @@ class AuditEditApplier:
             if target_para is None:
                 # Check if we have a boundary error from table/row crossing
                 if boundary_error:
-                    reason = ""
+                    # Special handling for boundary_crossed: try searching in tables first
                     if boundary_error == 'boundary_crossed':
-                        reason = "Text crosses body/table boundary (not supported)"
-                    elif boundary_error == 'row_boundary_crossed':
-                        reason = "Text crosses table row boundary (Word doesn't support cross-row comments)"
+                        if self.verbose:
+                            print(f"  [Boundary] boundary_crossed detected, trying table search...")
+                        
+                        # Find all tables in range
+                        tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
+                        
+                        # Try searching raw text in each table cell
+                        for table_elem in tables_in_range:
+                            # Iterate all cells in this table
+                            for tc in table_elem.iter(f'{{{NS["w"]}}}tc'):
+                                # Collect all paragraphs in this cell
+                                cell_paras = tc.findall(f'{{{NS["w"]}}}p')
+                                if not cell_paras:
+                                    continue
+                                
+                                # Build cell's raw text content (with \n between paragraphs)
+                                cell_text_parts = []
+                                cell_para_runs_map = {}  # Map from para to runs_info
+                                
+                                for cell_para in cell_paras:
+                                    para_runs, para_text = self._collect_runs_info_original(cell_para)
+                                    cell_text_parts.append(para_text)
+                                    cell_para_runs_map[id(cell_para)] = (para_runs, para_text)
+                                
+                                # Join with \n (actual newline, not JSON-escaped)
+                                cell_combined_text = '\n'.join(cell_text_parts)
+                                
+                                # Search for violation_text in cell's raw text
+                                pos = cell_combined_text.find(violation_text)
+                                if pos != -1:
+                                    # Found match in this cell!
+                                    if self.verbose:
+                                        print(f"  [Success] Found in table cell (raw text match)")
+                                    
+                                    # Determine which paragraph(s) contain the match
+                                    # For simplicity, if match is within first paragraph, use it
+                                    # Otherwise, this is a cross-paragraph match within the cell
+                                    current_offset = 0
+                                    matched_para = None
+                                    matched_para_runs = None
+                                    matched_para_start = -1
+                                    
+                                    for cell_para in cell_paras:
+                                        para_id_obj = id(cell_para)
+                                        if para_id_obj not in cell_para_runs_map:
+                                            continue
+                                        
+                                        para_runs, para_text = cell_para_runs_map[para_id_obj]
+                                        para_len = len(para_text)
+                                        
+                                        # Check if match starts in this paragraph
+                                        if current_offset <= pos < current_offset + para_len:
+                                            matched_para = cell_para
+                                            matched_para_runs = para_runs
+                                            matched_para_start = pos - current_offset
+                                            break
+                                        
+                                        current_offset += para_len + 1  # +1 for \n separator
+                                    
+                                    if matched_para is not None:
+                                        # Use the matched paragraph
+                                        target_para = matched_para
+                                        matched_runs_info = matched_para_runs
+                                        matched_start = matched_para_start
+                                        is_cross_paragraph = False  # Single para in cell
+                                        break
+                            
+                            # If found, break table loop
+                            if target_para is not None:
+                                break
+                    
+                    # If still not found after table search, try body text search
+                    if target_para is None:
+                        if self.verbose:
+                            print(f"  [Boundary] Table search failed, trying body text...")
+                        
+                        # Collect ALL body paragraphs in range (skip table paragraphs)
+                        body_paras_data = []
+                        
+                        for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
+                            # Skip table paragraphs, continue collecting body paragraphs
+                            if self._is_paragraph_in_table(para):
+                                continue  # Skip table paragraphs instead of breaking
+                            para_runs, para_text = self._collect_runs_info_original(para)
+                            # Skip empty paragraphs to match parse_document.py behavior
+                            if not para_text.strip():
+                                continue
+                            body_paras_data.append((para, para_runs, para_text))
+                        
+                        if body_paras_data:
+                            if self.verbose:
+                                print(f"  [Debug] Collected {len(body_paras_data)} body paragraphs before table")
+                            
+                            # Build combined text with \n separator (like _collect_runs_info_in_body)
+                            all_runs = []
+                            pos = 0
+                            
+                            for i, (para, para_runs, para_text) in enumerate(body_paras_data):
+                                # Add paragraph runs with updated positions
+                                for run in para_runs:
+                                    run_copy = dict(run)
+                                    run_copy['para_elem'] = para
+                                    run_copy['start'] = run['start'] + pos
+                                    run_copy['end'] = run['end'] + pos
+                                    all_runs.append(run_copy)
+                                
+                                pos += len(para_text)
+                                
+                                # Add paragraph boundary (except after last)
+                                if i < len(body_paras_data) - 1:
+                                    all_runs.append({
+                                        'text': '\n',
+                                        'start': pos,
+                                        'end': pos + 1,
+                                        'para_elem': para,
+                                        'is_para_boundary': True
+                                    })
+                                    pos += 1
+                            
+                            combined_body_text = ''.join(r['text'] for r in all_runs)
+                            
+                            if self.verbose:
+                                print(f"  [Debug] Combined body text length: {len(combined_body_text)}")
+                                print(f"  [Debug] Combined text preview: '{combined_body_text[:100]}...'")
+                                print(f"  [Debug] violation_text length: {len(violation_text)}")
+                                print(f"  [Debug] violation_text preview: '{violation_text[:100]}...'")
+                            
+                            # Search in combined body text
+                            match_pos = combined_body_text.find(violation_text)
+                            
+                            if self.verbose:
+                                print(f"  [Debug] Search result: match_pos = {match_pos}")
+                            
+                            if match_pos != -1:
+                                target_para = body_paras_data[0][0]  # Use first para as anchor
+                                matched_runs_info = all_runs
+                                matched_start = match_pos
+                                is_cross_paragraph = len(body_paras_data) > 1
+                                if self.verbose:
+                                    if is_cross_paragraph:
+                                        print(f"  [Success] Found in body text (cross-paragraph, {len(body_paras_data)} paragraphs)")
+                                    else:
+                                        print(f"  [Success] Found in body text (single paragraph)")
+                        else:
+                            if self.verbose:
+                                print(f"  [Debug] No body paragraphs collected (start para may be in table)")
+                    
+                    # If still not found after body text search, apply fallback
+                    if target_para is None:
+                        reason = ""
+                        if boundary_error == 'boundary_crossed':
+                            reason = "Text crosses body/table boundary (not supported)"
+                        elif boundary_error == 'row_boundary_crossed':
+                            reason = "Text crosses table row boundary (Word doesn't support cross-row comments)"
+                        else:
+                            reason = f"Boundary error: {boundary_error}"
+
+                        self._apply_fallback_comment(anchor_para, item, reason)
+                        if self.verbose:
+                            print(f"  [Boundary] {reason}")
+                        return EditResult(
+                            success=True,
+                            item=item,
+                            error_message=reason,
+                            warning=True
+                        )
+                
+                # Only proceed with fallback if target_para is still None
+                # (boundary_error handling may have found a match)
+                if target_para is None:
+                    # For manual fix_action, text not found is expected (not an error)
+                    if item.fix_action == 'manual':
+                        self._apply_error_comment(anchor_para, item)
+                        return EditResult(
+                            success=True,
+                            item=item,
+                            error_message="Target missing, comment on heading instead: ",
+                            warning=True
+                        )
                     else:
-                        reason = f"Boundary error: {boundary_error}"
-
-                    self._apply_fallback_comment(anchor_para, item, reason)
-                    if self.verbose:
-                        print(f"  [Boundary] {reason}")
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=reason,
-                        warning=True
-                    )
-
-                # For manual fix_action, text not found is expected (not an error)
-                if item.fix_action == 'manual':
-                    self._apply_error_comment(anchor_para, item)
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message="Target missing, comment on heading instead: ",
-                        warning=True
-                    )
-                else:
-                    # For delete/replace, text not found is an error
-                    self._apply_error_comment(anchor_para, item)
-                    return EditResult(False, item,
-                        f"Text not found after anchor: ")
+                        # For delete/replace, text not found is an error
+                        self._apply_error_comment(anchor_para, item)
+                        return EditResult(False, item,
+                            f"Text not found after anchor: ")
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching
@@ -2378,10 +2785,60 @@ class AuditEditApplier:
                         success_status = 'cross_row_fallback'
                     # Check if match spans multiple table cells (within same row)
                     elif self._check_cross_cell_boundary(real_runs):
-                        # Cross-cell replace not supported - fallback to comment
+                        # Try to extract single-cell edit
                         if self.verbose:
-                            print(f"  [Cross-cell] replace spans multiple cells, fallback to comment")
-                        success_status = 'cross_cell_fallback'
+                            print(f"  [Cross-cell] Detected cross-cell match, trying single-cell extraction...")
+                        
+                        single_cell = self._try_extract_single_cell_edit(
+                            violation_text, revised_text, affected, matched_start
+                        )
+                        
+                        if single_cell:
+                            # Successfully extracted single-cell edit - apply it
+                            if self.verbose:
+                                print(f"  [Single-cell] Extracted edit for single cell: '{single_cell['cell_violation'][:30]}...'")
+                            
+                            # Find the paragraph containing this cell
+                            cell_para = None
+                            for run in single_cell['cell_runs']:
+                                if run.get('para_elem') is not None:
+                                    cell_para = run['para_elem']
+                                    break
+                            
+                            if cell_para is not None:
+                                # Collect runs for this single cell only
+                                cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
+                                cell_pos = cell_text.find(single_cell['cell_violation'])
+                                
+                                if cell_pos != -1:
+                                    # Apply replace to the single cell
+                                    success_status = self._apply_replace(
+                                        cell_para,
+                                        single_cell['cell_violation'],
+                                        single_cell['cell_revised'],
+                                        item.violation_reason,
+                                        cell_runs_info,
+                                        cell_pos,
+                                        item_author
+                                    )
+                                    
+                                    if self.verbose and success_status == 'success':
+                                        print(f"  [Single-cell] Successfully applied track change to single cell")
+                                else:
+                                    # Fallback if we can't find the text in the cell
+                                    if self.verbose:
+                                        print(f"  [Single-cell] Could not locate extracted text in cell")
+                                    success_status = 'cross_cell_fallback'
+                            else:
+                                # Fallback if we can't find the paragraph
+                                if self.verbose:
+                                    print(f"  [Single-cell] Could not find paragraph for cell")
+                                success_status = 'cross_cell_fallback'
+                        else:
+                            # Changes span multiple cells - fallback to comment
+                            if self.verbose:
+                                print(f"  [Cross-cell] Changes span multiple cells, fallback to comment")
+                            success_status = 'cross_cell_fallback'
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
