@@ -2603,23 +2603,61 @@ class AuditEditApplier:
                     if target_para is None:
                         if self.verbose:
                             print(f"  [Boundary] Table search failed, trying body text...")
+                            print(f"  [Debug] uuid: {item.uuid}, uuid_end: {item.uuid_end}")
                         
-                        # Collect ALL body paragraphs in range (skip table paragraphs)
-                        body_paras_data = []
+                        # Collect ALL body paragraphs in range, grouped by continuity
+                        # This handles: table→body, body→table, and interleaved scenarios
+                        body_segments = []  # List of segments, each segment = [(para, runs, text), ...]
+                        current_segment = []
+                        para_count = 0
+                        skipped_table_paras = 0
+                        skipped_empty_paras = 0
                         
                         for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                            # Skip table paragraphs, continue collecting body paragraphs
+                            para_count += 1
+                            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            
                             if self._is_paragraph_in_table(para):
-                                continue  # Skip table paragraphs instead of breaking
+                                # Encountered table paragraph - end current body segment
+                                skipped_table_paras += 1
+                                if current_segment:
+                                    body_segments.append(current_segment)
+                                    current_segment = []
+                                continue
+                            
+                            # Body paragraph
                             para_runs, para_text = self._collect_runs_info_original(para)
                             # Skip empty paragraphs to match parse_document.py behavior
                             if not para_text.strip():
+                                skipped_empty_paras += 1
                                 continue
-                            body_paras_data.append((para, para_runs, para_text))
+                            
+                            # Debug: Check if this paragraph contains our target text
+                            if self.verbose and '贮存可靠性计算' in para_text:
+                                print(f"  [Debug] Found target paragraph! paraId={para_id}")
+                                print(f"  [Debug]   Text: '{para_text[:100]}...'")
+                            
+                            current_segment.append((para, para_runs, para_text))
                         
-                        if body_paras_data:
+                        # Don't forget the last segment
+                        if current_segment:
+                            body_segments.append(current_segment)
+                        
+                        if self.verbose:
+                            print(f"  [Debug] Iteration stats:")
+                            print(f"  [Debug]   Total paragraphs iterated: {para_count}")
+                            print(f"  [Debug]   Skipped (in table): {skipped_table_paras}")
+                            print(f"  [Debug]   Skipped (empty): {skipped_empty_paras}")
+                            print(f"  [Debug] Collected {len(body_segments)} body segment(s) in uuid range")
+                            total_paras = sum(len(seg) for seg in body_segments)
+                            print(f"  [Debug] Total body paragraphs: {total_paras}")
+                            print(f"  [Debug] violation_text to search: '{violation_text[:200]}...'")
+                            print(f"  [Debug] violation_text length: {len(violation_text)}")
+                        
+                        # Search in each body segment (try both original and stripped numbering)
+                        for segment_idx, body_paras_data in enumerate(body_segments):
                             if self.verbose:
-                                print(f"  [Debug] Collected {len(body_paras_data)} body paragraphs before table")
+                                print(f"  [Debug] Searching in segment {segment_idx + 1}/{len(body_segments)} ({len(body_paras_data)} paragraphs)")
                             
                             # Build combined text with \n separator (like _collect_runs_info_in_body)
                             all_runs = []
@@ -2650,32 +2688,56 @@ class AuditEditApplier:
                             combined_body_text = ''.join(r['text'] for r in all_runs)
                             
                             if self.verbose:
-                                print(f"  [Debug] Combined body text length: {len(combined_body_text)}")
-                                print(f"  [Debug] Combined text preview: '{combined_body_text[:100]}...'")
-                                print(f"  [Debug] violation_text length: {len(violation_text)}")
-                                print(f"  [Debug] violation_text preview: '{violation_text[:100]}...'")
+                                print(f"  [Debug] Segment {segment_idx + 1} combined text length: {len(combined_body_text)}")
+                                print(f"  [Debug] Segment {segment_idx + 1} text start: '{combined_body_text[:200]}...'")
+                                if len(combined_body_text) > 200:
+                                    print(f"  [Debug] Segment {segment_idx + 1} text end: '...{combined_body_text[-200:]}'")
                             
-                            # Search in combined body text
-                            match_pos = combined_body_text.find(violation_text)
+                            # Try multiple search patterns (original and stripped numbering)
+                            search_attempts = [(violation_text, False)]
+                            stripped_v, was_stripped = strip_auto_numbering(violation_text)
+                            if was_stripped:
+                                search_attempts.append((stripped_v, True))
                             
-                            if self.verbose:
-                                print(f"  [Debug] Search result: match_pos = {match_pos}")
+                            match_pos = -1
+                            matched_text = violation_text
+                            
+                            for search_text, is_stripped in search_attempts:
+                                if self.verbose and is_stripped:
+                                    print(f"  [Debug] Segment {segment_idx + 1} trying stripped: '{search_text[:100]}...'")
+                                
+                                match_pos = combined_body_text.find(search_text)
+                                
+                                if self.verbose:
+                                    print(f"  [Debug] Segment {segment_idx + 1} search result ({('stripped' if is_stripped else 'original')}): match_pos = {match_pos}")
+                                
+                                if match_pos != -1:
+                                    matched_text = search_text
+                                    if is_stripped and self.verbose:
+                                        print(f"  [Success] Match found after stripping auto-numbering")
+                                    break
                             
                             if match_pos != -1:
+                                # Found match in this segment!
                                 target_para = body_paras_data[0][0]  # Use first para as anchor
                                 matched_runs_info = all_runs
                                 matched_start = match_pos
                                 is_cross_paragraph = len(body_paras_data) > 1
+                                violation_text = matched_text  # Update violation_text to matched version
+                                numbering_stripped = (matched_text != item.violation_text.strip())
+                                
                                 if self.verbose:
+                                    print(f"  [Success] Found in body segment {segment_idx + 1}")
                                     if is_cross_paragraph:
-                                        print(f"  [Success] Found in body text (cross-paragraph, {len(body_paras_data)} paragraphs)")
+                                        print(f"  [Success] Cross-paragraph match ({len(body_paras_data)} paragraphs)")
                                     else:
-                                        print(f"  [Success] Found in body text (single paragraph)")
-                        else:
-                            if self.verbose:
-                                print(f"  [Debug] No body paragraphs collected (start para may be in table)")
+                                        print(f"  [Success] Single paragraph match")
+                                break  # Stop searching other segments
+                        
+                        if target_para is None and self.verbose:
+                            print(f"  [Debug] Not found in any body segment")
                     
-                    # If still not found after body text search, apply fallback
+                    # If still not found after segmented body text search, apply fallback
                     if target_para is None:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
