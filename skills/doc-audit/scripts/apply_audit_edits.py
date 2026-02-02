@@ -38,7 +38,7 @@ COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordproce
 COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 
 # Auto-numbering pattern for detecting and stripping list prefixes
-# Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", etc.
+# Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", "表1 ", "图2 ", etc.
 AUTO_NUMBERING_PATTERN = re.compile(
     r'^(?:'
     r'\d+(?:[\.\d)）]+)\s+'  # Numeric: 1. 1.1 1) 1）
@@ -46,7 +46,15 @@ AUTO_NUMBERING_PATTERN = re.compile(
     r'[a-zA-Z][.)）]\s+'     # Alphabetic: a. A) b）
     r'|'
     r'•\s*'                   # Bullet: • (optional space)
+    r'|'
+    r'[表图]\s*\d+\s*'        # Table/Figure: 表1 图2 表 3 图 4
     r')'
+)
+
+# Table row numbering pattern for detecting numeric first cell in JSON format
+# Matches: ["1", ["2", ["10", etc. (first cell is a number)
+TABLE_ROW_NUMBERING_PATTERN = re.compile(
+    r'^\["\d+",\s*'
 )
 
 # Drawing pattern for detecting inline image placeholders
@@ -137,6 +145,35 @@ def strip_auto_numbering(text: str) -> Tuple[str, bool]:
     match = AUTO_NUMBERING_PATTERN.match(text)
     if match:
         return text[match.end():], True
+    return text, False
+
+
+def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
+    """
+    Replaces leading table row numbering with empty string to match actual table structure.
+    
+    During parse phase, Word auto-numbering shows as "1", "2", "3" etc.
+    During apply phase, the same cells contain empty strings "" because auto-numbering
+    is not stored in the cell content. This function replaces the number with empty string
+    to align with the actual table structure.
+    
+    Args:
+        text: Text that may start with table row numbering pattern like '["1", '
+        
+    Returns:
+        Tuple of (processed_text, was_stripped):
+        - processed_text: Text with number replaced by "" if found, original otherwise
+        - was_stripped: True if numbering was replaced, False otherwise
+        
+    Examples:
+        '["1", "content"]' -> ('["", "content"]', True)
+        '["content"]' -> ('["content"]', False)
+    """
+    match = TABLE_ROW_NUMBERING_PATTERN.match(text)
+    if match:
+        # Replace row number with empty string to match actual table structure
+        # During parse: '["1", "content"]', during apply: '["", "content"]'
+        return '["", ' + text[match.end():], True
     return text, False
 
 # ============================================================
@@ -2156,45 +2193,74 @@ class AuditEditApplier:
                 # Find all tables in range
                 tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                 
-                for table_elem in tables_in_range:
-                    # Get the first and last paragraph in this table
-                    table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
-                    if not table_paras:
-                        continue
-                    
-                    first_table_para = table_paras[0]
-                    last_table_para = table_paras[-1]
-                    
-                    # Get their paraIds
-                    first_para_id = first_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                    last_para_id = last_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                    
-                    if not first_para_id or not last_para_id:
-                        continue
-                    
-                    # Collect table content in JSON format
-                    try:
-                        table_runs, table_text, _, _ = self._collect_runs_info_in_table(
-                            first_table_para, last_para_id, table_elem
-                        )
+                # Try with original violation_text first, then with row numbering stripped
+                search_attempts = [
+                    (violation_text, False),  # Original text, not stripped
+                ]
+                
+                # If violation_text starts with row number, add stripped version
+                stripped_table_text, was_stripped = strip_table_row_numbering(violation_text)
+                if was_stripped:
+                    search_attempts.append((stripped_table_text, True))
+                
+                for search_text, is_stripped in search_attempts:
+                    for table_elem in tables_in_range:
+                        # Get the first and last paragraph in this table
+                        table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
+                        if not table_paras:
+                            continue
                         
-                        # Search for violation_text in table content
-                        pos = table_text.find(violation_text)
-                        if pos != -1:
-                            # Found match in this table!
-                            target_para = first_table_para  # Use first para as anchor
-                            matched_runs_info = table_runs
-                            matched_start = pos
-                            is_cross_paragraph = True  # Table mode is always cross-paragraph
+                        first_table_para = table_paras[0]
+                        last_table_para = table_paras[-1]
+                        
+                        # Get their paraIds
+                        first_para_id = first_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                        last_para_id = last_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                        
+                        if not first_para_id or not last_para_id:
+                            continue
+                        
+                        # Collect table content in JSON format
+                        try:
+                            table_runs, table_text, _, _ = self._collect_runs_info_in_table(
+                                first_table_para, last_para_id, table_elem
+                            )
                             
+                            # Search for search_text in table content
+                            pos = table_text.find(search_text)
+                            if pos != -1:
+                                # Found match in this table!
+                                target_para = first_table_para  # Use first para as anchor
+                                matched_runs_info = table_runs
+                                matched_start = pos
+                                is_cross_paragraph = True  # Table mode is always cross-paragraph
+                                
+                                # Update violation_text to the matched version
+                                violation_text = search_text
+                                
+                                # For replace operations, also strip row numbering from revised_text
+                                if is_stripped and item.fix_action == 'replace':
+                                    stripped_revised, revised_was_stripped = strip_table_row_numbering(revised_text)
+                                    if revised_was_stripped:
+                                        revised_text = stripped_revised
+                                        if self.verbose:
+                                            print(f"  [Fallback] Stripped row numbering from revised_text")
+                                
+                                if self.verbose:
+                                    if is_stripped:
+                                        print(f"  [Success] Found in table after stripping row numbering")
+                                    else:
+                                        print(f"  [Success] Found in table (JSON format)")
+                                break
+                        except Exception as e:
+                            # If table processing fails, continue to next table
                             if self.verbose:
-                                print(f"  [Success] Found in table (JSON format)")
-                            break
-                    except Exception as e:
-                        # If table processing fails, continue to next table
-                        if self.verbose:
-                            print(f"  [Debug] Table processing failed: {e}")
-                        continue
+                                print(f"  [Debug] Table processing failed: {e}")
+                            continue
+                    
+                    # If found, break outer loop
+                    if target_para is not None:
+                        break
             
             if target_para is None:
                 # Check if we have a boundary error from table/row crossing
