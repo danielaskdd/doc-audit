@@ -419,6 +419,32 @@ class AuditEditApplier:
         """Find paragraph element by its w14:paraId."""
         return self._find_para_node_by_id(uuid)
 
+    def _find_tables_in_range(self, start_para, uuid_end: str) -> List:
+        """
+        Find all tables within uuid → uuid_end range.
+        
+        Args:
+            start_para: Starting paragraph element
+            uuid_end: End boundary paraId (inclusive)
+        
+        Returns:
+            List of table elements (w:tbl) found in the range
+        """
+        tables = []
+        seen_tables = set()
+        
+        for para in self._iter_paragraphs_in_range(start_para, uuid_end):
+            # Check if this paragraph is in a table
+            table = self._find_ancestor_table(para)
+            if table is not None:
+                # Use element ID to avoid duplicates
+                table_id = id(table)
+                if table_id not in seen_tables:
+                    tables.append(table)
+                    seen_tables.add(table_id)
+        
+        return tables
+
     def _get_cell_merge_properties(self, tcPr):
         """
         Get cell merge properties (gridSpan and vMerge).
@@ -2121,6 +2147,54 @@ class AuditEditApplier:
 
                         if self.verbose:
                             print(f"  [Success] Found in cross-paragraph mode")
+            
+            # Fallback 3: Try table search if violation_text looks like JSON array
+            if target_para is None and violation_text.startswith('["'):
+                if self.verbose:
+                    print(f"  [Fallback] Trying table search (JSON format detected)...")
+                
+                # Find all tables in range
+                tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
+                
+                for table_elem in tables_in_range:
+                    # Get the first and last paragraph in this table
+                    table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
+                    if not table_paras:
+                        continue
+                    
+                    first_table_para = table_paras[0]
+                    last_table_para = table_paras[-1]
+                    
+                    # Get their paraIds
+                    first_para_id = first_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                    last_para_id = last_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                    
+                    if not first_para_id or not last_para_id:
+                        continue
+                    
+                    # Collect table content in JSON format
+                    try:
+                        table_runs, table_text, _, _ = self._collect_runs_info_in_table(
+                            first_table_para, last_para_id, table_elem
+                        )
+                        
+                        # Search for violation_text in table content
+                        pos = table_text.find(violation_text)
+                        if pos != -1:
+                            # Found match in this table!
+                            target_para = first_table_para  # Use first para as anchor
+                            matched_runs_info = table_runs
+                            matched_start = pos
+                            is_cross_paragraph = True  # Table mode is always cross-paragraph
+                            
+                            if self.verbose:
+                                print(f"  [Success] Found in table (JSON format)")
+                            break
+                    except Exception as e:
+                        # If table processing fails, continue to next table
+                        if self.verbose:
+                            print(f"  [Debug] Table processing failed: {e}")
+                        continue
             
             if target_para is None:
                 # Check if we have a boundary error from table/row crossing
