@@ -1200,19 +1200,8 @@ class AuditEditApplier:
             Dict with keys: 'cell_violation', 'cell_revised', 'cell_elem', 'cell_runs'
             Or None if changes span multiple cells
         """
-        if self.verbose:
-            print(f"  [Debug] _try_extract_single_cell_edit called")
-            print(f"  [Debug]   violation_text: {violation_text[:100]}...")
-            print(f"  [Debug]   revised_text: {revised_text[:100]}...")
-            print(f"  [Debug]   affected_runs count: {len(affected_runs)}")
-        
         # Calculate diff to find changed positions
         diff_ops = self._calculate_diff(violation_text, revised_text)
-        
-        if self.verbose:
-            print(f"  [Debug] Diff operations:")
-            for i, (op, text) in enumerate(diff_ops):
-                print(f"  [Debug]   {i}: {op} - {text[:50]}...")
         
         # Track positions of all changes (delete/insert operations)
         change_positions = []
@@ -1230,13 +1219,8 @@ class AuditEditApplier:
             elif op == 'equal':
                 current_pos += len(text)
         
-        if self.verbose:
-            print(f"  [Debug] Change positions: {change_positions}")
-        
         if not change_positions:
             # No changes detected
-            if self.verbose:
-                print(f"  [Debug] No changes detected - returning None")
             return None
         
         # Find the cell(s) containing all changes
@@ -1247,44 +1231,19 @@ class AuditEditApplier:
         # match_start is the absolute position where violation_text starts in document
         base_offset = match_start
         
-        if self.verbose:
-            print(f"  [Debug] Base offset (match_start): {base_offset}")
-        
         for change_idx, (change_start_rel, change_end_rel) in enumerate(change_positions):
             # Translate relative positions to absolute positions
             change_start = base_offset + change_start_rel
             change_end = base_offset + change_end_rel
             
-            if self.verbose:
-                print(f"  [Debug] Analyzing change {change_idx}:")
-                print(f"  [Debug]   Relative pos: {change_start_rel}-{change_end_rel}")
-                print(f"  [Debug]   Absolute pos: {change_start}-{change_end}")
-            
             # Determine if this is an insert (zero-length) or delete operation
             is_insert = (change_start == change_end)
-            if self.verbose:
-                print(f"  [Debug]   Operation type: {'insert' if is_insert else 'delete'}")
-            
             # Find runs affected by this change
-            change_run_count = 0
-            if self.verbose:
-                print(f"  [Debug]   Examining {len(affected_runs)} affected_runs:")
-            
             for run_idx, run in enumerate(affected_runs):
-                if self.verbose:
-                    # Print info about every run for debugging
-                    run_text = run.get('text', '')
-                    print(f"  [Debug]     Run {run_idx}: [{run['start']}-{run['end']}] text='{run_text[:20]}...'")
-                    print(f"  [Debug]       is_json_boundary={run.get('is_json_boundary', False)}, "
-                          f"is_json_escape={run.get('is_json_escape', False)}, "
-                          f"is_para_boundary={run.get('is_para_boundary', False)}")
-                
                 # Skip synthetic boundary markers
                 if (run.get('is_json_boundary') or 
                     run.get('is_json_escape') or 
                     run.get('is_para_boundary')):
-                    if self.verbose:
-                        print(f"  [Debug]       → Skipped (synthetic marker)")
                     continue
                 
                 # Check if this run is affected by the change (using absolute positions)
@@ -1294,35 +1253,17 @@ class AuditEditApplier:
                     # A run contains the insertion point if start <= pos <= end
                     if run['start'] <= change_start <= run['end']:
                         is_affected = True
-                        if self.verbose:
-                            print(f"  [Debug]       → Affected by insert at absolute pos {change_start}")
                 else:
                     # Delete operation: check if run overlaps with the deletion range
                     if run['end'] > change_start and run['start'] < change_end:
                         is_affected = True
-                        if self.verbose:
-                            print(f"  [Debug]       → Affected by delete range {change_start}-{change_end}")
                 
                 if is_affected:
-                    change_run_count += 1
                     cell = run.get('cell_elem')
-                    if self.verbose:
-                        print(f"  [Debug]       → cell_elem: {cell is not None}")
                     if cell is not None:
                         cells_with_changes.add(id(cell))
-                elif self.verbose:
-                    print(f"  [Debug]       → Not affected (position check failed)")
-            
-            if self.verbose:
-                print(f"  [Debug]   Change {change_idx} affected {change_run_count} runs")
-        
-        if self.verbose:
-            print(f"  [Debug] cells_with_changes count: {len(cells_with_changes)}")
-        
         if len(cells_with_changes) != 1:
             # Changes span multiple cells or no cell found
-            if self.verbose:
-                print(f"  [Debug] Changes span {len(cells_with_changes)} cells - returning None")
             return None
         
         # All changes are in a single cell - extract cell-specific content
@@ -1339,20 +1280,12 @@ class AuditEditApplier:
                 target_cell = cell
                 cell_runs.append(run)
         
-        if self.verbose:
-            print(f"  [Debug] Found {len(cell_runs)} runs in target cell")
-        
         if target_cell is None or not cell_runs:
-            if self.verbose:
-                print(f"  [Debug] No target cell or cell runs - returning None")
             return None
         
         # Extract the portion of violation_text and revised_text within this cell
         cell_start = min(r['start'] for r in cell_runs)
         cell_end = max(r['end'] for r in cell_runs)
-        
-        if self.verbose:
-            print(f"  [Debug] Cell text range: {cell_start}-{cell_end}")
         
         # Convert absolute positions to relative offsets within violation_text
         # cell_start/cell_end are absolute positions in combined_text
@@ -1360,24 +1293,13 @@ class AuditEditApplier:
         relative_start = cell_start - match_start
         relative_end = cell_end - match_start
         
-        if self.verbose:
-            print(f"  [Debug] Relative offsets: {relative_start}-{relative_end}")
-        
         # Extract cell_violation using relative offsets
         # Account for JSON escaping if in table mode
         if self._is_table_mode(affected_runs):
             cell_violation_escaped = violation_text[relative_start:relative_end]
             cell_violation = self._decode_json_escaped(cell_violation_escaped)
-            
-            if self.verbose:
-                print(f"  [Debug] Table mode - extracting cell_violation")
-                print(f"  [Debug]   cell_violation_escaped: {cell_violation_escaped[:50]}...")
-                print(f"  [Debug]   cell_violation (decoded): {cell_violation[:50]}...")
         else:
             cell_violation = violation_text[relative_start:relative_end]
-            
-            if self.verbose:
-                print(f"  [Debug] Non-table mode - extracted cell_violation: {cell_violation[:50]}...")
         
         # Build cell_revised by applying diff operations to cell_violation
         # This handles cases where insertion/deletion changes text length
@@ -1416,12 +1338,6 @@ class AuditEditApplier:
                     revised_accumulator += text
         
         cell_revised = revised_accumulator if revised_accumulator else cell_violation
-        
-        if self.verbose:
-            print(f"  [Debug] Built cell_revised from diff: {cell_revised[:50]}...")
-        
-        if self.verbose:
-            print(f"  [Debug] Successfully extracted single-cell edit - returning result")
         
         return {
             'cell_violation': cell_violation,
@@ -2525,9 +2441,6 @@ class AuditEditApplier:
                 stripped_violation, was_stripped = strip_auto_numbering(violation_text)
                 
                 if was_stripped:
-                    if self.verbose:
-                        print(f"  [Fallback] Trying without numbering: {stripped_violation[:30]}...")
-                    
                     for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                         runs_info_orig, combined_orig = self._collect_runs_info_original(para)
                         
@@ -2546,8 +2459,6 @@ class AuditEditApplier:
                                 if revised_has_numbering:
                                     # Both have numbering: strip both
                                     revised_text = stripped_revised
-                                    if self.verbose:
-                                        print(f"  [Fallback] Stripped numbering from both texts")
                                 # else: Only violation_text had numbering, keep revised_text as-is
                             
                             break
@@ -2556,9 +2467,6 @@ class AuditEditApplier:
             # This also handles table content with JSON format matching
             boundary_error = None
             if target_para is None:
-                if self.verbose:
-                    print(f"  [Fallback] Trying cross-paragraph search...")
-
                 # Collect runs across all paragraphs in range
                 cross_runs, cross_text, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
                     anchor_para, item.uuid_end
@@ -2585,9 +2493,6 @@ class AuditEditApplier:
             
             # Fallback 3: Try table search if violation_text looks like JSON array
             if target_para is None and violation_text.startswith('["'):
-                if self.verbose:
-                    print(f"  [Fallback] Trying table search (JSON format detected)...")
-                
                 # Find all tables in range
                 tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                 
@@ -2641,8 +2546,6 @@ class AuditEditApplier:
                                     stripped_revised, revised_was_stripped = strip_table_row_numbering(revised_text)
                                     if revised_was_stripped:
                                         revised_text = stripped_revised
-                                        if self.verbose:
-                                            print(f"  [Fallback] Stripped row numbering from revised_text")
                                 
                                 if self.verbose:
                                     if is_stripped:
@@ -2650,10 +2553,8 @@ class AuditEditApplier:
                                     else:
                                         print(f"  [Success] Found in table (JSON format)")
                                 break
-                        except Exception as e:
+                        except Exception:
                             # If table processing fails, continue to next table
-                            if self.verbose:
-                                print(f"  [Debug] Table processing failed: {e}")
                             continue
                     
                     # If found, break outer loop
@@ -2663,9 +2564,6 @@ class AuditEditApplier:
             # Fallback 2.5: Try non-JSON table search (raw text mode)
             # For plain text violation_text that may be in table cells with multiple paragraphs
             if target_para is None and not violation_text.startswith('["'):
-                if self.verbose:
-                    print(f"  [Fallback] Trying non-JSON table search (plain text mode)...")
-                
                 # Find all tables in range
                 tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                 
@@ -2691,9 +2589,6 @@ class AuditEditApplier:
                 if boundary_error:
                     # Special handling for boundary_crossed: try searching in tables first
                     if boundary_error == 'boundary_crossed':
-                        if self.verbose:
-                            print(f"  [Boundary] boundary_crossed detected, trying table search...")
-                        
                         # Find all tables in range
                         tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                         
@@ -2769,23 +2664,15 @@ class AuditEditApplier:
                     if target_para is None:
                         if self.verbose:
                             print(f"  [Boundary] Table search failed, trying body text...")
-                            print(f"  [Debug] uuid: {item.uuid}, uuid_end: {item.uuid_end}")
                         
                         # Collect ALL body paragraphs in range, grouped by continuity
                         # This handles: table→body, body→table, and interleaved scenarios
                         body_segments = []  # List of segments, each segment = [(para, runs, text), ...]
                         current_segment = []
-                        para_count = 0
-                        skipped_table_paras = 0
-                        skipped_empty_paras = 0
                         
                         for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                            para_count += 1
-                            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                            
                             if self._is_paragraph_in_table(para):
                                 # Encountered table paragraph - end current body segment
-                                skipped_table_paras += 1
                                 if current_segment:
                                     body_segments.append(current_segment)
                                     current_segment = []
@@ -2795,13 +2682,7 @@ class AuditEditApplier:
                             para_runs, para_text = self._collect_runs_info_original(para)
                             # Skip empty paragraphs to match parse_document.py behavior
                             if not para_text.strip():
-                                skipped_empty_paras += 1
                                 continue
-                            
-                            # Debug: Check if this paragraph contains our target text
-                            if self.verbose and '贮存可靠性计算' in para_text:
-                                print(f"  [Debug] Found target paragraph! paraId={para_id}")
-                                print(f"  [Debug]   Text: '{para_text[:100]}...'")
                             
                             current_segment.append((para, para_runs, para_text))
                         
@@ -2809,22 +2690,8 @@ class AuditEditApplier:
                         if current_segment:
                             body_segments.append(current_segment)
                         
-                        if self.verbose:
-                            print(f"  [Debug] Iteration stats:")
-                            print(f"  [Debug]   Total paragraphs iterated: {para_count}")
-                            print(f"  [Debug]   Skipped (in table): {skipped_table_paras}")
-                            print(f"  [Debug]   Skipped (empty): {skipped_empty_paras}")
-                            print(f"  [Debug] Collected {len(body_segments)} body segment(s) in uuid range")
-                            total_paras = sum(len(seg) for seg in body_segments)
-                            print(f"  [Debug] Total body paragraphs: {total_paras}")
-                            print(f"  [Debug] violation_text to search: '{violation_text[:200]}...'")
-                            print(f"  [Debug] violation_text length: {len(violation_text)}")
-                        
                         # Search in each body segment (try both original and stripped numbering)
                         for segment_idx, body_paras_data in enumerate(body_segments):
-                            if self.verbose:
-                                print(f"  [Debug] Searching in segment {segment_idx + 1}/{len(body_segments)} ({len(body_paras_data)} paragraphs)")
-                            
                             # Build combined text with \n separator (like _collect_runs_info_in_body)
                             all_runs = []
                             pos = 0
@@ -2853,12 +2720,6 @@ class AuditEditApplier:
                             
                             combined_body_text = ''.join(r['text'] for r in all_runs)
                             
-                            if self.verbose:
-                                print(f"  [Debug] Segment {segment_idx + 1} combined text length: {len(combined_body_text)}")
-                                print(f"  [Debug] Segment {segment_idx + 1} text start: '{combined_body_text[:200]}...'")
-                                if len(combined_body_text) > 200:
-                                    print(f"  [Debug] Segment {segment_idx + 1} text end: '...{combined_body_text[-200:]}'")
-                            
                             # Normalize to match parse_document.py behavior (removes trailing whitespace)
                             combined_normalized = self._normalize_text_for_search(combined_body_text)
                             
@@ -2872,18 +2733,9 @@ class AuditEditApplier:
                             matched_text = violation_text
                             
                             for search_text, is_stripped in search_attempts:
-                                if self.verbose and is_stripped:
-                                    print(f"  [Debug] Segment {segment_idx + 1} trying stripped: '{search_text[:100]}...'")
-                                
                                 match_pos = combined_normalized.find(search_text)
-                                
-                                if self.verbose:
-                                    print(f"  [Debug] Segment {segment_idx + 1} search result ({('stripped' if is_stripped else 'original')}): match_pos = {match_pos}")
-                                
                                 if match_pos != -1:
                                     matched_text = search_text
-                                    if is_stripped and self.verbose:
-                                        print(f"  [Success] Match found after stripping auto-numbering")
                                     break
                             
                             if match_pos != -1:
@@ -2896,15 +2748,11 @@ class AuditEditApplier:
                                 numbering_stripped = (matched_text != item.violation_text.strip())
                                 
                                 if self.verbose:
-                                    print(f"  [Success] Found in body segment {segment_idx + 1}")
                                     if is_cross_paragraph:
-                                        print(f"  [Success] Cross-paragraph match ({len(body_paras_data)} paragraphs)")
+                                        print(f"  [Success] Found in body segment {segment_idx + 1} (cross-paragraph)")
                                     else:
-                                        print(f"  [Success] Single paragraph match")
+                                        print(f"  [Success] Found in body segment {segment_idx + 1}")
                                 break  # Stop searching other segments
-                        
-                        if target_para is None and self.verbose:
-                            print(f"  [Debug] Not found in any body segment")
                     
                     # If still not found after segmented body text search, apply fallback
                     if target_para is None:
@@ -2985,8 +2833,6 @@ class AuditEditApplier:
                         # All content is in single paragraph - safe to delete
                         if real_runs:
                             target_para = real_runs[0].get('para_elem', target_para)
-                        if self.verbose:
-                            print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with delete")
                         success_status = self._apply_delete(
                             target_para, violation_text,
                             item.violation_reason,
@@ -3034,9 +2880,6 @@ class AuditEditApplier:
                         
                         if single_cell:
                             # Successfully extracted single-cell edit - apply it
-                            if self.verbose:
-                                print(f"  [Single-cell] Extracted edit for single cell: '{single_cell['cell_violation'][:30]}...'")
-                            
                             # Find the paragraph containing this cell
                             cell_para = None
                             for run in single_cell['cell_runs']:
@@ -3065,13 +2908,9 @@ class AuditEditApplier:
                                         print(f"  [Single-cell] Successfully applied track change to single cell")
                                 else:
                                     # Fallback if we can't find the text in the cell
-                                    if self.verbose:
-                                        print(f"  [Single-cell] Could not locate extracted text in cell")
                                     success_status = 'cross_cell_fallback'
                             else:
                                 # Fallback if we can't find the paragraph
-                                if self.verbose:
-                                    print(f"  [Single-cell] Could not find paragraph for cell")
                                 success_status = 'cross_cell_fallback'
                         else:
                             # Changes span multiple cells - fallback to comment
@@ -3087,8 +2926,6 @@ class AuditEditApplier:
                         # All content is in single paragraph - safe to replace
                         if real_runs:
                             target_para = real_runs[0].get('para_elem', target_para)
-                        if self.verbose:
-                            print(f"  [Cross-paragraph search] Match within single paragraph, proceeding with replace")
                         success_status = self._apply_replace(
                             target_para, violation_text, revised_text,
                             item.violation_reason,
@@ -3262,11 +3099,9 @@ class AuditEditApplier:
             
             if self.verbose:
                 status = "✓" if result.success else "✗"
-                print(f"  [{status}]", end="")
                 if not result.success:
+                    print(f"  [{status}]", end="")
                     print(f" {result.error_message}")
-                else:
-                    print()
         
         # 5. Save comments
         self._save_comments()
@@ -3367,7 +3202,8 @@ def main() -> int:
         print(f"Source file: {applier.source_path}")
         print(f"Output to: {applier.output_path}")
         print(f"Edit items: {len(applier.edit_items)}")
-        print("-" * 50)
+        if args.verbose:
+            print("-" * 50)
         
         results = applier.apply()
         
