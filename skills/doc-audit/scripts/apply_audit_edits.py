@@ -535,7 +535,8 @@ class AuditEditApplier:
             uuid_end: End boundary paraId
         
         Returns:
-            Tuple of (target_para, runs_info, match_start) or None if not found
+            Tuple of (target_para, runs_info, match_start, matched_text) or None if not found
+            - matched_text: The actual text that was matched (may be normalized if fallback was used)
         
         Note:
             The in_range gate has been removed because _find_tables_in_range already
@@ -597,19 +598,20 @@ class AuditEditApplier:
             
             # Fallback: If violation_text contains \\n literal (LLM didn't decode JSON escape),
             # try converting to real newline
+            matched_text = violation_text  # Track the actual matched text
             if match_pos == -1 and '\\n' in violation_text:
                 normalized_violation = violation_text.replace('\\n', '\n')
                 match_pos = cell_normalized.find(normalized_violation)
                 if match_pos != -1:
-                    violation_text = normalized_violation
+                    matched_text = normalized_violation  # Use normalized text for consistent span calculation
                     if self.verbose:
                         print(f"  [Fallback] Matched after converting \\\\n to real newline")
             
             if match_pos != -1:
-                # Found! Return match info
+                # Found! Return match info including the matched text
                 if self.verbose:
                     print(f"  [Success] Found in cell (raw text mode): '{cell_text[:50]}...'")
-                return (cell_first_para, cell_runs, match_pos)
+                return (cell_first_para, cell_runs, match_pos, matched_text)
         
         return None
 
@@ -2674,7 +2676,9 @@ class AuditEditApplier:
                     )
                     
                     if result:
-                        target_para, matched_runs_info, matched_start = result
+                        target_para, matched_runs_info, matched_start, matched_text = result
+                        # Update violation_text with the actual matched text (handles fallback normalization)
+                        violation_text = matched_text
                         # Cell content is always treated as single-paragraph for now
                         is_cross_paragraph = False
                         
