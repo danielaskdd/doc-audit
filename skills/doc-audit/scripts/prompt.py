@@ -38,11 +38,12 @@ Instructions:
 violation_text guidelines:
 - The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
 - Do not use ellipses to replace or omit any part of the original text
-- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
-- If an entire section is in violation, select the corresponding heading as the violation_text (excluding `Section:` and the following heading number)
+- If an entire section is in violation, select the first paragraph as the violation_text
 - For table content, report violations at the individual cell level whenever possible, with each cell's violation as a separate entry
-- If a table violation cannot be split into individual cells, use the content of the violating cell as violation_text rather than the entire row
+- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
+    - Example 1: For the candidate violation text is `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
+    - Example 2: For the candidate violation text is `表16　 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件测试项目表`
 
 fix_action guidelines:
 - "delete": Use when the problematic text should be completely removed
@@ -177,10 +178,11 @@ Instructions:
 violation_text guidelines:
 - The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
 - Do not use ellipses to replace or omit any part of the original text
-- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
 - For table content in JSON format, report violations at the individual cell level whenever possible, with each cell's violation as a separate entry
-- If a table violation cannot be split into individual cells, use the content of the violating cell as violation_text rather than the entire row
+- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
+    - Example 1: For the candidate violation text is `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
+    - Example 2: For the candidate violation text is `表16　 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件测试项目表`
 
 Return JSON only:
 {{
@@ -272,8 +274,7 @@ def format_block_for_prompt(block: dict) -> str:
                 rows.append(" | ".join(str(cell) for cell in row))
             content = "\n".join(rows)
 
-    return f"""Section: {heading}
-{context}
+    return f"""{context}
 
 Content:
 {content}"""
