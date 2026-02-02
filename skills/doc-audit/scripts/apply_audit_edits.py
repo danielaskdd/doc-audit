@@ -82,6 +82,24 @@ class EditResult:
 # Helper Functions
 # ============================================================
 
+def json_escape(text: str) -> str:
+    """
+    Escape text for JSON format (without outer quotes).
+
+    This matches the escaping that json.dumps() applies to string content,
+    which is necessary for matching violation_text from LLM against
+    reconstructed table content.
+
+    Args:
+        text: Raw text to escape
+
+    Returns:
+        JSON-escaped text (without surrounding quotes)
+    """
+    # json.dumps adds surrounding quotes, strip them
+    return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
 def format_text_preview(text: str, max_len: int = 30) -> str:
     """
     Format text for log output: remove newlines and truncate.
@@ -337,19 +355,19 @@ class AuditEditApplier:
     def _iter_paragraphs_in_range(self, start_node, uuid_end: str) -> Generator:
         """
         Generator: iterate paragraphs from start_node to uuid_end (inclusive).
-        
+
         This restricts the search range to within a specific text block,
         preventing accidental modifications to content in other blocks.
-        
+
         Args:
             start_node: Starting paragraph element (from _find_para_node_by_id)
             uuid_end: End boundary paraId (w14:paraId) - iteration stops after this paragraph
-        
+
         Yields:
             Paragraph elements in document order, from start_node to uuid_end (inclusive)
         """
         all_paras = self._xpath(self.body_elem, './/w:p')
-        
+
         try:
             start_index = all_paras.index(start_node)
             for p in all_paras[start_index:]:
@@ -360,45 +378,131 @@ class AuditEditApplier:
                     return
         except ValueError:
             return
-    
+
+    # ==================== Table Detection Helpers ====================
+
+    def _find_ancestor(self, elem, tag: str):
+        """
+        Find ancestor element with specified tag.
+
+        Args:
+            elem: Starting element
+            tag: Full tag name including namespace (e.g., '{http://...}tbl')
+
+        Returns:
+            Ancestor element if found, None otherwise
+        """
+        parent = elem.getparent()
+        while parent is not None:
+            if parent.tag == tag:
+                return parent
+            parent = parent.getparent()
+        return None
+
+    def _find_ancestor_table(self, para_elem):
+        """Find the table (w:tbl) containing this paragraph, if any."""
+        return self._find_ancestor(para_elem, f'{{{NS["w"]}}}tbl')
+
+    def _find_ancestor_cell(self, para_elem):
+        """Find the table cell (w:tc) containing this paragraph, if any."""
+        return self._find_ancestor(para_elem, f'{{{NS["w"]}}}tc')
+
+    def _find_ancestor_row(self, para_elem):
+        """Find the table row (w:tr) containing this paragraph, if any."""
+        return self._find_ancestor(para_elem, f'{{{NS["w"]}}}tr')
+
+    def _is_paragraph_in_table(self, para_elem) -> bool:
+        """Check if paragraph is inside a table."""
+        return self._find_ancestor_table(para_elem) is not None
+
+    def _find_para_by_uuid(self, uuid: str):
+        """Find paragraph element by its w14:paraId."""
+        return self._find_para_node_by_id(uuid)
+
     # ==================== Run Processing ====================
 
-    def _collect_runs_info_across_paragraphs(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool]:
+    def _collect_runs_info_across_paragraphs(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool, Optional[str]]:
         """
         Collect run info across multiple paragraphs (uuid → uuid_end range).
-        Paragraph boundaries are represented as '\n' in the combined text.
 
-        This method supports cross-paragraph text search within a text block boundary.
-        
+        Behavior:
+        - Body text: Paragraph boundaries are represented as '\\n'
+        - Table content (same row): JSON format ["cell1", "cell2"] with '", "' between cells
+        - Cross body/table boundary: Returns boundary_error
+        - Cross table row boundary: Returns row_boundary_error (Word doesn't support cross-row comments)
+
         Args:
             start_para: Starting paragraph element
             uuid_end: End boundary paraId (inclusive)
-        
+
         Returns:
-            Tuple of (runs_info, combined_text, is_cross_paragraph)
-            runs_info: [{'text': str, 'start': int, 'end': int, 'para_elem': Element, ...}, ...]
-            combined_text: Full text string with '\n' at paragraph boundaries
-            is_cross_paragraph: True if text spans multiple paragraphs
+            Tuple of (runs_info, combined_text, is_cross_paragraph, boundary_error)
+            - runs_info: List of run info dicts with 'text', 'start', 'end', 'para_elem', etc.
+            - combined_text: Full text string
+            - is_cross_paragraph: True if text spans multiple paragraphs
+            - boundary_error: None if OK, or error type string:
+              - 'boundary_crossed': Crossed body/table or different tables
+              - 'row_boundary_crossed': Crossed table row boundary
+        """
+        # 1. Detect if start paragraph is in a table
+        start_in_table = self._is_paragraph_in_table(start_para)
+        start_table = self._find_ancestor_table(start_para) if start_in_table else None
+
+        # 2. Find end paragraph and check its context
+        end_para = self._find_para_by_uuid(uuid_end)
+        end_in_table = self._is_paragraph_in_table(end_para) if end_para is not None else False
+        end_table = self._find_ancestor_table(end_para) if end_in_table else None
+
+        # 3. Check boundary consistency
+        if start_in_table != end_in_table:
+            # Crossed body/table boundary
+            return [], '', False, 'boundary_crossed'
+
+        if start_in_table and start_table is not end_table:
+            # Crossed different tables
+            return [], '', False, 'boundary_crossed'
+
+        # Note: Row boundary check is NOT done here.
+        # For multi-row table blocks, we collect content row by row and let
+        # the caller check if the actual match spans multiple rows.
+
+        # 4. Dispatch to appropriate collector
+        if start_in_table:
+            return self._collect_runs_info_in_table(start_para, uuid_end, start_table)
+        else:
+            return self._collect_runs_info_in_body(start_para, uuid_end)
+
+    def _collect_runs_info_in_body(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool, Optional[str]]:
+        """
+        Collect run info across paragraphs in document body (not in table).
+        Paragraph boundaries are represented as '\\n'.
+
+        Args:
+            start_para: Starting paragraph element
+            uuid_end: End boundary paraId (inclusive)
+
+        Returns:
+            Tuple of (runs_info, combined_text, is_cross_paragraph, boundary_error)
         """
         runs_info = []
         pos = 0
         para_count = 0
-        
+
         for para in self._iter_paragraphs_in_range(start_para, uuid_end):
             para_count += 1
-            
+
             # Collect runs for this paragraph
             para_runs, para_text = self._collect_runs_info_original(para)
-            
+
             # Add paragraph element reference to each run
             for run in para_runs:
                 run['para_elem'] = para
                 run['start'] += pos
                 run['end'] += pos
                 runs_info.append(run)
-            
+
             pos += len(para_text)
-            
+
             # Add paragraph boundary (except after last paragraph)
             para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
             if para_id != uuid_end:
@@ -411,12 +515,182 @@ class AuditEditApplier:
                     'is_para_boundary': True  # Mark as paragraph boundary
                 })
                 pos += 1
-        
+
         combined_text = ''.join(r['text'] for r in runs_info)
         is_cross_paragraph = para_count > 1
-        
-        return runs_info, combined_text, is_cross_paragraph
-    
+
+        return runs_info, combined_text, is_cross_paragraph, None
+
+    def _collect_runs_info_in_table(self, start_para, uuid_end: str, table_elem) -> Tuple[List[Dict], str, bool, Optional[str]]:
+        """
+        Collect run info within a table using JSON format, handling multiple rows.
+
+        For each row, format matches parse_document.py: ["cell1", "cell2", "cell3"]
+        - Cell boundaries within row: '", "'
+        - Paragraph boundaries within cell: '\\n' (JSON-escaped as '\\n')
+        - Row boundaries: '"], ["' (close previous row, open new row)
+        - Content is JSON-escaped to match LLM output
+
+        Note: This method collects content across multiple rows. The caller should
+        check if the actual match spans multiple rows using _check_cross_row_boundary().
+
+        Args:
+            start_para: Starting paragraph element
+            uuid_end: End boundary paraId (inclusive)
+            table_elem: The table element (w:tbl)
+
+        Returns:
+            Tuple of (runs_info, combined_text, is_cross_paragraph, boundary_error)
+            - runs_info includes 'cell_elem' and 'row_elem' fields
+            - runs_info includes 'original_text' for actual content (before JSON escaping)
+        """
+        runs_info = []
+        pos = 0
+        current_cell = None
+        current_row = None
+        in_range = False
+        last_para = start_para
+
+        # Add opening '["'
+        runs_info.append({
+            'text': '["',
+            'start': pos,
+            'end': pos + 2,
+            'para_elem': start_para,
+            'is_json_boundary': True
+        })
+        pos += 2
+
+        # Iterate all paragraphs in the table (in document order)
+        for para in table_elem.iter(f'{{{NS["w"]}}}p'):
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+
+            # Check if we've entered the range
+            if para is start_para:
+                in_range = True
+
+            if not in_range:
+                continue
+
+            last_para = para
+
+            # Get cell and row for this paragraph
+            cell = self._find_ancestor_cell(para)
+            row = self._find_ancestor_row(para)
+
+            # Handle row transition
+            if row is not current_row:
+                if current_row is not None:
+                    # New row: close previous row and open new row '"], ["'
+                    runs_info.append({
+                        'text': '"], ["',
+                        'start': pos,
+                        'end': pos + 6,
+                        'para_elem': para,
+                        'is_json_boundary': True,
+                        'is_row_boundary': True
+                    })
+                    pos += 6
+                    current_cell = None  # Reset cell tracking for new row
+                current_row = row
+
+            # Handle cell transition (within same row)
+            if cell is not current_cell:
+                if current_cell is not None:
+                    # New cell in same row: add '", "'
+                    runs_info.append({
+                        'text': '", "',
+                        'start': pos,
+                        'end': pos + 4,
+                        'para_elem': para,
+                        'is_json_boundary': True,
+                        'is_cell_boundary': True
+                    })
+                    pos += 4
+                current_cell = cell
+            elif current_cell is not None:
+                # Same cell, new paragraph: add '\n' (which is \\n in JSON)
+                runs_info.append({
+                    'text': '\\n',
+                    'start': pos,
+                    'end': pos + 2,
+                    'para_elem': para,
+                    'is_para_boundary': True,
+                    'is_json_escape': True
+                })
+                pos += 2
+
+            # Collect paragraph content (with JSON escaping)
+            para_runs, _ = self._collect_runs_info_original(para)
+
+            for run in para_runs:
+                original_text = run['text']
+                escaped_text = json_escape(original_text)
+
+                run['original_text'] = original_text
+                run['text'] = escaped_text
+                run['para_elem'] = para
+                run['cell_elem'] = cell
+                run['row_elem'] = row
+                run['start'] = pos
+                run['end'] = pos + len(escaped_text)
+                runs_info.append(run)
+
+                pos += len(escaped_text)
+
+            # Check if we've reached the end
+            if para_id == uuid_end:
+                break
+
+        # Add closing '"]'
+        runs_info.append({
+            'text': '"]',
+            'start': pos,
+            'end': pos + 2,
+            'para_elem': last_para,
+            'is_json_boundary': True
+        })
+        pos += 2
+
+        combined_text = ''.join(r['text'] for r in runs_info)
+        is_cross_paragraph = True  # Table mode is always treated as cross-paragraph
+
+        return runs_info, combined_text, is_cross_paragraph, None
+
+    def _check_cross_cell_boundary(self, affected_runs: List[Dict]) -> bool:
+        """
+        Check if affected runs span multiple table cells.
+
+        Args:
+            affected_runs: List of run info dicts from _find_affected_runs
+
+        Returns:
+            True if runs span multiple cells, False otherwise
+        """
+        cells = set()
+        for info in affected_runs:
+            cell = info.get('cell_elem')
+            if cell is not None:
+                cells.add(id(cell))
+        return len(cells) > 1
+
+    def _check_cross_row_boundary(self, affected_runs: List[Dict]) -> bool:
+        """
+        Check if affected runs span multiple table rows.
+
+        Args:
+            affected_runs: List of run info dicts from _find_affected_runs
+
+        Returns:
+            True if runs span multiple rows, False otherwise
+        """
+        rows = set()
+        for info in affected_runs:
+            row = info.get('row_elem')
+            if row is not None:
+                rows.add(id(row))
+        return len(rows) > 1
+
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
         Collect run info representing ORIGINAL text (before track changes).
@@ -536,7 +810,7 @@ class AuditEditApplier:
         """Get combined text from runs"""
         return ''.join(r['text'] for r in runs_info)
     
-    def _find_affected_runs(self, runs_info: List[Dict], 
+    def _find_affected_runs(self, runs_info: List[Dict],
                            match_start: int, match_end: int) -> List[Dict]:
         """Find runs that overlap with the target text range"""
         affected = []
@@ -544,7 +818,119 @@ class AuditEditApplier:
             if info['end'] > match_start and info['start'] < match_end:
                 affected.append(info)
         return affected
-    
+
+    def _filter_real_runs(self, runs: List[Dict]) -> List[Dict]:
+        """
+        Filter out synthetic boundary runs (JSON boundaries, paragraph boundaries).
+
+        Synthetic runs are injected for text matching but don't have actual
+        document elements (elem/rPr). This method filters them out before
+        applying document modifications.
+
+        Args:
+            runs: List of run info dicts
+
+        Returns:
+            List of runs that have actual document elements
+        """
+        return [r for r in runs
+                if not r.get('is_json_boundary', False)
+                and not r.get('is_json_escape', False)
+                and not r.get('is_para_boundary', False)]
+
+    def _get_run_original_text(self, run: Dict) -> str:
+        """
+        Get the original (unescaped) text for a run.
+
+        In table mode, runs have 'original_text' with unescaped content
+        and 'text' with JSON-escaped content. For document mutations,
+        we always want the original text.
+
+        Args:
+            run: Run info dict
+
+        Returns:
+            Original text content (unescaped)
+        """
+        return run.get('original_text', run['text'])
+
+    def _is_table_mode(self, runs: List[Dict]) -> bool:
+        """
+        Check if we're operating in table mode (runs have JSON-escaped text).
+
+        Args:
+            runs: List of run info dicts
+
+        Returns:
+            True if any run has 'original_text' field (indicating table mode)
+        """
+        return any(r.get('original_text') is not None for r in runs)
+
+    def _decode_json_escaped(self, text: str) -> str:
+        """
+        Decode JSON-escaped text back to original.
+
+        In table mode, violation_text and revised_text from the LLM contain
+        JSON escape sequences (like \" for quotes, \\n for newlines).
+        This method decodes them back to the original characters.
+
+        Args:
+            text: JSON-escaped text string
+
+        Returns:
+            Decoded original text
+        """
+        if not text:
+            return text
+        try:
+            # json.loads expects a complete JSON string with quotes
+            return json.loads('"' + text + '"')
+        except json.JSONDecodeError:
+            # Fallback: if decode fails, return original text
+            return text
+
+    def _translate_escaped_offset(self, run: Dict, escaped_offset: int) -> int:
+        """
+        Translate an offset from escaped text space to original text space.
+
+        In table mode, run['text'] contains JSON-escaped content where
+        characters like " become \\". This method translates offsets
+        from the escaped space to the original text space.
+
+        Args:
+            run: Run info dict with 'text' and possibly 'original_text'
+            escaped_offset: Offset within run['text']
+
+        Returns:
+            Corresponding offset in original text
+        """
+        if 'original_text' not in run:
+            return escaped_offset  # No escaping, offset is the same
+
+        escaped_text = run['text']
+        original_text = run['original_text']
+
+        if escaped_offset <= 0:
+            return 0
+        if escaped_offset >= len(escaped_text):
+            return len(original_text)
+
+        # Try to decode the escaped prefix as JSON string content
+        escaped_prefix = escaped_text[:escaped_offset]
+        try:
+            # json.loads expects a complete JSON string
+            original_prefix = json.loads('"' + escaped_prefix + '"')
+            return len(original_prefix)
+        except json.JSONDecodeError:
+            # Partial escape sequence - find the last valid boundary
+            for i in range(escaped_offset - 1, -1, -1):
+                try:
+                    original_prefix = json.loads('"' + escaped_text[:i] + '"')
+                    return len(original_prefix)
+                except json.JSONDecodeError:
+                    continue
+            return 0
+
     def _get_rPr_xml(self, rPr_elem) -> str:
         """Convert rPr element to XML string"""
         if rPr_elem is None:
@@ -645,7 +1031,7 @@ class AuditEditApplier:
         run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
         return etree.fromstring(run_xml)
     
-    def _replace_runs(self, para_elem, affected_runs: List[Dict], 
+    def _replace_runs(self, _para_elem, affected_runs: List[Dict],
                      new_elements: List[etree.Element]):
         """Replace affected runs with new elements in the paragraph"""
         if not affected_runs or not new_elements:
@@ -755,22 +1141,35 @@ class AuditEditApplier:
         if not affected:
             return 'fallback'
 
+        # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
+        real_runs = self._filter_real_runs(affected)
+        if not real_runs:
+            return 'fallback'
+
         # Check if text overlaps with previous modifications
-        if self._check_overlap_with_revisions(affected):
+        if self._check_overlap_with_revisions(real_runs):
             return 'conflict'
 
-        rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
+        rPr_xml = self._get_rPr_xml(real_runs[0].get('rPr'))
         change_id = self._get_next_change_id()
 
         # Allocate comment ID for wrapping the deleted text
         comment_id = self.next_comment_id
         self.next_comment_id += 1
 
-        # Calculate split points
-        first_run = affected[0]
-        last_run = affected[-1]
-        before_text = first_run['text'][:match_start - first_run['start']]
-        after_text = last_run['text'][match_end - last_run['start']:]
+        # Calculate split points using real runs only
+        # Use original text for mutations (not JSON-escaped text)
+        first_run = real_runs[0]
+        last_run = real_runs[-1]
+        first_orig_text = self._get_run_original_text(first_run)
+        last_orig_text = self._get_run_original_text(last_run)
+
+        # Translate offsets from escaped space to original space
+        before_offset = self._translate_escaped_offset(first_run, max(0, match_start - first_run['start']))
+        after_offset = self._translate_escaped_offset(last_run, max(0, match_end - last_run['start']))
+
+        before_text = first_orig_text[:before_offset]
+        after_text = last_orig_text[after_offset:]
 
         new_elements = []
 
@@ -782,9 +1181,15 @@ class AuditEditApplier:
         comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
         new_elements.append(etree.fromstring(comment_start_xml))
 
+        # Decode violation_text if in table mode (JSON-escaped)
+        if self._is_table_mode(real_runs):
+            del_text = self._decode_json_escaped(violation_text)
+        else:
+            del_text = violation_text
+
         # Deleted text
         del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-            <w:r>{rPr_xml}<w:delText>{self._escape_xml(violation_text)}</w:delText></w:r>
+            <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
         </w:del>'''
         new_elements.append(etree.fromstring(del_xml))
 
@@ -802,7 +1207,7 @@ class AuditEditApplier:
         if after_text:
             new_elements.append(self._create_run(after_text, rPr_xml))
 
-        self._replace_runs(para_elem, affected, new_elements)
+        self._replace_runs(para_elem, real_runs, new_elements)
 
         # Record comment with violation_reason as content
         # Use "-R" suffix to distinguish comment author from track change author
@@ -851,6 +1256,11 @@ class AuditEditApplier:
         if not affected:
             return 'fallback'
 
+        # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
+        real_runs = self._filter_real_runs(affected)
+        if not real_runs:
+            return 'fallback'
+
         # Calculate diff
         diff_ops = self._calculate_diff(violation_text, revised_text)
 
@@ -867,24 +1277,33 @@ class AuditEditApplier:
             if op == 'delete':
                 del_end = current_pos + len(text)
                 del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
-                if self._check_overlap_with_revisions(del_affected):
+                del_real = self._filter_real_runs(del_affected)
+                if self._check_overlap_with_revisions(del_real):
                     return 'conflict'
                 current_pos = del_end
             elif op == 'equal':
                 current_pos += len(text)
             # insert doesn't consume original text position
 
-        rPr_xml = self._get_rPr_xml(affected[0]['rPr'])
+        rPr_xml = self._get_rPr_xml(real_runs[0].get('rPr'))
 
         # Allocate comment ID for wrapping the replaced text
         comment_id = self.next_comment_id
         self.next_comment_id += 1
 
-        # Calculate split points for before/after text
-        first_run = affected[0]
-        last_run = affected[-1]
-        before_text = first_run['text'][:match_start - first_run['start']]
-        after_text = last_run['text'][match_end - last_run['start']:]
+        # Calculate split points for before/after text using real runs
+        # Use original text for mutations (not JSON-escaped text)
+        first_run = real_runs[0]
+        last_run = real_runs[-1]
+        first_orig_text = self._get_run_original_text(first_run)
+        last_orig_text = self._get_run_original_text(last_run)
+
+        # Translate offsets from escaped space to original space
+        before_offset = self._translate_escaped_offset(first_run, max(0, match_start - first_run['start']))
+        after_offset = self._translate_escaped_offset(last_run, max(0, match_end - last_run['start']))
+
+        before_text = first_orig_text[:before_offset]
+        after_text = last_orig_text[after_offset:]
 
         # Build new elements in a single pass
         new_elements = []
@@ -896,6 +1315,9 @@ class AuditEditApplier:
         # Comment range start (before replaced text)
         comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
         new_elements.append(etree.fromstring(comment_start_xml))
+
+        # Check if we're in table mode (need to decode JSON-escaped text)
+        is_table_mode = self._is_table_mode(real_runs)
 
         # Process diff operations
         violation_pos = 0  # Position within violation_text
@@ -918,38 +1340,50 @@ class AuditEditApplier:
                     else:
                         # Extract text from the equal portion
                         # Handle partial runs at boundaries
-                        for i, eq_run in enumerate(equal_runs):
-                            run_text = eq_run['text']
+                        # Use original text for document mutations
+                        for eq_run in equal_runs:
+                            escaped_text = eq_run['text']
+                            orig_text = self._get_run_original_text(eq_run)
 
-                            # Calculate the portion of this run that's in our range
-                            run_start_in_range = max(0, equal_start - eq_run['start'])
-                            run_end_in_range = min(len(run_text), equal_end - eq_run['start'])
-                            portion = run_text[run_start_in_range:run_end_in_range]
+                            # Calculate offsets in escaped space, then translate
+                            escaped_start = max(0, equal_start - eq_run['start'])
+                            escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
+
+                            # Translate to original space
+                            orig_start = self._translate_escaped_offset(eq_run, escaped_start)
+                            orig_end = self._translate_escaped_offset(eq_run, escaped_end)
+                            portion = orig_text[orig_start:orig_end]
 
                             if eq_run.get('is_drawing'):
                                 # Image run - copy entire element if fully contained
-                                if run_start_in_range == 0 and run_end_in_range == len(run_text):
+                                if escaped_start == 0 and escaped_end == len(escaped_text):
                                     new_elements.append(copy.deepcopy(eq_run['elem']))
                             elif portion:
                                 new_elements.append(self._create_run(portion, rPr_xml))
                 else:
                     # No runs found, create text directly
-                    new_elements.append(self._create_run(text, rPr_xml))
+                    # Decode if in table mode
+                    equal_text = self._decode_json_escaped(text) if is_table_mode else text
+                    new_elements.append(self._create_run(equal_text, rPr_xml))
 
                 violation_pos += len(text)
 
             elif op == 'delete':
                 change_id = self._get_next_change_id()
+                # Decode if in table mode
+                del_text = self._decode_json_escaped(text) if is_table_mode else text
                 del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:delText>{self._escape_xml(text)}</w:delText></w:r>
+                    <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
                 </w:del>'''
                 new_elements.append(etree.fromstring(del_xml))
                 violation_pos += len(text)
 
             elif op == 'insert':
                 change_id = self._get_next_change_id()
+                # Decode if in table mode
+                ins_text = self._decode_json_escaped(text) if is_table_mode else text
                 ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>
+                    <w:r>{rPr_xml}<w:t>{self._escape_xml(ins_text)}</w:t></w:r>
                 </w:ins>'''
                 new_elements.append(etree.fromstring(ins_xml))
                 # insert doesn't consume violation_pos
@@ -968,8 +1402,8 @@ class AuditEditApplier:
         if after_text:
             new_elements.append(self._create_run(after_text, rPr_xml))
 
-        # Single DOM operation to replace all affected runs
-        self._replace_runs(para_elem, affected, new_elements)
+        # Single DOM operation to replace all real runs (not boundary markers)
+        self._replace_runs(para_elem, real_runs, new_elements)
 
         # Record comment with violation_reason as content
         # Use "-R" suffix to distinguish comment author from track change author
@@ -1094,25 +1528,25 @@ class AuditEditApplier:
         match_start = orig_match_start
         match_end = match_start + len(violation_text)
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
-        
+
         if not affected:
             return 'fallback'
-        
-        # Filter out paragraph boundary markers (they don't have 'elem' in cross-paragraph mode)
-        real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
-        
+
+        # Filter out all synthetic boundary markers (JSON and paragraph boundaries)
+        real_runs = self._filter_real_runs(affected)
+
         if not real_runs:
             return 'fallback'
-        
+
         comment_id = self.next_comment_id
         self.next_comment_id += 1
-        
+
         first_run_info = real_runs[0]
         last_run_info = real_runs[-1]
         first_run = first_run_info['elem']
         last_run = last_run_info['elem']
         rPr_xml = self._get_rPr_xml(first_run_info.get('rPr'))
-        
+
         # Get parent paragraphs (may be different in cross-paragraph mode)
         if is_cross_paragraph:
             first_para = first_run_info.get('para_elem', para_elem)
@@ -1120,14 +1554,22 @@ class AuditEditApplier:
         else:
             first_para = para_elem
             last_para = para_elem
-        
+
         # Check if start/end runs are inside revision markup
         start_revision = self._find_revision_ancestor(first_run, first_para)
         end_revision = self._find_revision_ancestor(last_run, last_para)
-        
-        # Calculate text split points
-        before_text = first_run_info['text'][:match_start - first_run_info['start']]
-        after_text = last_run_info['text'][match_end - last_run_info['start']:]
+
+        # Calculate text split points using real runs
+        # Use original text for mutations (not JSON-escaped text)
+        first_orig_text = self._get_run_original_text(first_run_info)
+        last_orig_text = self._get_run_original_text(last_run_info)
+
+        # Translate offsets from escaped space to original space
+        before_offset = self._translate_escaped_offset(first_run_info, max(0, match_start - first_run_info['start']))
+        after_offset = self._translate_escaped_offset(last_run_info, max(0, match_end - last_run_info['start']))
+
+        before_text = first_orig_text[:before_offset]
+        after_text = last_orig_text[after_offset:]
         
         # Create comment markers
         range_start = etree.fromstring(
@@ -1362,16 +1804,22 @@ class AuditEditApplier:
                             break
             
             # Fallback 2: Try cross-paragraph search (within uuid → uuid_end range)
+            # This also handles table content with JSON format matching
+            boundary_error = None
             if target_para is None:
                 if self.verbose:
                     print(f"  [Fallback] Trying cross-paragraph search...")
-                
+
                 # Collect runs across all paragraphs in range
-                cross_runs, cross_text, is_multi_para = self._collect_runs_info_across_paragraphs(
+                cross_runs, cross_text, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
                     anchor_para, item.uuid_end
                 )
-                
-                if is_multi_para:
+
+                if boundary_error:
+                    # Boundary error detected - will handle below
+                    if self.verbose:
+                        print(f"  [Boundary] {boundary_error}")
+                elif is_multi_para:
                     # Only use cross-paragraph mode if there are actually multiple paragraphs
                     pos = cross_text.find(violation_text)
                     if pos != -1:
@@ -1380,11 +1828,31 @@ class AuditEditApplier:
                         matched_runs_info = cross_runs
                         matched_start = pos
                         is_cross_paragraph = True
-                        
+
                         if self.verbose:
                             print(f"  [Success] Found in cross-paragraph mode")
             
             if target_para is None:
+                # Check if we have a boundary error from table/row crossing
+                if boundary_error:
+                    reason = ""
+                    if boundary_error == 'boundary_crossed':
+                        reason = "Text crosses body/table boundary (not supported)"
+                    elif boundary_error == 'row_boundary_crossed':
+                        reason = "Text crosses table row boundary (Word doesn't support cross-row comments)"
+                    else:
+                        reason = f"Boundary error: {boundary_error}"
+
+                    self._apply_fallback_comment(anchor_para, item, reason)
+                    if self.verbose:
+                        print(f"  [Boundary] {reason}")
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=reason,
+                        warning=True
+                    )
+
                 # For manual fix_action, text not found is expected (not an error)
                 if item.fix_action == 'manual':
                     self._apply_error_comment(anchor_para, item)
@@ -1411,13 +1879,28 @@ class AuditEditApplier:
                     match_end = matched_start + len(violation_text)
                     affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
 
-                    # Filter out paragraph boundary markers
-                    real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
+                    # Filter out boundary markers (paragraph and JSON boundaries)
+                    real_runs = [r for r in affected
+                                 if not r.get('is_para_boundary', False)
+                                 and not r.get('is_json_boundary', False)
+                                 and not r.get('is_json_escape', False)]
 
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
-                    if len(para_elems) > 1:
+                    # Check if match spans multiple table rows (most restrictive)
+                    if self._check_cross_row_boundary(real_runs):
+                        # Cross-row delete not supported - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-row] delete spans multiple rows, fallback to comment")
+                        success_status = 'cross_row_fallback'
+                    # Check if match spans multiple table cells (within same row)
+                    elif self._check_cross_cell_boundary(real_runs):
+                        # Cross-cell delete not supported - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-cell] delete spans multiple cells, fallback to comment")
+                        success_status = 'cross_cell_fallback'
+                    elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
                             print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
@@ -1448,13 +1931,28 @@ class AuditEditApplier:
                     match_end = matched_start + len(violation_text)
                     affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
 
-                    # Filter out paragraph boundary markers
-                    real_runs = [r for r in affected if not r.get('is_para_boundary', False)]
+                    # Filter out boundary markers (paragraph and JSON boundaries)
+                    real_runs = [r for r in affected
+                                 if not r.get('is_para_boundary', False)
+                                 and not r.get('is_json_boundary', False)
+                                 and not r.get('is_json_escape', False)]
 
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
-                    if len(para_elems) > 1:
+                    # Check if match spans multiple table rows (most restrictive)
+                    if self._check_cross_row_boundary(real_runs):
+                        # Cross-row replace not supported - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-row] replace spans multiple rows, fallback to comment")
+                        success_status = 'cross_row_fallback'
+                    # Check if match spans multiple table cells (within same row)
+                    elif self._check_cross_cell_boundary(real_runs):
+                        # Cross-cell replace not supported - fallback to comment
+                        if self.verbose:
+                            print(f"  [Cross-cell] replace spans multiple cells, fallback to comment")
+                        success_status = 'cross_cell_fallback'
+                    elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
                             print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
@@ -1522,6 +2020,48 @@ class AuditEditApplier:
                 if manual_status == 'success':
                     if self.verbose:
                         print(f"  [Cross-paragraph] Applied comment instead")
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=reason,
+                        warning=True
+                    )
+                else:
+                    # Manual comment also failed - use fallback comment
+                    self._apply_fallback_comment(target_para, item, reason)
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=f"{reason} (comment also failed)",
+                        warning=True
+                    )
+            elif success_status == 'cross_row_fallback':
+                # Cross-row delete/replace not supported - Word doesn't support cross-row comments
+                reason = "Cross-row track change not supported (Word limitation)"
+                # Use fallback comment (non-selected) since cross-row comments are not supported
+                self._apply_fallback_comment(target_para, item, reason)
+                if self.verbose:
+                    print(f"  [Cross-row] Applied fallback comment")
+                return EditResult(
+                    success=True,
+                    item=item,
+                    error_message=reason,
+                    warning=True
+                )
+            elif success_status == 'cross_cell_fallback':
+                # Cross-cell delete/replace not supported - fallback to manual comment
+                reason = "Cross-cell track change not supported, fallback to comment"
+                # Apply manual comment instead (same row comment is supported)
+                manual_status = self._apply_manual(
+                    target_para, violation_text,
+                    item.violation_reason, revised_text,
+                    matched_runs_info, matched_start,
+                    item_author,
+                    is_cross_paragraph
+                )
+                if manual_status == 'success':
+                    if self.verbose:
+                        print(f"  [Cross-cell] Applied comment instead")
                     return EditResult(
                         success=True,
                         item=item,
