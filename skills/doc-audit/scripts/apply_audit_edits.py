@@ -419,6 +419,42 @@ class AuditEditApplier:
         """Find paragraph element by its w14:paraId."""
         return self._find_para_node_by_id(uuid)
 
+    def _get_cell_merge_properties(self, tcPr):
+        """
+        Get cell merge properties (gridSpan and vMerge).
+        
+        Args:
+            tcPr: Cell properties element (w:tcPr)
+        
+        Returns:
+            Tuple of (grid_span, vmerge_type)
+            - grid_span: Number of columns this cell spans (default 1)
+            - vmerge_type: 'restart' | 'continue' | None
+        """
+        grid_span = 1
+        vmerge_type = None
+        
+        if tcPr is not None:
+            # Check gridSpan (horizontal merge)
+            gs = tcPr.find(f'{{{NS["w"]}}}gridSpan')
+            if gs is not None:
+                try:
+                    grid_span = int(gs.get(f'{{{NS["w"]}}}val'))
+                except (ValueError, TypeError):
+                    grid_span = 1
+            
+            # Check vMerge (vertical merge)
+            vmerge_elem = tcPr.find(f'{{{NS["w"]}}}vMerge')
+            if vmerge_elem is not None:
+                vmerge_val = vmerge_elem.get(f'{{{NS["w"]}}}val')
+                if vmerge_val == 'restart':
+                    vmerge_type = 'restart'
+                else:
+                    # None or 'continue' both mean continue
+                    vmerge_type = 'continue'
+        
+        return grid_span, vmerge_type
+
     # ==================== Run Processing ====================
 
     def _collect_runs_info_across_paragraphs(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool, Optional[str]]:
@@ -523,14 +559,21 @@ class AuditEditApplier:
 
     def _collect_runs_info_in_table(self, start_para, uuid_end: str, table_elem) -> Tuple[List[Dict], str, bool, Optional[str]]:
         """
-        Collect run info within a table using JSON format, handling multiple rows.
+        Collect run info within a table using JSON format, handling multiple rows and merged cells.
 
         For each row, format matches parse_document.py: ["cell1", "cell2", "cell3"]
         - Cell boundaries within row: '", "'
         - Paragraph boundaries within cell: '\\n' (JSON-escaped as '\\n')
         - Row boundaries: '"], ["' (close previous row, open new row)
         - Content is JSON-escaped to match LLM output
-
+        
+        Merged cell handling (consistent with TableExtractor):
+        - Horizontal merge (gridSpan): Content in first cell only, spans multiple columns
+        - Vertical merge (vMerge):
+          - restart: Start of merge region, content recorded in vmerge_content
+          - continue: Copy content from vmerge_content if available (within uuid range)
+          - If restart is outside uuid range, continue cells remain empty
+        
         Note: This method collects content across multiple rows. The caller should
         check if the actual match spans multiple rows using _check_cross_row_boundary().
 
@@ -543,6 +586,253 @@ class AuditEditApplier:
             Tuple of (runs_info, combined_text, is_cross_paragraph, boundary_error)
             - runs_info includes 'cell_elem' and 'row_elem' fields
             - runs_info includes 'original_text' for actual content (before JSON escaping)
+        """
+        # Get number of columns from tblGrid
+        tbl_grid = table_elem.find(f'{{{NS["w"]}}}tblGrid')
+        num_cols = 0
+        if tbl_grid is not None:
+            num_cols = len(tbl_grid.findall(f'{{{NS["w"]}}}gridCol'))
+        
+        if num_cols == 0:
+            # No columns defined, fallback to paragraph iteration
+            return self._collect_runs_info_in_table_legacy(start_para, uuid_end, table_elem)
+        
+        runs_info = []
+        pos = 0
+        in_range = False
+        first_row_in_range = True
+        vmerge_content = {}  # {grid_col: {'runs': [...], 'text': str}}
+        last_para = start_para
+        reached_end = False  # Flag to stop when uuid_end is found
+        
+        # Iterate rows (w:tr elements)
+        for tr in table_elem.findall(f'{{{NS["w"]}}}tr'):
+            if reached_end:
+                break
+            
+            grid_col = 0
+            row_data = []  # List of (cell_runs, cell_text) for this row
+            
+            # Iterate cells (w:tc elements) in this row
+            for tc in tr.findall(f'{{{NS["w"]}}}tc'):
+                if reached_end:
+                    break
+                # Get cell properties
+                tcPr = tc.find(f'{{{NS["w"]}}}tcPr')
+                grid_span, vmerge_type = self._get_cell_merge_properties(tcPr)
+                
+                # Collect all paragraphs in this cell
+                cell_paras = tc.findall(f'{{{NS["w"]}}}p')
+                
+                # Check if any paragraph in this cell is in range
+                cell_in_range = False
+                for para in cell_paras:
+                    para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                    if para is start_para:
+                        in_range = True
+                        cell_in_range = True
+                    if in_range and para_id:
+                        cell_in_range = True
+                        last_para = para
+                        if para_id == uuid_end:
+                            break
+                
+                # Collect cell content if in range
+                cell_runs = []
+                cell_text = ''
+                
+                if cell_in_range:
+                    # Determine cell content based on vMerge type
+                    if vmerge_type == 'restart':
+                        # Merge restart: collect content and store in vmerge_content
+                        for para_idx, para in enumerate(cell_paras):
+                            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            if not in_range and para is not start_para:
+                                continue
+                            if para is start_para:
+                                in_range = True
+                            
+                            if para_idx > 0:
+                                # Add paragraph boundary marker
+                                cell_runs.append({
+                                    'text': '\\n',
+                                    'is_json_escape': True,
+                                    'is_para_boundary': True,
+                                    'para_elem': para,
+                                    'cell_elem': tc,
+                                    'row_elem': tr
+                                })
+                                cell_text += '\\n'
+                            
+                            para_runs, _ = self._collect_runs_info_original(para)
+                            for run in para_runs:
+                                original_text = run['text']
+                                escaped_text = json_escape(original_text)
+                                cell_runs.append({
+                                    **run,
+                                    'original_text': original_text,
+                                    'text': escaped_text,
+                                    'para_elem': para,
+                                    'cell_elem': tc,
+                                    'row_elem': tr
+                                })
+                                cell_text += escaped_text
+                            
+                            if para_id == uuid_end:
+                                break
+                        
+                        # Store in vmerge_content for future continue cells
+                        vmerge_content[grid_col] = {
+                            'runs': cell_runs,
+                            'text': cell_text
+                        }
+                    
+                    elif vmerge_type == 'continue':
+                        # Merge continue: copy from vmerge_content if available
+                        if grid_col in vmerge_content:
+                            # Deep copy runs to avoid reference issues
+                            cell_runs = [dict(r) for r in vmerge_content[grid_col]['runs']]
+                            cell_text = vmerge_content[grid_col]['text']
+                            # Update row_elem to current row
+                            for run in cell_runs:
+                                run['row_elem'] = tr
+                        # else: restart outside range, keep empty
+                    
+                    else:
+                        # Normal cell (no vMerge)
+                        for para_idx, para in enumerate(cell_paras):
+                            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            if not in_range and para is not start_para:
+                                continue
+                            if para is start_para:
+                                in_range = True
+                            
+                            if para_idx > 0:
+                                cell_runs.append({
+                                    'text': '\\n',
+                                    'is_json_escape': True,
+                                    'is_para_boundary': True,
+                                    'para_elem': para,
+                                    'cell_elem': tc,
+                                    'row_elem': tr
+                                })
+                                cell_text += '\\n'
+                            
+                            para_runs, _ = self._collect_runs_info_original(para)
+                            for run in para_runs:
+                                original_text = run['text']
+                                escaped_text = json_escape(original_text)
+                                cell_runs.append({
+                                    **run,
+                                    'original_text': original_text,
+                                    'text': escaped_text,
+                                    'para_elem': para,
+                                    'cell_elem': tc,
+                                    'row_elem': tr
+                                })
+                                cell_text += escaped_text
+                            
+                            if para_id == uuid_end:
+                                break
+                        
+                        # Check if empty cell inherits from vMerge (TableExtractor logic)
+                        if not cell_text and grid_col in vmerge_content:
+                            cell_runs = [dict(r) for r in vmerge_content[grid_col]['runs']]
+                            cell_text = vmerge_content[grid_col]['text']
+                            for run in cell_runs:
+                                run['row_elem'] = tr
+                        elif cell_text:
+                            # Non-empty normal cell ends vMerge region
+                            vmerge_content.pop(grid_col, None)
+                
+                # Store cell data - only if cell is in range or has content
+                # This prevents adding empty cells before the start of the range
+                if cell_in_range or cell_runs:
+                    row_data.append((cell_runs, cell_text))
+                else:
+                    # Cell not in range and empty - don't add to row_data
+                    # But we still need to account for it in the row structure
+                    # So we add a placeholder that will be filtered later
+                    pass
+                
+                # Advance grid column by gridSpan
+                grid_col += grid_span
+                
+                # Check if we've reached the end - stop immediately when uuid_end is found
+                if cell_in_range:
+                    for para in cell_paras:
+                        para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                        if para_id == uuid_end:
+                            reached_end = True
+                            break
+            
+            # After processing all cells in row, add to runs_info if row is in range
+            if in_range and any(runs for runs, _ in row_data):
+                # Add row opening marker (first row gets '["', subsequent get '"], ["')
+                if first_row_in_range:
+                    runs_info.append({
+                        'text': '["',
+                        'start': pos,
+                        'end': pos + 2,
+                        'para_elem': last_para,
+                        'is_json_boundary': True
+                    })
+                    pos += 2
+                    first_row_in_range = False
+                else:
+                    runs_info.append({
+                        'text': '"], ["',
+                        'start': pos,
+                        'end': pos + 6,
+                        'para_elem': last_para,
+                        'is_json_boundary': True,
+                        'is_row_boundary': True
+                    })
+                    pos += 6
+                
+                # Add cell data for this row
+                for cell_idx, (cell_runs, cell_text) in enumerate(row_data):
+                    if cell_idx > 0:
+                        # Add cell boundary marker
+                        runs_info.append({
+                            'text': '", "',
+                            'start': pos,
+                            'end': pos + 4,
+                            'para_elem': last_para,
+                            'is_json_boundary': True,
+                            'is_cell_boundary': True
+                        })
+                        pos += 4
+                    
+                    # Add cell runs
+                    for run in cell_runs:
+                        run['start'] = pos
+                        run['end'] = pos + len(run['text'])
+                        runs_info.append(run)
+                        pos += len(run['text'])
+            
+        
+        # Add closing '"]'
+        if in_range:
+            runs_info.append({
+                'text': '"]',
+                'start': pos,
+                'end': pos + 2,
+                'para_elem': last_para,
+                'is_json_boundary': True
+            })
+            pos += 2
+        
+        combined_text = ''.join(r['text'] for r in runs_info)
+        is_cross_paragraph = True  # Table mode is always treated as cross-paragraph
+        
+        return runs_info, combined_text, is_cross_paragraph, None
+    
+    def _collect_runs_info_in_table_legacy(self, start_para, uuid_end: str, table_elem) -> Tuple[List[Dict], str, bool, Optional[str]]:
+        """
+        Legacy table collection method (paragraph iteration without merge handling).
+        
+        Used as fallback when tblGrid is not available.
         """
         runs_info = []
         pos = 0
