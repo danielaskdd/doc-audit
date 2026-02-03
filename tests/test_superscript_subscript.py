@@ -390,6 +390,55 @@ def test_nested_markup_not_supported():
     print("✓ test_nested_markup_not_supported passed")
 
 
+def test_strip_inherited_vertAlign():
+    """Test that normal segments strip inherited vertAlign from base rPr"""
+    applier = object.__new__(AuditEditApplier)
+    
+    # Create base rPr with superscript (simulating a superscript run being used as template)
+    base_rPr_xml = f'<w:rPr xmlns:w="{NS["w"]}"><w:vertAlign w:val="superscript"/></w:rPr>'
+    
+    # Create run with mixed text: "x<sup>2</sup>y"
+    # This simulates replacing superscript text with mixed normal/super text
+    result = applier._create_run('x<sup>2</sup>y', base_rPr_xml)
+    
+    assert result.tag == 'container', f"Expected container, got {result.tag}"
+    runs = list(result)
+    assert len(runs) == 3, f"Expected 3 runs, got {len(runs)}"
+    
+    # First run: "x" (normal) - should NOT have vertAlign
+    run1 = runs[0]
+    t1 = run1.find(qn('w:t'))
+    assert t1.text == 'x', f"Expected 'x', got '{t1.text}'"
+    
+    rPr1 = run1.find(qn('w:rPr'))
+    assert rPr1 is not None, "Expected w:rPr in first run"
+    vertAlign1 = rPr1.find(qn('w:vertAlign'))
+    assert vertAlign1 is None, "First run should NOT have w:vertAlign (inherited vertAlign should be stripped)"
+    
+    # Second run: "2" (superscript) - should have vertAlign
+    run2 = runs[1]
+    t2 = run2.find(qn('w:t'))
+    assert t2.text == '2', f"Expected '2', got '{t2.text}'"
+    
+    rPr2 = run2.find(qn('w:rPr'))
+    assert rPr2 is not None, "Expected w:rPr in second run"
+    vertAlign2 = rPr2.find(qn('w:vertAlign'))
+    assert vertAlign2 is not None, "Second run should have w:vertAlign"
+    assert vertAlign2.get(qn('w:val')) == 'superscript', "Second run should be superscript"
+    
+    # Third run: "y" (normal) - should NOT have vertAlign
+    run3 = runs[2]
+    t3 = run3.find(qn('w:t'))
+    assert t3.text == 'y', f"Expected 'y', got '{t3.text}'"
+    
+    rPr3 = run3.find(qn('w:rPr'))
+    assert rPr3 is not None, "Expected w:rPr in third run"
+    vertAlign3 = rPr3.find(qn('w:vertAlign'))
+    assert vertAlign3 is None, "Third run should NOT have w:vertAlign (inherited vertAlign should be stripped)"
+    
+    print("✓ test_strip_inherited_vertAlign passed")
+
+
 # ============================================================
 # Test Runner
 # ============================================================
@@ -432,6 +481,7 @@ def run_all_tests():
         ("Edge Cases", [
             test_empty_superscript,
             test_nested_markup_not_supported,
+            test_strip_inherited_vertAlign,
         ]),
     ]
     

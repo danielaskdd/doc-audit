@@ -1813,6 +1813,11 @@ class AuditEditApplier:
                 # Add new w:vertAlign
                 vert_align_elem = etree.SubElement(run_rPr, f'{{{NS["w"]}}}vertAlign')
                 vert_align_elem.set(f'{{{NS["w"]}}}val', vert_align)
+            else:
+                # For normal segments (vert_align=None), strip any inherited vertAlign
+                # to prevent normal text from being incorrectly rendered as super/subscript
+                for existing in run_rPr.findall('w:vertAlign', NS):
+                    run_rPr.remove(existing)
             
             # Create run with modified rPr
             run = etree.Element(f'{{{NS["w"]}}}r')
