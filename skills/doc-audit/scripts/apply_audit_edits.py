@@ -1449,39 +1449,66 @@ class AuditEditApplier:
                 # Normal run (not in revision markup)
                 rPr = child.find('w:rPr', NS)
                 
-                # Check for drawing (inline images)
-                drawing_elem = child.find(f'{{{NS["w"]}}}drawing')
-                if drawing_elem is not None:
-                    inline = drawing_elem.find(f'{{{NS["wp"]}}}inline')
-                    if inline is not None:
-                        doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
-                        if doc_pr is not None:
-                            img_id = doc_pr.get('id', '')
-                            img_name = doc_pr.get('name', '')
-                            img_str = f'<drawing id="{img_id}" name="{img_name}" />'
-                            runs_info.append({
-                                'text': img_str,
-                                'start': pos,
-                                'end': pos + len(img_str),
-                                'elem': child,
-                                'rPr': rPr,
-                                'is_drawing': True
-                            })
-                            pos += len(img_str)
-                            continue  # Skip text extraction for image runs
+                # Extract text and drawings in document order
+                # This preserves the correct position of images relative to text
+                text_parts = []
+                has_drawing = False
                 
-                # Extract text with superscript/subscript markup
-                text = self._extract_text_from_run_element(child, rPr)
+                # Check for vertical alignment (superscript/subscript)
+                vert_align = None
+                if rPr is not None:
+                    vert_align_elem = rPr.find('w:vertAlign', NS)
+                    if vert_align_elem is not None:
+                        vert_align = vert_align_elem.get(f'{{{NS["w"]}}}val')
                 
-                if text:
+                # Process children in order to preserve text/image positions
+                for elem in child:
+                    if elem.tag == f'{{{NS["w"]}}}t':
+                        text = elem.text or ''
+                        if text:
+                            text_parts.append(text)
+                    elif elem.tag == f'{{{NS["w"]}}}delText':
+                        text = elem.text or ''
+                        if text:
+                            text_parts.append(text)
+                    elif elem.tag == f'{{{NS["w"]}}}tab':
+                        text_parts.append('\t')
+                    elif elem.tag == f'{{{NS["w"]}}}br':
+                        br_type = elem.get(f'{{{NS["w"]}}}type')
+                        if br_type in (None, 'textWrapping'):
+                            text_parts.append('\n')
+                    elif elem.tag == f'{{{NS["w"]}}}drawing':
+                        # Insert drawing placeholder at current position
+                        has_drawing = True
+                        inline = elem.find(f'{{{NS["wp"]}}}inline')
+                        if inline is not None:
+                            doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
+                            if doc_pr is not None:
+                                img_id = doc_pr.get('id', '')
+                                img_name = doc_pr.get('name', '')
+                                text_parts.append(f'<drawing id="{img_id}" name="{img_name}" />')
+                
+                # Combine all parts
+                combined_text = ''.join(text_parts)
+                
+                # Apply superscript/subscript markup if needed
+                if combined_text and vert_align in ('superscript', 'subscript'):
+                    if vert_align == 'superscript':
+                        combined_text = f'<sup>{combined_text}</sup>'
+                    else:
+                        combined_text = f'<sub>{combined_text}</sub>'
+                
+                # Create run record if there's any content
+                if combined_text:
                     runs_info.append({
-                        'text': text,
+                        'text': combined_text,
                         'start': pos,
-                        'end': pos + len(text),
+                        'end': pos + len(combined_text),
                         'elem': child,
-                        'rPr': rPr
+                        'rPr': rPr,
+                        'is_drawing': has_drawing
                     })
-                    pos += len(text)
+                    pos += len(combined_text)
         
         combined_text = ''.join(r['text'] for r in runs_info)
         return runs_info, combined_text
