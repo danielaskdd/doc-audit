@@ -2932,9 +2932,9 @@ class AuditEditApplier:
                     if target_para is None:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
-                            reason = "Text crosses body/table boundary (not supported)"
+                            reason = "Violation text not found in body/table boundary block"
                         elif boundary_error == 'row_boundary_crossed':
-                            reason = "Text crosses table row boundary (Word doesn't support cross-row comments)"
+                            reason = "Violation text not found in cross-row block"
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
@@ -2951,20 +2951,33 @@ class AuditEditApplier:
                 # Only proceed with fallback if target_para is still None
                 # (boundary_error handling may have found a match)
                 if target_para is None:
+                    # Calculate total segments for error message
+                    # Initialize variables with safe defaults if not already defined
+                    if 'tables_in_range' not in locals():
+                        tables_in_range = []
+                    if 'body_segments' not in locals():
+                        body_segments = []
+                    
+                    total_segments = len(tables_in_range) + len(body_segments)
+                    
+                    if total_segments == 1:
+                        reason = "Violation text not found in mono block"
+                    else:
+                        reason = f"Violation text not found in {total_segments}-segment block"
+                    
                     # For manual fix_action, text not found is expected (not an error)
                     if item.fix_action == 'manual':
                         self._apply_error_comment(anchor_para, item)
                         return EditResult(
                             success=True,
                             item=item,
-                            error_message="Target missing, comment on heading instead: ",
+                            error_message=reason,
                             warning=True
                         )
                     else:
                         # For delete/replace, text not found is an error
                         self._apply_error_comment(anchor_para, item)
-                        return EditResult(False, item,
-                            f"Text not found after anchor: ")
+                        return EditResult(False, item, reason)
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching
