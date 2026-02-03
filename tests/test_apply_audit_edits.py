@@ -1271,9 +1271,10 @@ class TestApplyManualWithRevisions:
 class TestLoadJsonlStrictValidation:
     """Tests for _load_jsonl strict uuid_end validation"""
     
-    def test_load_jsonl_with_uuid_end_flat_format(self):
+    def test_load_jsonl_with_uuid_end_flat_format(self, tmp_path):
         """Test loading flat format JSONL with uuid_end field"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        jsonl_path = tmp_path / "flat_uuid_end.jsonl"
+        with jsonl_path.open(mode='w', encoding='utf-8') as f:
             # Write meta line
             meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
             json.dump(meta, f)
@@ -1298,7 +1299,7 @@ class TestLoadJsonlStrictValidation:
             # Create applier with mocked dependencies
             with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
                 applier = AuditEditApplier.__new__(AuditEditApplier)
-                applier.jsonl_path = Path(f.name)
+                applier.jsonl_path = jsonl_path
                 
                 meta_loaded, items_loaded = applier._load_jsonl()
                 
@@ -1306,9 +1307,10 @@ class TestLoadJsonlStrictValidation:
                 assert items_loaded[0].uuid == 'AAAAAAAA'
                 assert items_loaded[0].uuid_end == 'BBBBBBBB'
     
-    def test_load_jsonl_missing_uuid_end_flat_format_raises(self):
+    def test_load_jsonl_missing_uuid_end_flat_format_raises(self, tmp_path):
         """Test that missing uuid_end in flat format raises ValueError"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        jsonl_path = tmp_path / "flat_missing_uuid_end.jsonl"
+        with jsonl_path.open(mode='w', encoding='utf-8') as f:
             # Write meta line
             meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
             json.dump(meta, f)
@@ -1333,14 +1335,15 @@ class TestLoadJsonlStrictValidation:
             # Create applier with mocked dependencies
             with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
                 applier = AuditEditApplier.__new__(AuditEditApplier)
-                applier.jsonl_path = Path(f.name)
+                applier.jsonl_path = jsonl_path
                 
                 with pytest.raises(ValueError, match="Missing 'uuid_end' field"):
                     applier._load_jsonl()
     
-    def test_load_jsonl_with_uuid_end_nested_format(self):
+    def test_load_jsonl_with_uuid_end_nested_format(self, tmp_path):
         """Test loading nested format JSONL (from run_audit.py) with uuid_end"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        jsonl_path = tmp_path / "nested_uuid_end.jsonl"
+        with jsonl_path.open(mode='w', encoding='utf-8') as f:
             # Write meta line
             meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
             json.dump(meta, f)
@@ -1372,7 +1375,7 @@ class TestLoadJsonlStrictValidation:
             # Create applier with mocked dependencies
             with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
                 applier = AuditEditApplier.__new__(AuditEditApplier)
-                applier.jsonl_path = Path(f.name)
+                applier.jsonl_path = jsonl_path
                 
                 meta_loaded, items_loaded = applier._load_jsonl()
                 
@@ -1381,9 +1384,10 @@ class TestLoadJsonlStrictValidation:
                 assert items_loaded[0].uuid_end == 'BBBBBBBB'
                 assert items_loaded[0].heading == 'Section 1'
     
-    def test_load_jsonl_missing_uuid_end_nested_format_raises(self):
+    def test_load_jsonl_missing_uuid_end_nested_format_raises(self, tmp_path):
         """Test that missing uuid_end in nested format raises ValueError"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        jsonl_path = tmp_path / "nested_missing_uuid_end.jsonl"
+        with jsonl_path.open(mode='w', encoding='utf-8') as f:
             # Write meta line
             meta = {'type': 'meta', 'source_file': '/tmp/test.docx', 'source_hash': 'sha256:abc123'}
             json.dump(meta, f)
@@ -1414,7 +1418,7 @@ class TestLoadJsonlStrictValidation:
             # Create applier with mocked dependencies
             with patch.object(AuditEditApplier, '__init__', lambda x, *args, **kwargs: None):
                 applier = AuditEditApplier.__new__(AuditEditApplier)
-                applier.jsonl_path = Path(f.name)
+                applier.jsonl_path = jsonl_path
                 
                 with pytest.raises(ValueError, match="Missing 'uuid_end' field"):
                     applier._load_jsonl()

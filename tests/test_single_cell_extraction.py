@@ -27,7 +27,7 @@ sys.path.insert(0, str(scripts_dir))
 from apply_audit_edits import AuditEditApplier  # noqa: E402  # type: ignore
 
 
-def create_test_document():
+def create_test_document(output_dir: Path) -> str:
     """Create a Word document with a simple table for testing."""
     doc = Document()
     
@@ -53,12 +53,11 @@ def create_test_document():
         para.set('{http://schemas.microsoft.com/office/word/2010/wordml}paraId', para_id)
         para_counter += 1
     
-    # Save to temporary file
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
-    doc.save(temp_file.name)
-    temp_file.close()
+    # Save to temporary file in the provided directory
+    docx_path = output_dir / "single_cell_extraction.docx"
+    doc.save(docx_path)
     
-    return temp_file.name
+    return str(docx_path)
 
 
 def get_paragraph_ids(docx_path):
@@ -119,74 +118,69 @@ def main():
     print("Test: Single-cell extraction from cross-cell match")
     print("=" * 70)
     
-    # 1. Create test document
-    print("\n[Step 1] Creating test document...")
-    docx_path = create_test_document()
-    print(f"  Created: {docx_path}")
-    
-    # 2. Get paragraph IDs
-    print("\n[Step 2] Extracting paragraph IDs...")
-    para_ids = get_paragraph_ids(docx_path)
-    print(f"  Found {len(para_ids)} paragraphs with IDs:")
-    for i, pid in enumerate(para_ids):
-        print(f"    [{i}] {pid}")
-    
-    if len(para_ids) < 2:
-        print("\n  ERROR: Not enough paragraphs with IDs!")
-        return 1
-    
-    # Use first paragraph as uuid_start, last paragraph as uuid_end
-    uuid_start = para_ids[0]
-    uuid_end = para_ids[-1]
-    
-    # 3. Create JSONL
-    print(f"\n[Step 3] Creating JSONL with violation...")
-    jsonl_path = Path(docx_path).with_suffix('.jsonl')
-    create_test_jsonl(docx_path, str(jsonl_path), uuid_start, uuid_end)
-    print(f"  Created: {jsonl_path}")
-    print(f"  UUID range: {uuid_start} -> {uuid_end}")
-    
-    # 4. Run apply_audit_edits with verbose mode
-    print(f"\n[Step 4] Running apply_audit_edits with verbose mode...")
-    print("-" * 70)
-    
-    applier = AuditEditApplier(
-        str(jsonl_path),
-        skip_hash=False,
-        verbose=True  # Enable verbose output to see debug logs
-    )
-    
-    results = applier.apply()
-    
-    print("-" * 70)
-    
-    # 5. Check results
-    print(f"\n[Step 5] Analyzing results...")
-    for i, result in enumerate(results):
-        print(f"\n  Result {i+1}:")
-        print(f"    Success: {result.success}")
-        print(f"    Warning: {result.warning if hasattr(result, 'warning') else 'N/A'}")
-        print(f"    Error: {result.error_message if result.error_message else 'None'}")
-        print(f"    Rule: {result.item.rule_id}")
-        print(f"    Action: {result.item.fix_action}")
-    
-    # 6. Save output
-    output_path = Path(docx_path).with_stem(Path(docx_path).stem + '_edited')
-    applier.save()
-    
-    print(f"\n[Step 6] Output saved to: {output_path}")
-    print("\n" + "=" * 70)
-    print("Test complete!")
-    print("=" * 70)
-    
-    # Cleanup note
-    print(f"\nTest files saved for inspection:")
-    print(f"  Source: {docx_path}")
-    print(f"  JSONL: {jsonl_path}")
-    print(f"  Output: {output_path}")
-    print("\nReminder: These are temporary files in /tmp (or equivalent)")
-    
-    return 0
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        # 1. Create test document
+        print("\n[Step 1] Creating test document...")
+        docx_path = create_test_document(temp_path)
+        print(f"  Created: {docx_path}")
+        
+        # 2. Get paragraph IDs
+        print("\n[Step 2] Extracting paragraph IDs...")
+        para_ids = get_paragraph_ids(docx_path)
+        print(f"  Found {len(para_ids)} paragraphs with IDs:")
+        for i, pid in enumerate(para_ids):
+            print(f"    [{i}] {pid}")
+        
+        if len(para_ids) < 2:
+            print("\n  ERROR: Not enough paragraphs with IDs!")
+            return 1
+        
+        # Use first paragraph as uuid_start, last paragraph as uuid_end
+        uuid_start = para_ids[0]
+        uuid_end = para_ids[-1]
+        
+        # 3. Create JSONL
+        print(f"\n[Step 3] Creating JSONL with violation...")
+        jsonl_path = Path(docx_path).with_suffix('.jsonl')
+        create_test_jsonl(docx_path, str(jsonl_path), uuid_start, uuid_end)
+        print(f"  Created: {jsonl_path}")
+        print(f"  UUID range: {uuid_start} -> {uuid_end}")
+        
+        # 4. Run apply_audit_edits with verbose mode
+        print(f"\n[Step 4] Running apply_audit_edits with verbose mode...")
+        print("-" * 70)
+        
+        applier = AuditEditApplier(
+            str(jsonl_path),
+            skip_hash=False,
+            verbose=True  # Enable verbose output to see debug logs
+        )
+        
+        results = applier.apply()
+        
+        print("-" * 70)
+        
+        # 5. Check results
+        print(f"\n[Step 5] Analyzing results...")
+        for i, result in enumerate(results):
+            print(f"\n  Result {i+1}:")
+            print(f"    Success: {result.success}")
+            print(f"    Warning: {result.warning if hasattr(result, 'warning') else 'N/A'}")
+            print(f"    Error: {result.error_message if result.error_message else 'None'}")
+            print(f"    Rule: {result.item.rule_id}")
+            print(f"    Action: {result.item.fix_action}")
+        
+        # 6. Save output
+        output_path = Path(docx_path).with_stem(Path(docx_path).stem + '_edited')
+        applier.save()
+        
+        print(f"\n[Step 6] Output saved to: {output_path}")
+        print("\n" + "=" * 70)
+        print("Test complete!")
+        print("=" * 70)
+        
+        return 0
 
 
 if __name__ == '__main__':

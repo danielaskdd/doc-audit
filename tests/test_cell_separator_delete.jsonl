@@ -1,2 +1,0 @@
-{"type": "meta", "source_file": "/Users/ydh/mycode/ai/doc-audit/tests/test_cell_separator_delete.docx", "source_hash": "skip"}
-{"uuid": "00000001", "uuid_end": "00000002", "violation_text": "\"Cell1\", \"Cell2\"", "violation_reason": "Test cell merge - should fallback to comment", "fix_action": "replace", "revised_text": "\"Cell1Cell2\"", "category": "test", "rule_id": "TEST_BOUNDARY_001", "heading": "Test"}

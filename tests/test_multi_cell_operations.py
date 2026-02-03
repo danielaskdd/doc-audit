@@ -4,6 +4,7 @@ Test multi-row and multi-cell delete/replace operations in apply_audit_edits.py
 """
 
 import sys
+import tempfile
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -97,15 +98,14 @@ def get_para_ids(docx_path: Path) -> dict:
     return para_ids
 
 
-def test_multi_row_delete():
+def test_multi_row_delete(tmp_path):
     """Test deleting content across multiple table rows."""
     print("\n" + "=" * 60)
     print("TEST: Multi-row Delete")
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_multi_row_delete.docx'
+    docx_path = tmp_path / 'test_multi_row_delete.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
@@ -113,7 +113,7 @@ def test_multi_row_delete():
     
     # Create JSONL with multi-row delete (JSON format)
     # Delete first two rows: ["Row 1", "Data1", "Data2"], ["Row 2", "Data3", "Data4"]
-    jsonl_path = test_dir / 'test_multi_row_delete.jsonl'
+    jsonl_path = tmp_path / 'test_multi_row_delete.jsonl'
     
     # Find start and end para IDs
     uuid_start = para_ids.get('Row 1')
@@ -167,22 +167,21 @@ def test_multi_row_delete():
         raise
 
 
-def test_multi_cell_same_row_delete():
+def test_multi_cell_same_row_delete(tmp_path):
     """Test deleting content across multiple cells in the same row."""
     print("\n" + "=" * 60)
     print("TEST: Multi-cell Same Row Delete")
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_multi_cell_delete.docx'
+    docx_path = tmp_path / 'test_multi_cell_delete.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
     para_ids = get_para_ids(docx_path)
     
     # Delete cells in first row: ["Data1", "Data2"] (skipping "Row 1")
-    jsonl_path = test_dir / 'test_multi_cell_delete.jsonl'
+    jsonl_path = tmp_path / 'test_multi_cell_delete.jsonl'
     
     uuid_start = para_ids.get('Data1')
     uuid_end = para_ids.get('Data2')
@@ -230,22 +229,21 @@ def test_multi_cell_same_row_delete():
         raise
 
 
-def test_single_cell_replace():
+def test_single_cell_replace(tmp_path):
     """Test replace operation where all changes are in a single cell."""
     print("\n" + "=" * 60)
     print("TEST: Single-cell Replace (diff spans one cell)")
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_single_cell_replace.docx'
+    docx_path = tmp_path / 'test_single_cell_replace.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
     para_ids = get_para_ids(docx_path)
     
     # Replace content in "Data1" cell only (even though violation_text spans multiple cells)
-    jsonl_path = test_dir / 'test_single_cell_replace.jsonl'
+    jsonl_path = tmp_path / 'test_single_cell_replace.jsonl'
     
     uuid_start = para_ids.get('Data1')
     uuid_end = para_ids.get('Data2')
@@ -294,21 +292,20 @@ def test_single_cell_replace():
         raise
 
 
-def test_multi_cell_replace_fallback():
+def test_multi_cell_replace_fallback(tmp_path):
     """Test replace operation where changes truly cross cell boundaries (should fallback to comment)."""
     print("\n" + "=" * 60)
     print("TEST: Multi-cell Replace Fallback (Cross-boundary)")
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_multi_cell_replace_fallback.docx'
+    docx_path = tmp_path / 'test_multi_cell_replace_fallback.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
     para_ids = get_para_ids(docx_path)
     
-    jsonl_path = test_dir / 'test_multi_cell_replace_fallback.jsonl'
+    jsonl_path = tmp_path / 'test_multi_cell_replace_fallback.jsonl'
     
     uuid_start = para_ids.get('Data1')
     uuid_end = para_ids.get('Data2')
@@ -361,15 +358,14 @@ def test_multi_cell_replace_fallback():
         raise
 
 
-def test_multi_cell_distributed_replace():
+def test_multi_cell_distributed_replace(tmp_path):
     """Test replace operation with changes distributed across multiple cells (like g2/Hz → g²/Hz)."""
     print("\n" + "=" * 60)
     print("TEST: Multi-cell Distributed Replace (g2/Hz → g²/Hz pattern)")
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_multi_cell_distributed_replace.docx'
+    docx_path = tmp_path / 'test_multi_cell_distributed_replace.docx'
     
     # Create custom table with pattern: Hz, g2/Hz, Hz, g2/Hz, Hz, g2/Hz
     doc = Document()
@@ -414,7 +410,7 @@ def test_multi_cell_distributed_replace():
             all_para_data.append((text, para_id))
     
     # Create JSONL with distributed replace (JSON format)
-    jsonl_path = test_dir / 'test_multi_cell_distributed_replace.jsonl'
+    jsonl_path = tmp_path / 'test_multi_cell_distributed_replace.jsonl'
     
     # Find first 'Hz' and last 'g2/Hz' explicitly
     uuid_start = None
@@ -481,24 +477,26 @@ def main():
     print("MULTI-CELL OPERATIONS TEST SUITE")
     print("=" * 60)
     
-    tests = [
-        ('Multi-row delete', test_multi_row_delete),
-        ('Multi-cell same row delete', test_multi_cell_same_row_delete),
-        ('Single-cell replace', test_single_cell_replace),
-        ('Multi-cell replace fallback', test_multi_cell_replace_fallback),
-        ('Multi-cell distributed replace (g2/Hz → g²/Hz)', test_multi_cell_distributed_replace),
-    ]
-    
-    results = []
-    for name, test_func in tests:
-        try:
-            test_func()  # Will raise AssertionError if test fails
-            results.append((name, True))  # No exception = success
-        except Exception as e:
-            print(f"\n✗ {name} crashed: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append((name, False))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        tests = [
+            ('Multi-row delete', lambda: test_multi_row_delete(temp_path)),
+            ('Multi-cell same row delete', lambda: test_multi_cell_same_row_delete(temp_path)),
+            ('Single-cell replace', lambda: test_single_cell_replace(temp_path)),
+            ('Multi-cell replace fallback', lambda: test_multi_cell_replace_fallback(temp_path)),
+            ('Multi-cell distributed replace (g2/Hz → g²/Hz)', lambda: test_multi_cell_distributed_replace(temp_path)),
+        ]
+        
+        results = []
+        for name, test_func in tests:
+            try:
+                test_func()  # Will raise AssertionError if test fails
+                results.append((name, True))  # No exception = success
+            except Exception as e:
+                print(f"\n✗ {name} crashed: {e}")
+                import traceback
+                traceback.print_exc()
+                results.append((name, False))
     
     # Summary
     print("\n" + "=" * 60)

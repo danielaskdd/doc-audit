@@ -1,2 +1,0 @@
-{"type": "meta", "source_file": "/Users/ydh/mycode/ai/doc-audit/tests/test_multi_cell_distributed_replace.docx", "source_hash": "skip"}
-{"uuid": "00000001", "uuid_end": "00000006", "violation_text": "[\"Hz\", \"g2/Hz\", \"Hz\", \"g2/Hz\", \"Hz\", \"g2/Hz\"]", "violation_reason": "Multi-cell distributed replace test (like user report)", "fix_action": "replace", "revised_text": "[\"Hz\", \"g²/Hz\", \"Hz\", \"g²/Hz\", \"Hz\", \"g²/Hz\"]", "category": "test", "rule_id": "TEST005", "heading": "Test"}

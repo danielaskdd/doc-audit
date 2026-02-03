@@ -8,6 +8,7 @@ leading to partial application of edits.
 """
 
 import sys
+import tempfile
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -96,7 +97,7 @@ def get_para_ids(docx_path: Path) -> dict:
     return para_ids
 
 
-def test_cell_separator_delete_fallback():
+def test_cell_separator_delete_fallback(tmp_path):
     """
     Test that attempting to delete a cell separator (", ") falls back to comment.
     
@@ -108,15 +109,14 @@ def test_cell_separator_delete_fallback():
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_cell_separator_delete.docx'
+    docx_path = tmp_path / 'test_cell_separator_delete.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
     para_ids = get_para_ids(docx_path)
     
     # Create JSONL that would merge two cells (delete separator)
-    jsonl_path = test_dir / 'test_cell_separator_delete.jsonl'
+    jsonl_path = tmp_path / 'test_cell_separator_delete.jsonl'
     
     uuid_start = para_ids.get('Cell1')
     uuid_end = para_ids.get('Cell2')
@@ -170,7 +170,7 @@ def test_cell_separator_delete_fallback():
         raise
 
 
-def test_row_separator_delete_fallback():
+def test_row_separator_delete_fallback(tmp_path):
     """
     Test that attempting to delete a row separator ("], [") falls back to comment.
     
@@ -182,15 +182,14 @@ def test_row_separator_delete_fallback():
     print("=" * 60)
     
     # Create test document
-    test_dir = Path(__file__).parent
-    docx_path = test_dir / 'test_row_separator_delete.docx'
+    docx_path = tmp_path / 'test_row_separator_delete.docx'
     create_test_table_document(docx_path)
     
     # Get paragraph IDs
     para_ids = get_para_ids(docx_path)
     
     # Create JSONL that would merge rows (delete row separator)
-    jsonl_path = test_dir / 'test_row_separator_delete.jsonl'
+    jsonl_path = tmp_path / 'test_row_separator_delete.jsonl'
     
     uuid_start = para_ids.get('Cell1')
     uuid_end = para_ids.get('Row2A')
@@ -251,21 +250,23 @@ def main():
     print("BOUNDARY MARKER OPERATIONS TEST SUITE")
     print("=" * 60)
     
-    tests = [
-        ('Cell separator delete fallback', test_cell_separator_delete_fallback),
-        ('Row separator delete fallback', test_row_separator_delete_fallback),
-    ]
-    
-    results = []
-    for name, test_func in tests:
-        try:
-            test_func()
-            results.append((name, True))
-        except Exception as e:
-            print(f"\n✗ {name} crashed: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append((name, False))
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        tests = [
+            ('Cell separator delete fallback', lambda: test_cell_separator_delete_fallback(temp_path)),
+            ('Row separator delete fallback', lambda: test_row_separator_delete_fallback(temp_path)),
+        ]
+        
+        results = []
+        for name, test_func in tests:
+            try:
+                test_func()
+                results.append((name, True))
+            except Exception as e:
+                print(f"\n✗ {name} crashed: {e}")
+                import traceback
+                traceback.print_exc()
+                results.append((name, False))
     
     # Summary
     print("\n" + "=" * 60)

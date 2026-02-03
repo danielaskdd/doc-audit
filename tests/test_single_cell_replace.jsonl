@@ -1,2 +1,0 @@
-{"type": "meta", "source_file": "/Users/ydh/mycode/ai/doc-audit/tests/test_single_cell_replace.docx", "source_hash": "skip"}
-{"uuid": "00000002", "uuid_end": "00000003", "violation_text": "\"Data1\", \"Data2\"", "violation_reason": "Single-cell replace test", "fix_action": "replace", "revised_text": "\"NewData\", \"Data2\"", "category": "test", "rule_id": "TEST003", "heading": "Test"}
