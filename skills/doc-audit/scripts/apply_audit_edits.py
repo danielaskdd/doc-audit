@@ -1187,8 +1187,12 @@ class AuditEditApplier:
         This allows processing runs cell-by-cell for multi-cell operations
         like delete/replace across table cells.
         
+        IMPORTANT: This method assumes runs are already in document order
+        (as provided by _collect_runs_info_* methods). The grouping preserves
+        this order within each cell group.
+        
         Args:
-            runs: List of run info dicts
+            runs: List of run info dicts (must be in document order)
         
         Returns:
             Dict mapping (para_elem, cell_elem) -> list of runs in that cell
@@ -1446,6 +1450,9 @@ class AuditEditApplier:
                     print(f"  [Multi-cell delete] Partial success: {success_count}/{len(cell_groups)} cells processed, {len(failed_cells)} failed")
                 else:
                     print(f"  [Multi-cell delete] Successfully deleted from all {len(cell_groups)} cells")
+            elif failed_cells:
+                # Summary logging for partial failures in non-verbose mode
+                print(f"  [Warning] {len(failed_cells)} cell(s) failed during delete operation")
             
             return 'success'
         else:
@@ -3528,8 +3535,10 @@ class AuditEditApplier:
                                     else:
                                         print(f"  [Success] Found in table (JSON format)")
                                 break
-                        except Exception:
+                        except (ValueError, KeyError, IndexError, AttributeError) as e:
                             # If table processing fails, continue to next table
+                            if self.verbose:
+                                print(f"  [Warning] Skipping table: {e}")
                             continue
                     
                     # If found, break outer loop
@@ -3751,13 +3760,11 @@ class AuditEditApplier:
                 # (boundary_error handling may have found a match)
                 if target_para is None:
                     # Calculate total segments for error message
-                    # Initialize variables with safe defaults if not already defined
-                    if 'tables_in_range' not in locals():
-                        tables_in_range = []
-                    if 'body_segments' not in locals():
-                        body_segments = []
-                    
-                    total_segments = len(tables_in_range) + len(body_segments)
+                    # Variables are initialized in their respective code paths above
+                    # If not set, default to empty lists
+                    tables_count = len(tables_in_range) if 'tables_in_range' in dir() else 0
+                    body_count = len(body_segments) if 'body_segments' in dir() else 0
+                    total_segments = tables_count + body_count
                     
                     if total_segments == 1:
                         reason = "Violation text not found in mono block"

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'skills' / 'doc-audit' / '
 from lxml import etree
 from docx import Document
 
-from apply_audit_edits import AuditEditApplier, EditItem, NS
+from apply_audit_edits import AuditEditApplier, NS  # type: ignore
 
 
 def create_test_table_document(docx_path: Path):
