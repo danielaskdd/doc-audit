@@ -39,7 +39,7 @@ def test_superscript_replacement_preserves_suffix():
     para = doc.add_paragraph()
     
     # Add text: "振动量级：0.04g"
-    run1 = para.add_run("振动量级：0.04g")
+    para.add_run("振动量级：0.04g")
     
     # Add superscript "2" (<sup>2</sup>)
     run2 = para.add_run("2")
@@ -48,7 +48,7 @@ def test_superscript_replacement_preserves_suffix():
     vertAlign.set(f'{{{NS["w"]}}}val', 'superscript')
     
     # Add "/Hz"
-    run3 = para.add_run("/Hz")
+    para.add_run("/Hz")
     
     # Get paragraph element and add w14:paraId
     para_elem = para._element
