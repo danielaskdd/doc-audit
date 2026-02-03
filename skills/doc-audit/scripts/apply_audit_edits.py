@@ -1614,8 +1614,10 @@ class AuditEditApplier:
                     violation_pos += len(text)
                 
                 elif op == 'insert':
-                    # Check if insertion point is within cell range
-                    if relative_start <= violation_pos <= relative_end:
+                    # Check if insertion point is within cell range (exclude right boundary)
+                    # Insertions at exact cell boundary (violation_pos == relative_end) are 
+                    # ambiguous and should trigger cross-cell fallback
+                    if relative_start <= violation_pos < relative_end:
                         revised_accumulator += text
                         has_changes_in_cell = True
             
@@ -3917,28 +3919,75 @@ class AuditEditApplier:
                                 first_success_para = None
                                 
                                 for cell_edit in multi_cells:
-                                    # Find paragraph for this cell
-                                    cell_para = None
+                                    # Collect all paragraphs in this cell (handle multi-paragraph cells)
+                                    cell_paras = set()
                                     for run in cell_edit['cell_runs']:
-                                        if run.get('para_elem') is not None:
-                                            cell_para = run['para_elem']
-                                            break
+                                        para = run.get('para_elem')
+                                        if para is not None:
+                                            cell_paras.add(para)
                                     
-                                    if cell_para is None:
+                                    if not cell_paras:
                                         failed_cells.append((cell_edit, None, "No paragraph found"))
                                         continue  # Continue processing next cell
                                     
-                                    # Collect runs for this cell
-                                    cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
+                                    # Build combined runs/text from all paragraphs in this cell
+                                    cell_runs_info = []
+                                    cell_text_parts = []
+                                    pos = 0
+                                    
+                                    # Sort paragraphs by document order (use first run's start position as key)
+                                    para_list = []
+                                    for para in cell_paras:
+                                        # Find first run from this paragraph to get its position
+                                        first_run_pos = None
+                                        for run in cell_edit['cell_runs']:
+                                            if run.get('para_elem') is para:
+                                                first_run_pos = run.get('start', 0)
+                                                break
+                                        para_list.append((first_run_pos or 0, para))
+                                    para_list.sort(key=lambda x: x[0])
+                                    
+                                    first_para = None
+                                    for para_idx, (_, para) in enumerate(para_list):
+                                        if first_para is None:
+                                            first_para = para
+                                        
+                                        # Collect runs for this paragraph
+                                        para_runs, para_text = self._collect_runs_info_original(para)
+                                        
+                                        # Add paragraph boundary (not for first paragraph)
+                                        if para_idx > 0 and cell_runs_info:
+                                            cell_runs_info.append({
+                                                'text': '\n',
+                                                'start': pos,
+                                                'end': pos + 1,
+                                                'para_elem': para,
+                                                'is_para_boundary': True
+                                            })
+                                            cell_text_parts.append('\n')
+                                            pos += 1
+                                        
+                                        # Add paragraph runs with adjusted positions
+                                        for run in para_runs:
+                                            run_copy = dict(run)
+                                            run_copy['para_elem'] = para
+                                            run_copy['start'] = run['start'] + pos
+                                            run_copy['end'] = run['end'] + pos
+                                            cell_runs_info.append(run_copy)
+                                        
+                                        cell_text_parts.append(para_text)
+                                        pos += len(para_text)
+                                    
+                                    cell_text = ''.join(cell_text_parts)
                                     cell_pos = cell_text.find(cell_edit['cell_violation'])
                                     
                                     if cell_pos == -1:
-                                        failed_cells.append((cell_edit, cell_para, "Text not found in cell"))
+                                        failed_cells.append((cell_edit, first_para, "Text not found in cell"))
                                         continue  # Continue processing next cell
                                     
                                     # Apply replace to this cell WITHOUT comment (skip_comment=True)
                                     cell_status = self._apply_replace(
-                                        cell_para,
+                                        first_para,
                                         cell_edit['cell_violation'],
                                         cell_edit['cell_revised'],
                                         item.violation_reason,
@@ -3949,13 +3998,13 @@ class AuditEditApplier:
                                     )
                                     
                                     if cell_status != 'success':
-                                        failed_cells.append((cell_edit, cell_para, f"Apply failed: {cell_status}"))
+                                        failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
                                         continue  # Continue processing next cell
                                     
                                     # Success - track for overall comment
                                     success_count += 1
                                     if first_success_para is None:
-                                        first_success_para = cell_para
+                                        first_success_para = first_para
                                 
                                 # Handle results based on success/failure counts
                                 if success_count > 0:
