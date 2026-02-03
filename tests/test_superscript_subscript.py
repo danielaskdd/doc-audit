@@ -15,8 +15,8 @@ from lxml import etree
 # Add skills directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / 'skills' / 'doc-audit' / 'scripts'))
 
-from parse_document import extract_text_from_run
-from apply_audit_edits import AuditEditApplier
+from parse_document import extract_text_from_run  # noqa: E402  # type: ignore
+from apply_audit_edits import AuditEditApplier  # noqa: E402  # type: ignore
 
 # Namespaces for XML construction
 NS = {

@@ -674,7 +674,6 @@ class AuditEditApplier:
             - is_cross_paragraph: True if text spans multiple paragraphs
             - boundary_error: None if OK, or error type string:
               - 'boundary_crossed': Crossed body/table or different tables
-              - 'row_boundary_crossed': Crossed table row boundary
         """
         # 1. Detect if start paragraph is in a table
         start_in_table = self._is_paragraph_in_table(start_para)
@@ -2933,8 +2932,6 @@ class AuditEditApplier:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
                             reason = "Violation text not found in body/table boundary block"
-                        elif boundary_error == 'row_boundary_crossed':
-                            reason = "Violation text not found in cross-row block"
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
