@@ -2821,11 +2821,30 @@ class AuditEditApplier:
                 comment_initials = comment_author[:2] if len(comment_author) >= 2 else comment_author
             comment_elem.set(f'{{{NS["w"]}}}initials', comment_initials)
 
-            # Add paragraph with text
+            # Add paragraph with formatted text (handle <sup>/<sub> markup)
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
-            r = etree.SubElement(p, f'{{{NS["w"]}}}r')
-            t = etree.SubElement(r, f'{{{NS["w"]}}}t')
-            t.text = sanitize_xml_string(comment['text'])
+            
+            # Parse text for superscript/subscript markup
+            # sanitize_xml_string first to remove illegal control characters
+            sanitized_text = sanitize_xml_string(comment['text'])
+            segments = self._parse_formatted_text(sanitized_text)
+            
+            for segment_text, vert_align in segments:
+                if not segment_text:
+                    continue
+                
+                r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+                
+                # Add run properties with vertAlign if needed
+                if vert_align:
+                    rPr = etree.SubElement(r, f'{{{NS["w"]}}}rPr')
+                    vert_elem = etree.SubElement(rPr, f'{{{NS["w"]}}}vertAlign')
+                    vert_elem.set(f'{{{NS["w"]}}}val', vert_align)
+                
+                t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+                # Preserve whitespace (Word drops leading/trailing spaces without this)
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                t.text = segment_text
         
         # Save via OPC
         blob = etree.tostring(
