@@ -1,0 +1,2 @@
+{"type": "meta", "source_file": "/Users/ydh/mycode/ai/doc-audit/tests/test_multi_row_delete.docx", "source_hash": "skip"}
+{"uuid": "00000001", "uuid_end": "00000006", "violation_text": "[\"Row 1\", \"Data1\", \"Data2\"], [\"Row 2\", \"Data3\", \"Data4\"]", "violation_reason": "Multi-row delete test", "fix_action": "delete", "revised_text": "", "category": "test", "rule_id": "TEST001", "heading": "Test"}

@@ -1179,6 +1179,463 @@ class AuditEditApplier:
             if row is not None:
                 rows.add(id(row))
         return len(rows) > 1
+    
+    def _group_runs_by_cell(self, runs: List[Dict]) -> Dict[Tuple, List[Dict]]:
+        """
+        Group runs by (para_elem, cell_elem) pairs.
+        
+        This allows processing runs cell-by-cell for multi-cell operations
+        like delete/replace across table cells.
+        
+        Args:
+            runs: List of run info dicts
+        
+        Returns:
+            Dict mapping (para_elem, cell_elem) -> list of runs in that cell
+        """
+        groups = {}
+        for run in runs:
+            para = run.get('para_elem')
+            cell = run.get('cell_elem')
+            key = (id(para) if para is not None else None, 
+                   id(cell) if cell is not None else None)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(run)
+        return groups
+    
+    def _is_multi_row_json(self, text: str) -> bool:
+        """
+        Check if text is multi-row JSON format.
+        
+        Multi-row JSON format: '["cell1", "cell2"], ["cell3", "cell4"]'
+        Single-row JSON format: '["cell1", "cell2"]'
+        
+        Args:
+            text: Text to check
+        
+        Returns:
+            True if text contains row boundary marker '"], ["'
+        """
+        return text.startswith('["') and '"], ["' in text
+
+    def _apply_delete_multi_cell(self, real_runs: List[Dict], violation_text: str,
+                                  violation_reason: str, author: str, match_start: int,
+                                  item: EditItem) -> str:
+        """
+        Apply delete operation across multiple cells/rows.
+        
+        Strategy: Delete content in each cell independently by wrapping runs
+        with <w:del> tags, properly handling partial run deletion when the
+        match doesn't align to run boundaries.
+        
+        Args:
+            real_runs: List of real runs (boundaries filtered out)
+            violation_text: Text being deleted (may be JSON format)
+            violation_reason: Reason for deletion
+            author: Track change author
+            match_start: Absolute position where violation_text starts
+            item: Original EditItem (for fallback comment)
+        
+        Returns:
+            'success' if at least one cell deleted, 'fallback' if all failed
+        """
+        if not real_runs:
+            return 'fallback'
+        
+        match_end = match_start + len(violation_text)
+        
+        # Group runs by cell
+        cell_groups = self._group_runs_by_cell(real_runs)
+        
+        # Track success/failure for each cell
+        success_count = 0
+        failed_cells = []  # List of (para_elem, cell_violation, error_reason)
+        first_success_para = None
+        
+        # Process each cell independently
+        for (para_id, cell_id), cell_runs in cell_groups.items():
+            if not cell_runs:
+                continue
+            
+            # De-duplicate runs by their underlying elem reference
+            # This prevents duplicates when vMerge='continue' cells copy runs from restart cells
+            seen_elems = set()
+            unique_cell_runs = []
+            for run in cell_runs:
+                elem_id = id(run.get('elem'))
+                if elem_id not in seen_elems:
+                    seen_elems.add(elem_id)
+                    unique_cell_runs.append(run)
+            cell_runs = unique_cell_runs
+            
+            if not cell_runs:
+                continue
+            
+            # Get the paragraph element from first run
+            para_elem = cell_runs[0].get('para_elem')
+            if para_elem is None:
+                failed_cells.append((None, "", "No paragraph found"))
+                continue
+            
+            # Get rPr for formatting
+            rPr_xml = self._get_rPr_xml(cell_runs[0].get('rPr'))
+            
+            # Find cell boundaries in the match range
+            cell_start = min(r['start'] for r in cell_runs)
+            cell_end = max(r['end'] for r in cell_runs)
+            
+            # Calculate intersection with match range
+            del_start_in_cell = max(cell_start, match_start)
+            del_end_in_cell = min(cell_end, match_end)
+            
+            if del_start_in_cell >= del_end_in_cell:
+                # No overlap with this cell
+                continue
+            
+            # Find first and last run in this cell that are affected
+            first_run = None
+            last_run = None
+            for run in cell_runs:
+                if run['end'] > del_start_in_cell and run['start'] < del_end_in_cell:
+                    if first_run is None:
+                        first_run = run
+                    last_run = run
+            
+            if first_run is None or last_run is None:
+                failed_cells.append((para_elem, "", "No affected runs found"))
+                continue
+            
+            # Calculate split points for first and last run
+            first_orig_text = self._get_run_original_text(first_run)
+            last_orig_text = self._get_run_original_text(last_run)
+            
+            # Translate offsets from escaped space to original space
+            before_offset = self._translate_escaped_offset(first_run, max(0, del_start_in_cell - first_run['start']))
+            after_offset = self._translate_escaped_offset(last_run, max(0, del_end_in_cell - last_run['start']))
+            
+            before_text = first_orig_text[:before_offset]
+            after_text = last_orig_text[after_offset:]
+            
+            # Collect text to delete (from all affected runs in this cell)
+            affected_cell_runs = [r for r in cell_runs 
+                                  if r['end'] > del_start_in_cell and r['start'] < del_end_in_cell]
+            
+            # Extract cell violation text for error reporting
+            cell_violation_parts = []
+            for run in affected_cell_runs:
+                if run.get('is_drawing'):
+                    cell_violation_parts.append(run['text'])
+                else:
+                    orig_text = self._get_run_original_text(run)
+                    if run is first_run:
+                        if first_run is last_run:
+                            # Single run case: deletion only affects part of this run
+                            # Use both offsets to extract only the deleted portion
+                            cell_violation_parts.append(orig_text[before_offset:after_offset])
+                        else:
+                            # First run of multiple: delete from before_offset to end
+                            cell_violation_parts.append(orig_text[before_offset:])
+                    elif run is last_run:
+                        cell_violation_parts.append(orig_text[:after_offset])
+                    else:
+                        cell_violation_parts.append(orig_text)
+            cell_violation = ''.join(cell_violation_parts)
+            
+            # Check if any affected run overlaps with existing revisions
+            if self._check_overlap_with_revisions(affected_cell_runs):
+                # This cell has conflicts with existing revisions, skip deletion
+                failed_cells.append((para_elem, cell_violation, "Overlaps with existing revision"))
+                continue
+            
+            if not cell_violation:
+                failed_cells.append((para_elem, "", "No text to delete"))
+                continue
+            
+            # Build new elements for this cell
+            new_elements = []
+            
+            # Before text (unchanged)
+            if before_text:
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+            
+            # Deleted text with track changes
+            change_id = self._get_next_change_id()
+            run_or_container = self._create_run(cell_violation, rPr_xml)
+            
+            if run_or_container.tag == 'container':
+                # Multiple runs (has markup) - wrap each in w:del
+                for del_run in run_or_container:
+                    # Change w:t to w:delText
+                    t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                    if t_elem is not None:
+                        t_elem.tag = f'{{{NS["w"]}}}delText'
+                    
+                    # Wrap in w:del
+                    del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                    del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    del_elem.set(f'{{{NS["w"]}}}author', author)
+                    del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    del_elem.append(del_run)
+                    new_elements.append(del_elem)
+            else:
+                # Single run - wrap in w:del
+                t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+                if t_elem is not None:
+                    t_elem.tag = f'{{{NS["w"]}}}delText'
+                
+                del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                del_elem.set(f'{{{NS["w"]}}}author', author)
+                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                del_elem.append(run_or_container)
+                new_elements.append(del_elem)
+            
+            # After text (unchanged)
+            if after_text:
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+            
+            # Replace the affected runs in this cell
+            self._replace_runs(para_elem, affected_cell_runs, new_elements)
+            success_count += 1
+            if first_success_para is None:
+                first_success_para = para_elem
+        
+        # Handle results based on success/failure counts
+        if success_count > 0:
+            # At least one cell deleted - add overall comment
+            if first_success_para is not None:
+                comment_id = self.next_comment_id
+                self.next_comment_id += 1
+                
+                # Insert commentReference at end of first successful paragraph
+                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                    <w:commentReference w:id="{comment_id}"/>
+                </w:r>'''
+                first_success_para.append(etree.fromstring(ref_xml))
+                
+                # Record comment with -R suffix author
+                self.comments.append({
+                    'id': comment_id,
+                    'text': violation_reason,
+                    'author': f"{author}-R"
+                })
+            
+            # Add individual comments for failed cells
+            for para_elem, cell_violation, error_reason in failed_cells:
+                if para_elem is not None:
+                    self._apply_cell_fallback_comment(
+                        para_elem,
+                        cell_violation,
+                        "",  # No revised text for delete operation
+                        error_reason,
+                        item
+                    )
+            
+            if self.verbose:
+                if failed_cells:
+                    print(f"  [Multi-cell delete] Partial success: {success_count}/{len(cell_groups)} cells processed, {len(failed_cells)} failed")
+                else:
+                    print(f"  [Multi-cell delete] Successfully deleted from all {len(cell_groups)} cells")
+            
+            return 'success'
+        else:
+            # All cells failed - fallback to overall comment
+            return 'fallback'
+    
+    def _try_extract_multi_cell_edits(self, violation_text: str, revised_text: str,
+                                        affected_runs: List[Dict], match_start: int) -> Optional[List[Dict]]:
+        """
+        Try to extract multi-cell edits when text spans multiple cells.
+        
+        This method analyzes the diff to determine if changes are distributed across
+        multiple cells, with each change staying within its own cell boundary.
+        
+        Args:
+            violation_text: Original violation text (may span multiple cells)
+            revised_text: Revised text (may span multiple cells)
+            affected_runs: List of run info dicts that would be affected
+            match_start: Absolute position where violation_text starts in document
+        
+        Returns:
+            List of dicts, each with keys: 'cell_violation', 'cell_revised', 'cell_elem', 'cell_runs'
+            Or None if any change crosses cell boundaries
+        """
+        # Calculate diff to find changed positions
+        diff_ops = self._calculate_diff(violation_text, revised_text)
+        
+        # Track positions of all changes (delete/insert operations)
+        change_positions = []
+        current_pos = 0
+        
+        for op, text in diff_ops:
+            if op == 'delete':
+                # Record the position range of deleted text
+                change_positions.append((current_pos, current_pos + len(text)))
+                current_pos += len(text)
+            elif op == 'insert':
+                # Record the insertion point (zero-length range)
+                change_positions.append((current_pos, current_pos))
+                # insert doesn't consume original text position
+            elif op == 'equal':
+                current_pos += len(text)
+        
+        if not change_positions:
+            # No changes detected
+            return None
+        
+        # Find which cell each change affects
+        # Map: cell_id -> list of change indices
+        cell_to_changes = {}
+        
+        base_offset = match_start
+        
+        for change_idx, (change_start_rel, change_end_rel) in enumerate(change_positions):
+            # Translate relative positions to absolute positions
+            change_start = base_offset + change_start_rel
+            change_end = base_offset + change_end_rel
+            
+            is_insert = (change_start == change_end)
+            
+            # Find which cell contains this change
+            change_cell = None
+            for run in affected_runs:
+                if (run.get('is_json_boundary') or 
+                    run.get('is_json_escape') or 
+                    run.get('is_para_boundary')):
+                    continue
+                
+                # Check if this run is affected by the change
+                is_affected = False
+                if is_insert:
+                    if run['start'] <= change_start <= run['end']:
+                        is_affected = True
+                else:
+                    if run['end'] > change_start and run['start'] < change_end:
+                        is_affected = True
+                
+                if is_affected:
+                    cell = run.get('cell_elem')
+                    if cell is not None:
+                        if change_cell is None:
+                            change_cell = cell
+                        elif id(change_cell) != id(cell):
+                            # Change spans multiple cells
+                            return None
+            
+            if change_cell is not None:
+                cell_id = id(change_cell)
+                if cell_id not in cell_to_changes:
+                    cell_to_changes[cell_id] = []
+                cell_to_changes[cell_id].append(change_idx)
+            else:
+                # Change landed on JSON boundary marker (e.g., ", " or "], [")
+                # Cannot be correctly mapped to a cell - this indicates a cross-cell
+                # operation like merge/split that requires fallback to comment
+                return None
+        
+        if not cell_to_changes:
+            return None
+        
+        # Group affected runs by cell
+        cell_runs_map = {}
+        for run in affected_runs:
+            if (run.get('is_json_boundary') or 
+                run.get('is_json_escape') or 
+                run.get('is_para_boundary')):
+                continue
+            
+            cell = run.get('cell_elem')
+            if cell is not None:
+                cell_id = id(cell)
+                if cell_id not in cell_runs_map:
+                    cell_runs_map[cell_id] = {'cell': cell, 'runs': []}
+                cell_runs_map[cell_id]['runs'].append(run)
+        
+        # Extract cell-specific edits
+        result_edits = []
+        
+        for cell_id, change_indices in cell_to_changes.items():
+            if cell_id not in cell_runs_map:
+                continue
+            
+            cell_info = cell_runs_map[cell_id]
+            cell_runs = cell_info['runs']
+            
+            # Find cell boundaries in violation_text
+            cell_start = min(r['start'] for r in cell_runs)
+            cell_end = max(r['end'] for r in cell_runs)
+            
+            relative_start = cell_start - match_start
+            relative_end = cell_end - match_start
+            
+            # Extract cell_violation
+            if self._is_table_mode(affected_runs):
+                cell_violation_escaped = violation_text[relative_start:relative_end]
+                cell_violation = self._decode_json_escaped(cell_violation_escaped)
+            else:
+                cell_violation = violation_text[relative_start:relative_end]
+            
+            # Build cell_revised by applying diff operations within cell range
+            violation_pos = 0
+            revised_accumulator = ''
+            has_changes_in_cell = False  # Track whether any changes affect this cell
+            
+            for op, text in diff_ops:
+                if op == 'equal':
+                    chunk_start = violation_pos
+                    chunk_end = violation_pos + len(text)
+                    
+                    # Check if this chunk overlaps with cell range
+                    if chunk_end > relative_start and chunk_start < relative_end:
+                        overlap_start = max(0, relative_start - chunk_start)
+                        overlap_end = min(len(text), relative_end - chunk_start)
+                        revised_accumulator += text[overlap_start:overlap_end]
+                    
+                    violation_pos += len(text)
+                
+                elif op == 'delete':
+                    chunk_start = violation_pos
+                    chunk_end = violation_pos + len(text)
+                    
+                    # Check if this deletion affects the current cell
+                    if chunk_end > relative_start and chunk_start < relative_end:
+                        has_changes_in_cell = True
+                    
+                    violation_pos += len(text)
+                
+                elif op == 'insert':
+                    # Check if insertion point is within cell range
+                    if relative_start <= violation_pos <= relative_end:
+                        revised_accumulator += text
+                        has_changes_in_cell = True
+            
+            # Use accumulator if there were changes (even if empty), otherwise keep original
+            cell_revised = revised_accumulator if has_changes_in_cell else cell_violation
+            
+            # Fix: Decode cell_revised in table mode (same as cell_violation)
+            # cell_revised is accumulated from escaped diff chunks and needs decoding
+            # to match cell_violation which is already decoded
+            if self._is_table_mode(affected_runs) and cell_revised != cell_violation:
+                cell_revised = self._decode_json_escaped(cell_revised)
+            
+            result_edits.append({
+                'cell_violation': cell_violation,
+                'cell_revised': cell_revised,
+                'cell_elem': cell_info['cell'],
+                'cell_runs': cell_runs
+            })
+        
+        return result_edits if result_edits else None
 
     def _try_extract_single_cell_edit(self, violation_text: str, revised_text: str,
                                        affected_runs: List[Dict], match_start: int) -> Optional[Dict]:
@@ -1333,7 +1790,7 @@ class AuditEditApplier:
             elif op == 'insert':
                 # Insert operations don't have a position in violation_text
                 # Check if insertion point is within cell range
-                if relative_start <= violation_pos < relative_end:
+                if relative_start <= violation_pos <= relative_end:
                     revised_accumulator += text
         
         cell_revised = revised_accumulator if revised_accumulator else cell_violation
@@ -2209,7 +2666,8 @@ class AuditEditApplier:
                       violation_reason: str,
                       orig_runs_info: List[Dict],
                       orig_match_start: int,
-                      author: str) -> str:
+                      author: str,
+                      skip_comment: bool = False) -> str:
         """
         Apply replace operation with diff-based track changes and comment annotation.
 
@@ -2225,6 +2683,7 @@ class AuditEditApplier:
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
             author: Track change author (base author + category suffix)
+            skip_comment: If True, skip adding comment (used for multi-cell operations)
 
         Returns:
             'success': Replace applied (may be partial)
@@ -2288,9 +2747,11 @@ class AuditEditApplier:
 
         rPr_xml = self._get_rPr_xml(real_runs[0].get('rPr'))
 
-        # Allocate comment ID for wrapping the replaced text
-        comment_id = self.next_comment_id
-        self.next_comment_id += 1
+        # Allocate comment ID for wrapping the replaced text (unless skipped)
+        comment_id = None
+        if not skip_comment:
+            comment_id = self.next_comment_id
+            self.next_comment_id += 1
 
         # Calculate split points for before/after text using real runs
         # Use original text for mutations (not JSON-escaped text)
@@ -2317,9 +2778,10 @@ class AuditEditApplier:
             else:
                 new_elements.append(run_or_container)
 
-        # Comment range start (before replaced text)
-        comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-        new_elements.append(etree.fromstring(comment_start_xml))
+        # Comment range start (before replaced text) - only if not skipped
+        if not skip_comment:
+            comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_start_xml))
 
         # Check if we're in table mode (need to decode JSON-escaped text)
         is_table_mode = self._is_table_mode(real_runs)
@@ -2487,15 +2949,16 @@ class AuditEditApplier:
                     new_elements.append(ins_elem)
                 # insert doesn't consume violation_pos
 
-        # Comment range end and reference (after replaced text)
-        comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-        new_elements.append(etree.fromstring(comment_end_xml))
+        # Comment range end and reference (after replaced text) - only if not skipped
+        if not skip_comment:
+            comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_end_xml))
 
-        comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-            <w:commentReference w:id="{comment_id}"/>
-        </w:r>'''
-        new_elements.append(etree.fromstring(comment_ref_xml))
+            comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                <w:commentReference w:id="{comment_id}"/>
+            </w:r>'''
+            new_elements.append(etree.fromstring(comment_ref_xml))
 
         # After text (unchanged part after the match)
         if after_text:
@@ -2508,13 +2971,14 @@ class AuditEditApplier:
         # Single DOM operation to replace all real runs (not boundary markers)
         self._replace_runs(para_elem, real_runs, new_elements)
 
-        # Record comment with violation_reason as content
+        # Record comment with violation_reason as content (only if not skipped)
         # Use "-R" suffix to distinguish comment author from track change author
-        self.comments.append({
-            'id': comment_id,
-            'text': violation_reason,
-            'author': f"{author}-R"
-        })
+        if not skip_comment:
+            self.comments.append({
+                'id': comment_id,
+                'text': violation_reason,
+                'author': f"{author}-R"
+            })
 
         return 'success'
 
@@ -2581,6 +3045,43 @@ class AuditEditApplier:
         
         # Format: [FALLBACK] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
         comment_text = f"[FALLBACK] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        
+        self.comments.append({
+            'id': comment_id,
+            'text': comment_text,
+            'author': self._author_for_item(item)
+        })
+        
+        return True
+    
+    def _apply_cell_fallback_comment(self, para_elem, cell_violation: str, 
+                                      cell_revised: str, reason: str, 
+                                      item: EditItem) -> bool:
+        """
+        Insert a fallback comment for a single failed cell in multi-cell operation.
+        
+        Args:
+            para_elem: Paragraph element in the failed cell
+            cell_violation: Cell-specific violation text
+            cell_revised: Cell-specific revised text
+            reason: Reason for failure (e.g., "Text not found")
+            item: Original edit item (for rule_id and violation_reason)
+        
+        Returns:
+            True (always succeeds)
+        """
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        
+        # Insert commentReference at end of paragraph
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+        
+        # Format: [CELL FAILED] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
+        comment_text = f"[CELL FAILED] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{cell_violation}{{SUGGEST}}{cell_revised}"
         
         self.comments.append({
             'id': comment_id,
@@ -3295,18 +3796,26 @@ class AuditEditApplier:
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
-                    # Check if match spans multiple table rows (most restrictive)
+                    # Check if match spans multiple table rows
                     if self._check_cross_row_boundary(real_runs):
-                        # Cross-row delete not supported - fallback to comment
+                        # Multi-row delete: use cell-by-cell deletion
                         if self.verbose:
-                            print(f"  [Cross-row] delete spans multiple rows, fallback to comment")
-                        success_status = 'cross_row_fallback'
+                            print(f"  [Multi-row] Applying cell-by-cell deletion")
+                        success_status = self._apply_delete_multi_cell(
+                            real_runs, violation_text,
+                            item.violation_reason, item_author, matched_start,
+                            item
+                        )
                     # Check if match spans multiple table cells (within same row)
                     elif self._check_cross_cell_boundary(real_runs):
-                        # Cross-cell delete not supported - fallback to comment
+                        # Multi-cell delete: use cell-by-cell deletion
                         if self.verbose:
-                            print(f"  [Cross-cell] delete spans multiple cells, fallback to comment")
-                        success_status = 'cross_cell_fallback'
+                            print(f"  [Multi-cell] Applying cell-by-cell deletion")
+                        success_status = self._apply_delete_multi_cell(
+                            real_runs, violation_text,
+                            item.violation_reason, item_author, matched_start,
+                            item
+                        )
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
@@ -3353,17 +3862,16 @@ class AuditEditApplier:
                         success_status = 'cross_row_fallback'
                     # Check if match spans multiple table cells (within same row)
                     elif self._check_cross_cell_boundary(real_runs):
-                        # Try to extract single-cell edit
+                        # Try to extract single-cell edit first
                         if self.verbose:
-                            print(f"  [Cross-cell] Detected cross-cell match, trying single-cell extraction...")
+                            print(f"  [Cross-cell] Detected cross-cell match, trying cell-by-cell extraction...")
                         
                         single_cell = self._try_extract_single_cell_edit(
                             violation_text, revised_text, affected, matched_start
                         )
                         
                         if single_cell:
-                            # Successfully extracted single-cell edit - apply it
-                            # Find the paragraph containing this cell
+                            # Successfully extracted single-cell edit - all changes in one cell
                             cell_para = None
                             for run in single_cell['cell_runs']:
                                 if run.get('para_elem') is not None:
@@ -3388,18 +3896,113 @@ class AuditEditApplier:
                                     )
                                     
                                     if self.verbose and success_status == 'success':
-                                        print(f"  [Single-cell] Successfully applied track change to single cell")
+                                        print(f"  [Single-cell] All changes in one cell, applied track change")
                                 else:
-                                    # Fallback if we can't find the text in the cell
                                     success_status = 'cross_cell_fallback'
                             else:
-                                # Fallback if we can't find the paragraph
                                 success_status = 'cross_cell_fallback'
                         else:
-                            # Changes span multiple cells - fallback to comment
-                            if self.verbose:
-                                print(f"  [Cross-cell] Changes span multiple cells, fallback to comment")
-                            success_status = 'cross_cell_fallback'
+                            # Try multi-cell extraction - changes distributed across cells
+                            multi_cells = self._try_extract_multi_cell_edits(
+                                violation_text, revised_text, affected, matched_start
+                            )
+                            
+                            if multi_cells:
+                                # Successfully extracted multi-cell edits - each change within its own cell
+                                if self.verbose:
+                                    print(f"  [Multi-cell] Found {len(multi_cells)} cells with changes, applying track changes...")
+                                
+                                success_count = 0
+                                failed_cells = []  # List of (cell_edit, cell_para, error_reason)
+                                first_success_para = None
+                                
+                                for cell_edit in multi_cells:
+                                    # Find paragraph for this cell
+                                    cell_para = None
+                                    for run in cell_edit['cell_runs']:
+                                        if run.get('para_elem') is not None:
+                                            cell_para = run['para_elem']
+                                            break
+                                    
+                                    if cell_para is None:
+                                        failed_cells.append((cell_edit, None, "No paragraph found"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Collect runs for this cell
+                                    cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
+                                    cell_pos = cell_text.find(cell_edit['cell_violation'])
+                                    
+                                    if cell_pos == -1:
+                                        failed_cells.append((cell_edit, cell_para, "Text not found in cell"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Apply replace to this cell WITHOUT comment (skip_comment=True)
+                                    cell_status = self._apply_replace(
+                                        cell_para,
+                                        cell_edit['cell_violation'],
+                                        cell_edit['cell_revised'],
+                                        item.violation_reason,
+                                        cell_runs_info,
+                                        cell_pos,
+                                        item_author,
+                                        skip_comment=True  # Skip comment for individual cells
+                                    )
+                                    
+                                    if cell_status != 'success':
+                                        failed_cells.append((cell_edit, cell_para, f"Apply failed: {cell_status}"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Success - track for overall comment
+                                    success_count += 1
+                                    if first_success_para is None:
+                                        first_success_para = cell_para
+                                
+                                # Handle results based on success/failure counts
+                                if success_count > 0:
+                                    # At least one cell succeeded - add overall comment
+                                    if first_success_para is not None:
+                                        comment_id = self.next_comment_id
+                                        self.next_comment_id += 1
+                                        
+                                        # Insert commentReference at end of first successful paragraph
+                                        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                                            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                                            <w:commentReference w:id="{comment_id}"/>
+                                        </w:r>'''
+                                        first_success_para.append(etree.fromstring(ref_xml))
+                                        
+                                        # Record comment with -R suffix author
+                                        self.comments.append({
+                                            'id': comment_id,
+                                            'text': item.violation_reason,
+                                            'author': f"{item_author}-R"
+                                        })
+                                    
+                                    # Add individual comments for failed cells
+                                    for cell_edit, cell_para, error_reason in failed_cells:
+                                        if cell_para is not None:
+                                            self._apply_cell_fallback_comment(
+                                                cell_para,
+                                                cell_edit['cell_violation'],
+                                                cell_edit['cell_revised'],
+                                                error_reason,
+                                                item
+                                            )
+                                    
+                                    success_status = 'success'
+                                    if self.verbose:
+                                        if failed_cells:
+                                            print(f"  [Multi-cell] Partial success: {success_count}/{len(multi_cells)} cells processed, {len(failed_cells)} failed")
+                                        else:
+                                            print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
+                                else:
+                                    # All cells failed - fallback to overall comment
+                                    success_status = 'cross_cell_fallback'
+                            else:
+                                # Changes cross cell boundaries - fallback to comment
+                                if self.verbose:
+                                    print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
+                                success_status = 'cross_cell_fallback'
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
