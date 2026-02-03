@@ -1146,6 +1146,84 @@ class AuditEditApplier:
 
         return runs_info, combined_text, is_cross_paragraph, None
 
+    def _extract_text_in_range_from_table(self, table_elem, uuid_start: str, uuid_end: str) -> str:
+        """
+        Extract table text between uuid_start and uuid_end in JSON row format.
+
+        Returns a string like:
+          ["cell1", "cell2"], ["cell3", "cell4"]
+
+        This mirrors parse_document-style row formatting and handles gridSpan/vMerge:
+        - gridSpan: repeats cell content across spanned columns
+        - vMerge restart/continue: repeats content only when restart is within range
+        """
+        rows_text = []
+        in_range = False
+        reached_end = False
+        vmerge_content = {}  # {grid_col: text}
+
+        for tr in table_elem.findall(f'{{{NS["w"]}}}tr'):
+            if reached_end:
+                break
+            row_cells = []
+            row_in_range = False
+            grid_col = 0
+
+            for tc in tr.findall(f'{{{NS["w"]}}}tc'):
+                if reached_end:
+                    break
+
+                tcPr = tc.find(f'{{{NS["w"]}}}tcPr')
+                grid_span, vmerge_type = self._get_cell_merge_properties(tcPr)
+                cell_paras = tc.findall(f'{{{NS["w"]}}}p')
+
+                cell_text_parts = []
+                cell_has_range = False
+
+                for para in cell_paras:
+                    para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                    if para_id == uuid_start:
+                        in_range = True
+
+                    if in_range:
+                        cell_has_range = True
+                        _, para_text = self._collect_runs_info_original(para)
+                        if para_text:
+                            cell_text_parts.append(para_text)
+
+                    if in_range and para_id == uuid_end:
+                        reached_end = True
+                        break
+
+                cell_text = '\n'.join(cell_text_parts).replace('\x07', '')
+
+                if vmerge_type == 'restart':
+                    if cell_has_range:
+                        for col in range(grid_col, grid_col + grid_span):
+                            vmerge_content[col] = cell_text
+                elif vmerge_type == 'continue':
+                    if grid_col in vmerge_content:
+                        cell_text = vmerge_content.get(grid_col, '')
+                else:
+                    if not cell_text and grid_col in vmerge_content:
+                        cell_text = vmerge_content.get(grid_col, '')
+                    elif cell_text:
+                        for col in range(grid_col, grid_col + grid_span):
+                            vmerge_content.pop(col, None)
+
+                if in_range or cell_has_range:
+                    row_in_range = True
+                    escaped = json_escape(cell_text)
+                    for _ in range(grid_span):
+                        row_cells.append(escaped)
+
+                grid_col += grid_span
+
+            if row_in_range:
+                rows_text.append('["' + '", "'.join(row_cells) + '"]')
+
+        return ', '.join(rows_text)
+
     def _check_cross_cell_boundary(self, affected_runs: List[Dict]) -> bool:
         """
         Check if affected runs span multiple table cells.
@@ -4142,7 +4220,7 @@ class AuditEditApplier:
                     )
             elif success_status == 'cross_row_fallback':
                 # Cross-row delete/replace not supported - Word doesn't support cross-row comments
-                reason = "Cross-row track change not supported (Word limitation)"
+                reason = "Fallback to comment: cross-row track change not supported (Word limitation)"
                 # Use fallback comment (non-selected) since cross-row comments are not supported
                 self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
