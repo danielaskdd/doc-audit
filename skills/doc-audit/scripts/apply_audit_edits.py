@@ -1667,6 +1667,103 @@ class AuditEditApplier:
         
         return operations
     
+    def _calculate_markup_aware_diff(self, old_text: str, new_text: str) -> List[Tuple[str, str, Optional[str]]]:
+        """
+        Calculate diff with markup awareness for <sup>/<sub> tags.
+        
+        This method parses both texts into segments with formatting info,
+        then performs diff on the text content only (ignoring markup tags).
+        
+        Args:
+            old_text: Original text with possible <sup>/<sub> markup
+            new_text: New text with possible <sup>/<sub> markup
+        
+        Returns:
+            List of (operation, text, vert_align) tuples where:
+            - operation: 'equal' | 'delete' | 'insert'
+            - text: The actual text content (without markup tags)
+            - vert_align: 'superscript' | 'subscript' | None
+        
+        Examples:
+            old: "x<sup>2</sup>"  new: "x<sup>3</sup>"
+            → [('equal', 'x', None), ('delete', '2', 'superscript'), ('insert', '3', 'superscript')]
+        """
+        # Parse both texts into segments
+        old_segments = self._parse_formatted_text(old_text)
+        new_segments = self._parse_formatted_text(new_text)
+        
+        # Build plain text versions for diffing (text content only, no markup)
+        old_plain = ''.join(text for text, _ in old_segments)
+        new_plain = ''.join(text for text, _ in new_segments)
+        
+        # Perform character-level diff on plain text
+        matcher = difflib.SequenceMatcher(None, old_plain, new_plain)
+        operations = []
+        
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                # Find segments in old_text that cover this range
+                ops = self._map_range_to_segments(old_segments, i1, i2, 'equal')
+                operations.extend(ops)
+            elif tag == 'delete':
+                # Find segments in old_text
+                ops = self._map_range_to_segments(old_segments, i1, i2, 'delete')
+                operations.extend(ops)
+            elif tag == 'insert':
+                # Find segments in new_text
+                ops = self._map_range_to_segments(new_segments, j1, j2, 'insert')
+                operations.extend(ops)
+            elif tag == 'replace':
+                # Delete from old, insert from new
+                ops_del = self._map_range_to_segments(old_segments, i1, i2, 'delete')
+                ops_ins = self._map_range_to_segments(new_segments, j1, j2, 'insert')
+                operations.extend(ops_del)
+                operations.extend(ops_ins)
+        
+        return operations
+    
+    def _map_range_to_segments(self, segments: List[Tuple[str, Optional[str]]], 
+                                start: int, end: int, operation: str) -> List[Tuple[str, str, Optional[str]]]:
+        """
+        Map a character range to segments with formatting info.
+        
+        Args:
+            segments: List of (text, vert_align) tuples
+            start: Start position in plain text
+            end: End position in plain text
+            operation: 'equal' | 'delete' | 'insert'
+        
+        Returns:
+            List of (operation, text, vert_align) tuples
+        """
+        result = []
+        pos = 0
+        
+        for text, vert_align in segments:
+            segment_start = pos
+            segment_end = pos + len(text)
+            
+            # Check if this segment overlaps with [start, end)
+            if segment_end <= start:
+                # Before the range
+                pos = segment_end
+                continue
+            if segment_start >= end:
+                # After the range
+                break
+            
+            # Calculate overlap
+            overlap_start = max(0, start - segment_start)
+            overlap_end = min(len(text), end - segment_start)
+            
+            if overlap_start < overlap_end:
+                chunk = text[overlap_start:overlap_end]
+                result.append((operation, chunk, vert_align))
+            
+            pos = segment_end
+        
+        return result
+    
     # ==================== ID Management ====================
     
     def _init_comment_id(self):
@@ -2022,11 +2119,39 @@ class AuditEditApplier:
         else:
             del_text = violation_text
 
-        # Deleted text
-        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-            <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
-        </w:del>'''
-        new_elements.append(etree.fromstring(del_xml))
+        # Deleted text - use _create_run to handle <sup>/<sub> markup
+        change_id = self._get_next_change_id()
+        
+        # Create runs with proper vertAlign formatting
+        run_or_container = self._create_run(del_text, rPr_xml)
+        
+        if run_or_container.tag == 'container':
+            # Multiple runs (has markup) - wrap each in w:del
+            for del_run in run_or_container:
+                # Change w:t to w:delText
+                t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                if t_elem is not None:
+                    t_elem.tag = f'{{{NS["w"]}}}delText'
+                
+                # Wrap in w:del
+                del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                del_elem.set(f'{{{NS["w"]}}}author', author)
+                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                del_elem.append(del_run)
+                new_elements.append(del_elem)
+        else:
+            # Single run - wrap in w:del
+            t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+            if t_elem is not None:
+                t_elem.tag = f'{{{NS["w"]}}}delText'
+            
+            del_elem = etree.Element(f'{{{NS["w"]}}}del')
+            del_elem.set(f'{{{NS["w"]}}}id', change_id)
+            del_elem.set(f'{{{NS["w"]}}}author', author)
+            del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+            del_elem.append(run_or_container)
+            new_elements.append(del_elem)
 
         # Comment range end and reference (after deleted text)
         comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
@@ -2100,11 +2225,23 @@ class AuditEditApplier:
         if not real_runs:
             return 'fallback'
 
-        # Calculate diff
-        diff_ops = self._calculate_diff(violation_text, revised_text)
+        # Check if we need markup-aware diff (detect <sup>/<sub> tags)
+        has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or 
+                      '<sup>' in revised_text or '<sub>' in revised_text)
+        
+        if has_markup:
+            # Use markup-aware diff that preserves formatting
+            diff_ops = self._calculate_markup_aware_diff(violation_text, revised_text)
+        else:
+            # Use standard character-level diff for plain text
+            # Convert to markup-aware format for consistent handling
+            plain_diff = self._calculate_diff(violation_text, revised_text)
+            diff_ops = [(op, text, None) for op, text in plain_diff]
 
         # Check for image handling issues: cannot insert images via revision markup
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            op = op_tuple[0]
+            text = op_tuple[1]
             if op == 'insert' and DRAWING_PATTERN.search(text):
                 if self.verbose:
                     print(f"  [Fallback] Cannot insert images via revision markup")
@@ -2112,7 +2249,13 @@ class AuditEditApplier:
 
         # Check for conflicts only on delete operations
         current_pos = match_start
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            # Extract operation and text (ignore vert_align for conflict checking)
+            if len(op_tuple) == 3:
+                op, text, _ = op_tuple
+            else:
+                op, text = op_tuple
+            
             if op == 'delete':
                 del_end = current_pos + len(text)
                 del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
@@ -2163,80 +2306,166 @@ class AuditEditApplier:
         is_table_mode = self._is_table_mode(real_runs)
 
         # Process diff operations
-        violation_pos = 0  # Position within violation_text
+        violation_pos = 0  # Position within violation_text (plain text, no markup)
 
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            # Extract components - handle both 2-tuple and 3-tuple formats
+            if len(op_tuple) == 3:
+                op, text, vert_align = op_tuple
+            else:
+                op, text = op_tuple
+                vert_align = None
             if op == 'equal':
-                # For equal portions, try to preserve original elements (especially images)
-                equal_start = match_start + violation_pos
-                equal_end = equal_start + len(text)
-                equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
-
-                if equal_runs:
-                    # Check if this is a single image run that matches exactly
-                    if (len(equal_runs) == 1 and
-                        equal_runs[0].get('is_drawing') and
-                        equal_runs[0]['start'] == equal_start and
-                        equal_runs[0]['end'] == equal_end):
-                        # Copy original image element
-                        new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
-                    else:
-                        # Extract text from the equal portion
-                        # Handle partial runs at boundaries
-                        # Use original text for document mutations
-                        for eq_run in equal_runs:
-                            escaped_text = eq_run['text']
-                            orig_text = self._get_run_original_text(eq_run)
-
-                            # Calculate offsets in escaped space, then translate
-                            escaped_start = max(0, equal_start - eq_run['start'])
-                            escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
-
-                            # Translate to original space
-                            orig_start = self._translate_escaped_offset(eq_run, escaped_start)
-                            orig_end = self._translate_escaped_offset(eq_run, escaped_end)
-                            portion = orig_text[orig_start:orig_end]
-
-                            if eq_run.get('is_drawing'):
-                                # Image run - copy entire element if fully contained
-                                if escaped_start == 0 and escaped_end == len(escaped_text):
-                                    new_elements.append(copy.deepcopy(eq_run['elem']))
-                            elif portion:
-                                run_or_container = self._create_run(portion, rPr_xml)
-                                if run_or_container.tag == 'container':
-                                    new_elements.extend(list(run_or_container))
-                                else:
-                                    new_elements.append(run_or_container)
-                else:
-                    # No runs found, create text directly
+                # When has_markup=True, position mapping between plain text (violation_pos)
+                # and combined_text (orig_runs_info positions) is incorrect due to <sup>/<sub> tags.
+                # Skip run preservation and just recreate the text.
+                if has_markup:
                     # Decode if in table mode
                     equal_text = self._decode_json_escaped(text) if is_table_mode else text
+                    
+                    # Wrap with markup if vert_align is specified
+                    if vert_align == 'superscript':
+                        equal_text = f'<sup>{equal_text}</sup>'
+                    elif vert_align == 'subscript':
+                        equal_text = f'<sub>{equal_text}</sub>'
+                    
+                    # Create run with proper vertAlign formatting
                     run_or_container = self._create_run(equal_text, rPr_xml)
                     if run_or_container.tag == 'container':
                         new_elements.extend(list(run_or_container))
                     else:
                         new_elements.append(run_or_container)
+                else:
+                    # No markup: preserve original elements (especially images)
+                    equal_start = match_start + violation_pos
+                    equal_end = equal_start + len(text)
+                    equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
+
+                    if equal_runs:
+                        # Check if this is a single image run that matches exactly
+                        if (len(equal_runs) == 1 and
+                            equal_runs[0].get('is_drawing') and
+                            equal_runs[0]['start'] == equal_start and
+                            equal_runs[0]['end'] == equal_end):
+                            # Copy original image element
+                            new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
+                        else:
+                            # Extract text from the equal portion
+                            # Handle partial runs at boundaries
+                            # Use original text for document mutations
+                            for eq_run in equal_runs:
+                                escaped_text = eq_run['text']
+                                orig_text = self._get_run_original_text(eq_run)
+
+                                # Calculate offsets in escaped space, then translate
+                                escaped_start = max(0, equal_start - eq_run['start'])
+                                escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
+
+                                # Translate to original space
+                                orig_start = self._translate_escaped_offset(eq_run, escaped_start)
+                                orig_end = self._translate_escaped_offset(eq_run, escaped_end)
+                                portion = orig_text[orig_start:orig_end]
+
+                                if eq_run.get('is_drawing'):
+                                    # Image run - copy entire element if fully contained
+                                    if escaped_start == 0 and escaped_end == len(escaped_text):
+                                        new_elements.append(copy.deepcopy(eq_run['elem']))
+                                elif portion:
+                                    run_or_container = self._create_run(portion, rPr_xml)
+                                    if run_or_container.tag == 'container':
+                                        new_elements.extend(list(run_or_container))
+                                    else:
+                                        new_elements.append(run_or_container)
+                    else:
+                        # No runs found, create text directly
+                        # Decode if in table mode and use _create_run to handle markup
+                        equal_text = self._decode_json_escaped(text) if is_table_mode else text
+                        run_or_container = self._create_run(equal_text, rPr_xml)
+                        if run_or_container.tag == 'container':
+                            new_elements.extend(list(run_or_container))
+                        else:
+                            new_elements.append(run_or_container)
 
                 violation_pos += len(text)
 
             elif op == 'delete':
-                change_id = self._get_next_change_id()
                 # Decode if in table mode
                 del_text = self._decode_json_escaped(text) if is_table_mode else text
-                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
-                </w:del>'''
-                new_elements.append(etree.fromstring(del_xml))
+                
+                # Wrap with markup if vert_align is specified
+                if vert_align == 'superscript':
+                    del_text = f'<sup>{del_text}</sup>'
+                elif vert_align == 'subscript':
+                    del_text = f'<sub>{del_text}</sub>'
+                
+                change_id = self._get_next_change_id()
+                
+                # Create runs with proper vertAlign formatting
+                run_or_container = self._create_run(del_text, rPr_xml)
+                
+                if run_or_container.tag == 'container':
+                    # Multiple runs (has markup) - wrap each in w:del
+                    for del_run in run_or_container:
+                        # Change w:t to w:delText
+                        t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                        if t_elem is not None:
+                            t_elem.tag = f'{{{NS["w"]}}}delText'
+                        
+                        # Wrap in w:del
+                        del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                        del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                        del_elem.set(f'{{{NS["w"]}}}author', author)
+                        del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                        del_elem.append(del_run)
+                        new_elements.append(del_elem)
+                else:
+                    # Single run - wrap in w:del
+                    t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+                    if t_elem is not None:
+                        t_elem.tag = f'{{{NS["w"]}}}delText'
+                    
+                    del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                    del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    del_elem.set(f'{{{NS["w"]}}}author', author)
+                    del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    del_elem.append(run_or_container)
+                    new_elements.append(del_elem)
+                
                 violation_pos += len(text)
 
             elif op == 'insert':
-                change_id = self._get_next_change_id()
                 # Decode if in table mode
                 ins_text = self._decode_json_escaped(text) if is_table_mode else text
-                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:t>{self._escape_xml(ins_text)}</w:t></w:r>
-                </w:ins>'''
-                new_elements.append(etree.fromstring(ins_xml))
+                
+                # Wrap with markup if vert_align is specified
+                if vert_align == 'superscript':
+                    ins_text = f'<sup>{ins_text}</sup>'
+                elif vert_align == 'subscript':
+                    ins_text = f'<sub>{ins_text}</sub>'
+                
+                change_id = self._get_next_change_id()
+                
+                # Create runs with proper vertAlign formatting
+                run_or_container = self._create_run(ins_text, rPr_xml)
+                
+                if run_or_container.tag == 'container':
+                    # Multiple runs (has markup) - wrap each in w:ins
+                    for ins_run in run_or_container:
+                        # Wrap in w:ins
+                        ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                        ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                        ins_elem.set(f'{{{NS["w"]}}}author', author)
+                        ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                        ins_elem.append(ins_run)
+                        new_elements.append(ins_elem)
+                else:
+                    # Single run - wrap in w:ins
+                    ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                    ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    ins_elem.set(f'{{{NS["w"]}}}author', author)
+                    ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    ins_elem.append(run_or_container)
+                    new_elements.append(ins_elem)
                 # insert doesn't consume violation_pos
 
         # Comment range end and reference (after replaced text)

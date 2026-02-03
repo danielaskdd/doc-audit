@@ -440,6 +440,217 @@ def test_strip_inherited_vertAlign():
 
 
 # ============================================================
+# Phase 4 Tests: Delete and Replace Operations
+# ============================================================
+
+def test_apply_delete_with_superscript():
+    """Test that _apply_delete generates proper w:delText with w:vertAlign for x<sup>2</sup>"""
+    from lxml import etree
+    
+    # Create a mock paragraph with "x²" content
+    para = etree.Element(qn('w:p'))
+    para.set('{http://schemas.microsoft.com/office/word/2010/wordml}paraId', '12345678')
+    para.append(create_run_with_text('x'))
+    para.append(create_run_with_text('2', vert_align='superscript'))
+    
+    # Create minimal applier instance
+    applier = object.__new__(AuditEditApplier)
+    applier.verbose = False
+    applier.operation_timestamp = '2024-01-01T00:00:00Z'
+    applier.next_change_id = 1
+    applier.next_comment_id = 1
+    applier.comments = []
+    
+    # Collect runs (should extract as "x<sup>2</sup>")
+    runs_info, combined_text = applier._collect_runs_info_original(para)
+    assert combined_text == 'x<sup>2</sup>', f"Expected 'x<sup>2</sup>', got '{combined_text}'"
+    
+    # Apply delete operation
+    result = applier._apply_delete(
+        para,
+        'x<sup>2</sup>',
+        'Test reason',
+        runs_info,
+        0,  # match_start
+        'TestAuthor'
+    )
+    
+    assert result == 'success', f"Delete operation should succeed, got '{result}'"
+    
+    # Verify the paragraph now contains w:del with proper w:vertAlign
+    del_elems = para.findall('.//w:del', NS)
+    assert len(del_elems) == 2, f"Expected 2 w:del elements (one for 'x', one for '2'), got {len(del_elems)}"
+    
+    # Check first w:del (normal 'x')
+    del1_runs = del_elems[0].findall('.//w:r', NS)
+    assert len(del1_runs) == 1, "First w:del should have 1 run"
+    del1_text = del1_runs[0].find('.//w:delText', NS)
+    assert del1_text is not None, "First run should have w:delText"
+    assert del1_text.text == 'x', f"Expected 'x', got '{del1_text.text}'"
+    # Should NOT have w:vertAlign
+    del1_rPr = del1_runs[0].find('w:rPr', NS)
+    if del1_rPr is not None:
+        del1_vertAlign = del1_rPr.find('w:vertAlign', NS)
+        assert del1_vertAlign is None, "Normal text should not have w:vertAlign"
+    
+    # Check second w:del (superscript '2')
+    del2_runs = del_elems[1].findall('.//w:r', NS)
+    assert len(del2_runs) == 1, "Second w:del should have 1 run"
+    del2_text = del2_runs[0].find('.//w:delText', NS)
+    assert del2_text is not None, "Second run should have w:delText"
+    assert del2_text.text == '2', f"Expected '2', got '{del2_text.text}'"
+    # Should have w:vertAlign with superscript
+    del2_rPr = del2_runs[0].find('w:rPr', NS)
+    assert del2_rPr is not None, "Superscript run should have w:rPr"
+    del2_vertAlign = del2_rPr.find('w:vertAlign', NS)
+    assert del2_vertAlign is not None, "Superscript run should have w:vertAlign"
+    assert del2_vertAlign.get(qn('w:val')) == 'superscript', "w:vertAlign should be superscript"
+    
+    print("✓ test_apply_delete_with_superscript passed")
+
+
+def test_apply_replace_insert_with_subscript():
+    """Test that _apply_replace insert operation generates proper w:t with w:vertAlign for H<sub>2</sub>O"""
+    from lxml import etree
+    
+    # Create a mock paragraph with "water" content
+    para = etree.Element(qn('w:p'))
+    para.set('{http://schemas.microsoft.com/office/word/2010/wordml}paraId', '12345678')
+    para.append(create_run_with_text('water'))
+    
+    # Create minimal applier instance
+    applier = object.__new__(AuditEditApplier)
+    applier.verbose = False
+    applier.operation_timestamp = '2024-01-01T00:00:00Z'
+    applier.next_change_id = 1
+    applier.next_comment_id = 1
+    applier.comments = []
+    
+    # Collect runs
+    runs_info, combined_text = applier._collect_runs_info_original(para)
+    assert combined_text == 'water', f"Expected 'water', got '{combined_text}'"
+    
+    # Apply replace operation (replace "water" with "H<sub>2</sub>O")
+    result = applier._apply_replace(
+        para,
+        'water',
+        'H<sub>2</sub>O',
+        'Test reason',
+        runs_info,
+        0,  # match_start
+        'TestAuthor'
+    )
+    
+    assert result == 'success', f"Replace operation should succeed, got '{result}'"
+    
+    # Verify the paragraph contains w:ins with proper w:vertAlign for subscript
+    ins_elems = para.findall('.//w:ins', NS)
+    # Should have 3 w:ins elements: H (normal), 2 (subscript), O (normal)
+    assert len(ins_elems) == 3, f"Expected 3 w:ins elements (H, 2, O), got {len(ins_elems)}"
+    
+    # Check first w:ins (normal 'H')
+    ins1_runs = ins_elems[0].findall('.//w:r', NS)
+    assert len(ins1_runs) == 1, "First w:ins should have 1 run"
+    ins1_text = ins1_runs[0].find('.//w:t', NS)
+    assert ins1_text is not None, "First run should have w:t"
+    assert ins1_text.text == 'H', f"Expected 'H', got '{ins1_text.text}'"
+    
+    # Check second w:ins (subscript '2')
+    ins2_runs = ins_elems[1].findall('.//w:r', NS)
+    assert len(ins2_runs) == 1, "Second w:ins should have 1 run"
+    ins2_text = ins2_runs[0].find('.//w:t', NS)
+    assert ins2_text is not None, "Second run should have w:t"
+    assert ins2_text.text == '2', f"Expected '2', got '{ins2_text.text}'"
+    # Should have w:vertAlign with subscript
+    ins2_rPr = ins2_runs[0].find('w:rPr', NS)
+    assert ins2_rPr is not None, "Subscript run should have w:rPr"
+    ins2_vertAlign = ins2_rPr.find('w:vertAlign', NS)
+    assert ins2_vertAlign is not None, "Subscript run should have w:vertAlign"
+    assert ins2_vertAlign.get(qn('w:val')) == 'subscript', "w:vertAlign should be subscript"
+    
+    # Check third w:ins (normal 'O')
+    ins3_runs = ins_elems[2].findall('.//w:r', NS)
+    assert len(ins3_runs) == 1, "Third w:ins should have 1 run"
+    ins3_text = ins3_runs[0].find('.//w:t', NS)
+    assert ins3_text is not None, "Third run should have w:t"
+    assert ins3_text.text == 'O', f"Expected 'O', got '{ins3_text.text}'"
+    
+    print("✓ test_apply_replace_insert_with_subscript passed")
+
+
+def test_apply_replace_delete_with_superscript():
+    """Test that _apply_replace delete operation generates proper w:delText with w:vertAlign"""
+    from lxml import etree
+    
+    # Create a mock paragraph with "x²" content
+    para = etree.Element(qn('w:p'))
+    para.set('{http://schemas.microsoft.com/office/word/2010/wordml}paraId', '12345678')
+    para.append(create_run_with_text('x'))
+    para.append(create_run_with_text('2', vert_align='superscript'))
+    
+    # Create minimal applier instance
+    applier = object.__new__(AuditEditApplier)
+    applier.verbose = False
+    applier.operation_timestamp = '2024-01-01T00:00:00Z'
+    applier.next_change_id = 1
+    applier.next_comment_id = 1
+    applier.comments = []
+    
+    # Collect runs (should extract as "x<sup>2</sup>")
+    runs_info, combined_text = applier._collect_runs_info_original(para)
+    assert combined_text == 'x<sup>2</sup>', f"Expected 'x<sup>2</sup>', got '{combined_text}'"
+    
+    # Apply replace operation (replace "x<sup>2</sup>" with "x<sup>3</sup>")
+    result = applier._apply_replace(
+        para,
+        'x<sup>2</sup>',
+        'x<sup>3</sup>',
+        'Test reason',
+        runs_info,
+        0,  # match_start
+        'TestAuthor'
+    )
+    
+    assert result == 'success', f"Replace operation should succeed, got '{result}'"
+    
+    # Verify w:del elements have proper w:vertAlign
+    del_elems = para.findall('.//w:del', NS)
+    assert len(del_elems) == 1, f"Expected 1 w:del element (for '2'), got {len(del_elems)}"
+    
+    # Check w:del (superscript '2')
+    del_runs = del_elems[0].findall('.//w:r', NS)
+    assert len(del_runs) == 1, "w:del should have 1 run"
+    del_text = del_runs[0].find('.//w:delText', NS)
+    assert del_text is not None, "Run should have w:delText"
+    assert del_text.text == '2', f"Expected '2', got '{del_text.text}'"
+    # Should have w:vertAlign with superscript
+    del_rPr = del_runs[0].find('w:rPr', NS)
+    assert del_rPr is not None, "Superscript run should have w:rPr"
+    del_vertAlign = del_rPr.find('w:vertAlign', NS)
+    assert del_vertAlign is not None, "Superscript run should have w:vertAlign"
+    assert del_vertAlign.get(qn('w:val')) == 'superscript', "w:vertAlign should be superscript"
+    
+    # Verify w:ins elements have proper w:vertAlign
+    ins_elems = para.findall('.//w:ins', NS)
+    assert len(ins_elems) == 1, f"Expected 1 w:ins element (for '3'), got {len(ins_elems)}"
+    
+    # Check w:ins (superscript '3')
+    ins_runs = ins_elems[0].findall('.//w:r', NS)
+    assert len(ins_runs) == 1, "w:ins should have 1 run"
+    ins_text = ins_runs[0].find('.//w:t', NS)
+    assert ins_text is not None, "Run should have w:t"
+    assert ins_text.text == '3', f"Expected '3', got '{ins_text.text}'"
+    # Should have w:vertAlign with superscript
+    ins_rPr = ins_runs[0].find('w:rPr', NS)
+    assert ins_rPr is not None, "Superscript run should have w:rPr"
+    ins_vertAlign = ins_rPr.find('w:vertAlign', NS)
+    assert ins_vertAlign is not None, "Superscript run should have w:vertAlign"
+    assert ins_vertAlign.get(qn('w:val')) == 'superscript', "w:vertAlign should be superscript"
+    
+    print("✓ test_apply_replace_delete_with_superscript passed")
+
+
+# ============================================================
 # Test Runner
 # ============================================================
 
@@ -482,6 +693,12 @@ def run_all_tests():
             test_empty_superscript,
             test_nested_markup_not_supported,
             test_strip_inherited_vertAlign,
+        ]),
+        # Phase 4: Delete and Replace Operations
+        ("Phase 4: Delete/Replace Operations", [
+            test_apply_delete_with_superscript,
+            test_apply_replace_insert_with_subscript,
+            test_apply_replace_delete_with_superscript,
         ]),
     ]
     
