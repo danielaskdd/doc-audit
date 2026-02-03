@@ -10,7 +10,6 @@ This test verifies that:
 
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -35,14 +34,13 @@ def test_derive_extraction_path():
     print("✓ derive_extraction_path tests passed")
 
 
-def test_load_completed_extraction_uuids():
+def test_load_completed_extraction_uuids(tmp_path):
     """Test loading completed UUIDs from extraction file."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8') as f:
-        extraction_path = f.name
-        
+    extraction_path = tmp_path / "extractions.jsonl"
+    with extraction_path.open('w', encoding='utf-8') as f:
         # Write metadata
         f.write(json.dumps({"type": "meta", "source_file": "test.docx"}) + '\n')
-        
+
         # Write extraction results
         f.write(json.dumps({
             "uuid": "ABC123",
@@ -50,30 +48,26 @@ def test_load_completed_extraction_uuids():
             "p_heading": "Chapter 1",
             "results": [{"rule_id": "G001", "extracted_results": []}]
         }) + '\n')
-        
+
         f.write(json.dumps({
             "uuid": "GHI789",
             "uuid_end": "JKL012",
             "p_heading": "Chapter 2",
             "results": [{"rule_id": "G002", "extracted_results": []}]
         }) + '\n')
-    
-    try:
-        completed = load_completed_extraction_uuids(extraction_path)
-        assert completed == {"ABC123", "GHI789"}
-        print("✓ load_completed_extraction_uuids tests passed")
-    finally:
-        Path(extraction_path).unlink()
+
+    completed = load_completed_extraction_uuids(str(extraction_path))
+    assert completed == {"ABC123", "GHI789"}
+    print("✓ load_completed_extraction_uuids tests passed")
 
 
-def test_load_extraction_buckets():
+def test_load_extraction_buckets(tmp_path):
     """Test rebuilding rule_buckets from extraction file."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8') as f:
-        extraction_path = f.name
-        
+    extraction_path = tmp_path / "extractions.jsonl"
+    with extraction_path.open('w', encoding='utf-8') as f:
         # Write metadata
         f.write(json.dumps({"type": "meta"}) + '\n')
-        
+
         # Write extraction with entities
         f.write(json.dumps({
             "uuid": "ABC123",
@@ -95,7 +89,7 @@ def test_load_extraction_buckets():
                 }
             ]
         }) + '\n')
-        
+
         f.write(json.dumps({
             "uuid": "GHI789",
             "uuid_end": "JKL012",
@@ -112,29 +106,26 @@ def test_load_extraction_buckets():
                 }
             ]
         }) + '\n')
-    
-    try:
-        global_rules = [
-            {"id": "G001", "topic": "Party Identification"},
-            {"id": "G002", "topic": "Payment Terms"}
-        ]
-        
-        rule_buckets = load_extraction_buckets(extraction_path, global_rules)
-        
-        # Verify G001 has 2 items
-        assert len(rule_buckets["G001"]) == 2
-        assert rule_buckets["G001"][0]["entity"] == "Party A"
-        assert rule_buckets["G001"][0]["uuid"] == "ABC123"
-        assert rule_buckets["G001"][1]["entity"] == "Party B"
-        
-        # Verify G002 has 1 item
-        assert len(rule_buckets["G002"]) == 1
-        assert rule_buckets["G002"][0]["entity"] == "Payment"
-        assert rule_buckets["G002"][0]["p_heading"] == "Section 2"
-        
-        print("✓ load_extraction_buckets tests passed")
-    finally:
-        Path(extraction_path).unlink()
+
+    global_rules = [
+        {"id": "G001", "topic": "Party Identification"},
+        {"id": "G002", "topic": "Payment Terms"}
+    ]
+
+    rule_buckets = load_extraction_buckets(str(extraction_path), global_rules)
+
+    # Verify G001 has 2 items
+    assert len(rule_buckets["G001"]) == 2
+    assert rule_buckets["G001"][0]["entity"] == "Party A"
+    assert rule_buckets["G001"][0]["uuid"] == "ABC123"
+    assert rule_buckets["G001"][1]["entity"] == "Party B"
+
+    # Verify G002 has 1 item
+    assert len(rule_buckets["G002"]) == 1
+    assert rule_buckets["G002"][0]["entity"] == "Payment"
+    assert rule_buckets["G002"][0]["p_heading"] == "Section 2"
+
+    print("✓ load_extraction_buckets tests passed")
 
 
 def test_extraction_file_missing():

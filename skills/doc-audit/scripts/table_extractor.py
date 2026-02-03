@@ -3,11 +3,71 @@
 ABOUTME: Extracts tables from DOCX with proper merged cell handling
 ABOUTME: Vertically merged cells: content repeated in all rows with shared paraId
 ABOUTME: Horizontally merged cells: content in first cell only
+ABOUTME: Preserves superscript/subscript formatting with <sup>/<sub> markup
 """
 
 from docx.table import Table
 from docx.oxml.ns import qn
 from typing import List
+
+
+def extract_text_from_run_table(run_elem, qn_func) -> str:
+    """
+    Extract text from a run element in table cell, preserving superscript/subscript with markup.
+    
+    Converts Word formatting to HTML-like tags:
+    - Superscript: <sup>text</sup>
+    - Subscript: <sub>text</sub>
+    - Normal text: unchanged
+    
+    Args:
+        run_elem: lxml run element (w:r)
+        qn_func: qn function for namespace handling
+        
+    Returns:
+        Text string with <sup>/<sub> markup for formatted portions
+    """
+    text = ''
+    
+    # Check for vertAlign in rPr (superscript/subscript)
+    vert_align = None
+    rPr = run_elem.find(qn_func('w:rPr'))
+    if rPr is not None:
+        vert_elem = rPr.find(qn_func('w:vertAlign'))
+        if vert_elem is not None:
+            vert_align = vert_elem.get(qn_func('w:val'))
+    
+    # Extract text content from run children
+    for child in run_elem:
+        tag = child.tag.split('}')[-1]  # Remove namespace
+        if tag == 't' and child.text:
+            text += child.text
+        elif tag == 'tab':
+            text += '\t'
+        elif tag == 'br':
+            # Handle line breaks - textWrapping or no type = soft line break
+            br_type = child.get(qn_func('w:type'))
+            if br_type in (None, 'textWrapping'):
+                text += '\n'
+            # Skip page and column breaks (layout elements)
+        elif tag == 'drawing':
+            # Extract inline images (ignore floating images wp:anchor)
+            ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
+            inline = child.find('wp:inline', ns_wp)
+            if inline is not None:
+                doc_pr = inline.find('wp:docPr', ns_wp)
+                if doc_pr is not None:
+                    img_id = doc_pr.get('id', '')
+                    img_name = doc_pr.get('name', '')
+                    text += f'<drawing id="{img_id}" name="{img_name}" />'
+    
+    # Apply superscript/subscript markup if needed
+    if text and vert_align == 'superscript':
+        return f'<sup>{text}</sup>'
+    elif text and vert_align == 'subscript':
+        return f'<sub>{text}</sub>'
+    
+    return text
 
 class TableExtractor:
     """
@@ -127,9 +187,9 @@ class TableExtractor:
                 # Handle different vMerge cases
                 if is_vmerge_restart or is_normal_cell:
                     # Extract content for restart or normal cells
-                    # Get cell text with numbering support
+                    # Get cell text with numbering support and format preservation
                     if numbering_resolver is not None:
-                        # Extract text with numbering labels
+                        # Extract text with numbering labels and superscript/subscript markup
                         cell_paragraphs = []
                         for para_elem in tc.findall(qn('w:p')):
                             # Capture paraId from each paragraph
@@ -139,31 +199,11 @@ class TableExtractor:
                                     cell_para_id = para_id_attr  # First paraId
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
-                            # Get text content (including line breaks)
+                            # Get text content with format preservation (superscript/subscript)
                             para_text = ''
                             for run in para_elem.findall('.//'+qn('w:r')):
-                                for child in run:
-                                    tag = child.tag.split('}')[-1]
-                                    if tag == 't' and child.text:
-                                        para_text += child.text
-                                    elif tag == 'tab':
-                                        para_text += '\t'
-                                    elif tag == 'br':
-                                        # Handle line breaks - textWrapping or no type = soft line break
-                                        br_type = child.get(qn('w:type'))
-                                        if br_type in (None, 'textWrapping'):
-                                            para_text += '\n'
-                                        # Skip page and column breaks (layout elements)
-                                    elif tag == 'drawing':
-                                        # Extract inline images (ignore floating images wp:anchor)
-                                        ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
-                                        inline = child.find('wp:inline', ns_wp)
-                                        if inline is not None:
-                                            doc_pr = inline.find('wp:docPr', ns_wp)
-                                            if doc_pr is not None:
-                                                img_id = doc_pr.get('id', '')
-                                                img_name = doc_pr.get('name', '')
-                                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
+                                # Use new function to extract text with format preservation
+                                para_text += extract_text_from_run_table(run, qn)
                             
                             # Get numbering label
                             label = numbering_resolver.get_label(para_elem)
@@ -179,7 +219,7 @@ class TableExtractor:
                         
                         cell_text = '\n'.join(cell_paragraphs).replace('\x07', '')
                     else:
-                        # Fallback to simple text extraction (including line breaks)
+                        # Fallback to simple text extraction with format preservation
                         # Cannot use cell.text here, must extract from XML
                         para_texts = []
                         for para_elem in tc.findall(qn('w:p')):
@@ -190,30 +230,11 @@ class TableExtractor:
                                     cell_para_id = para_id_attr  # First paraId
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
+                            # Use new function to extract text with format preservation
                             para_text = ''
                             for run in para_elem.findall('.//'+qn('w:r')):
-                                for child in run:
-                                    tag = child.tag.split('}')[-1]
-                                    if tag == 't' and child.text:
-                                        para_text += child.text
-                                    elif tag == 'tab':
-                                        para_text += '\t'
-                                    elif tag == 'br':
-                                        # Handle line breaks - textWrapping or no type = soft line break
-                                        br_type = child.get(qn('w:type'))
-                                        if br_type in (None, 'textWrapping'):
-                                            para_text += '\n'
-                                        # Skip page and column breaks (layout elements)
-                                    elif tag == 'drawing':
-                                        # Extract inline images (ignore floating images wp:anchor)
-                                        ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
-                                        inline = child.find('wp:inline', ns_wp)
-                                        if inline is not None:
-                                            doc_pr = inline.find('wp:docPr', ns_wp)
-                                            if doc_pr is not None:
-                                                img_id = doc_pr.get('id', '')
-                                                img_name = doc_pr.get('name', '')
-                                                para_text += f'<drawing id="{img_id}" name="{img_name}" />'
+                                para_text += extract_text_from_run_table(run, qn)
+                            
                             if para_text:
                                 para_texts.append(para_text.strip())
                         cell_text = '\n'.join(para_texts).replace('\x07', '')

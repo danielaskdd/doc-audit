@@ -674,7 +674,6 @@ class AuditEditApplier:
             - is_cross_paragraph: True if text spans multiple paragraphs
             - boundary_error: None if OK, or error type string:
               - 'boundary_crossed': Crossed body/table or different tables
-              - 'row_boundary_crossed': Crossed table row boundary
         """
         # 1. Detect if start paragraph is in a table
         start_in_table = self._is_paragraph_in_table(start_para)
@@ -1147,6 +1146,84 @@ class AuditEditApplier:
 
         return runs_info, combined_text, is_cross_paragraph, None
 
+    def _extract_text_in_range_from_table(self, table_elem, uuid_start: str, uuid_end: str) -> str:
+        """
+        Extract table text between uuid_start and uuid_end in JSON row format.
+
+        Returns a string like:
+          ["cell1", "cell2"], ["cell3", "cell4"]
+
+        This mirrors parse_document-style row formatting and handles gridSpan/vMerge:
+        - gridSpan: repeats cell content across spanned columns
+        - vMerge restart/continue: repeats content only when restart is within range
+        """
+        rows_text = []
+        in_range = False
+        reached_end = False
+        vmerge_content = {}  # {grid_col: text}
+
+        for tr in table_elem.findall(f'{{{NS["w"]}}}tr'):
+            if reached_end:
+                break
+            row_cells = []
+            row_in_range = False
+            grid_col = 0
+
+            for tc in tr.findall(f'{{{NS["w"]}}}tc'):
+                if reached_end:
+                    break
+
+                tcPr = tc.find(f'{{{NS["w"]}}}tcPr')
+                grid_span, vmerge_type = self._get_cell_merge_properties(tcPr)
+                cell_paras = tc.findall(f'{{{NS["w"]}}}p')
+
+                cell_text_parts = []
+                cell_has_range = False
+
+                for para in cell_paras:
+                    para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                    if para_id == uuid_start:
+                        in_range = True
+
+                    if in_range:
+                        cell_has_range = True
+                        _, para_text = self._collect_runs_info_original(para)
+                        if para_text:
+                            cell_text_parts.append(para_text)
+
+                    if in_range and para_id == uuid_end:
+                        reached_end = True
+                        break
+
+                cell_text = '\n'.join(cell_text_parts).replace('\x07', '')
+
+                if vmerge_type == 'restart':
+                    if cell_has_range:
+                        for col in range(grid_col, grid_col + grid_span):
+                            vmerge_content[col] = cell_text
+                elif vmerge_type == 'continue':
+                    if grid_col in vmerge_content:
+                        cell_text = vmerge_content.get(grid_col, '')
+                else:
+                    if not cell_text and grid_col in vmerge_content:
+                        cell_text = vmerge_content.get(grid_col, '')
+                    elif cell_text:
+                        for col in range(grid_col, grid_col + grid_span):
+                            vmerge_content.pop(col, None)
+
+                if in_range or cell_has_range:
+                    row_in_range = True
+                    escaped = json_escape(cell_text)
+                    for _ in range(grid_span):
+                        row_cells.append(escaped)
+
+                grid_col += grid_span
+
+            if row_in_range:
+                rows_text.append('["' + '", "'.join(row_cells) + '"]')
+
+        return ', '.join(rows_text)
+
     def _check_cross_cell_boundary(self, affected_runs: List[Dict]) -> bool:
         """
         Check if affected runs span multiple table cells.
@@ -1180,6 +1257,472 @@ class AuditEditApplier:
             if row is not None:
                 rows.add(id(row))
         return len(rows) > 1
+    
+    def _group_runs_by_cell(self, runs: List[Dict]) -> Dict[Tuple, List[Dict]]:
+        """
+        Group runs by (para_elem, cell_elem) pairs.
+        
+        This allows processing runs cell-by-cell for multi-cell operations
+        like delete/replace across table cells.
+        
+        IMPORTANT: This method assumes runs are already in document order
+        (as provided by _collect_runs_info_* methods). The grouping preserves
+        this order within each cell group.
+        
+        Args:
+            runs: List of run info dicts (must be in document order)
+        
+        Returns:
+            Dict mapping (para_elem, cell_elem) -> list of runs in that cell
+        """
+        groups = {}
+        for run in runs:
+            para = run.get('para_elem')
+            cell = run.get('cell_elem')
+            key = (id(para) if para is not None else None, 
+                   id(cell) if cell is not None else None)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(run)
+        return groups
+    
+    def _is_multi_row_json(self, text: str) -> bool:
+        """
+        Check if text is multi-row JSON format.
+        
+        Multi-row JSON format: '["cell1", "cell2"], ["cell3", "cell4"]'
+        Single-row JSON format: '["cell1", "cell2"]'
+        
+        Args:
+            text: Text to check
+        
+        Returns:
+            True if text contains row boundary marker '"], ["'
+        """
+        return text.startswith('["') and '"], ["' in text
+
+    def _apply_delete_multi_cell(self, real_runs: List[Dict], violation_text: str,
+                                  violation_reason: str, author: str, match_start: int,
+                                  item: EditItem) -> str:
+        """
+        Apply delete operation across multiple cells/rows.
+        
+        Strategy: Delete content in each cell independently by wrapping runs
+        with <w:del> tags, properly handling partial run deletion when the
+        match doesn't align to run boundaries.
+        
+        Args:
+            real_runs: List of real runs (boundaries filtered out)
+            violation_text: Text being deleted (may be JSON format)
+            violation_reason: Reason for deletion
+            author: Track change author
+            match_start: Absolute position where violation_text starts
+            item: Original EditItem (for fallback comment)
+        
+        Returns:
+            'success' if at least one cell deleted, 'fallback' if all failed
+        """
+        if not real_runs:
+            return 'fallback'
+        
+        match_end = match_start + len(violation_text)
+        
+        # Group runs by cell
+        cell_groups = self._group_runs_by_cell(real_runs)
+        
+        # Track success/failure for each cell
+        success_count = 0
+        failed_cells = []  # List of (para_elem, cell_violation, error_reason)
+        first_success_para = None
+        
+        # Process each cell independently
+        for (para_id, cell_id), cell_runs in cell_groups.items():
+            if not cell_runs:
+                continue
+            
+            # De-duplicate runs by their underlying elem reference
+            # This prevents duplicates when vMerge='continue' cells copy runs from restart cells
+            seen_elems = set()
+            unique_cell_runs = []
+            for run in cell_runs:
+                elem_id = id(run.get('elem'))
+                if elem_id not in seen_elems:
+                    seen_elems.add(elem_id)
+                    unique_cell_runs.append(run)
+            cell_runs = unique_cell_runs
+            
+            if not cell_runs:
+                continue
+            
+            # Get the paragraph element from first run
+            para_elem = cell_runs[0].get('para_elem')
+            if para_elem is None:
+                failed_cells.append((None, "", "No paragraph found"))
+                continue
+            
+            # Get rPr for formatting
+            rPr_xml = self._get_rPr_xml(cell_runs[0].get('rPr'))
+            
+            # Find cell boundaries in the match range
+            cell_start = min(r['start'] for r in cell_runs)
+            cell_end = max(r['end'] for r in cell_runs)
+            
+            # Calculate intersection with match range
+            del_start_in_cell = max(cell_start, match_start)
+            del_end_in_cell = min(cell_end, match_end)
+            
+            if del_start_in_cell >= del_end_in_cell:
+                # No overlap with this cell
+                continue
+            
+            # Find first and last run in this cell that are affected
+            first_run = None
+            last_run = None
+            for run in cell_runs:
+                if run['end'] > del_start_in_cell and run['start'] < del_end_in_cell:
+                    if first_run is None:
+                        first_run = run
+                    last_run = run
+            
+            if first_run is None or last_run is None:
+                failed_cells.append((para_elem, "", "No affected runs found"))
+                continue
+            
+            # Calculate split points for first and last run
+            first_orig_text = self._get_run_original_text(first_run)
+            last_orig_text = self._get_run_original_text(last_run)
+            
+            # Translate offsets from escaped space to original space
+            before_offset = self._translate_escaped_offset(first_run, max(0, del_start_in_cell - first_run['start']))
+            after_offset = self._translate_escaped_offset(last_run, max(0, del_end_in_cell - last_run['start']))
+            
+            before_text = first_orig_text[:before_offset]
+            after_text = last_orig_text[after_offset:]
+            
+            # Collect text to delete (from all affected runs in this cell)
+            affected_cell_runs = [r for r in cell_runs 
+                                  if r['end'] > del_start_in_cell and r['start'] < del_end_in_cell]
+            
+            # Extract cell violation text for error reporting
+            cell_violation_parts = []
+            for run in affected_cell_runs:
+                if run.get('is_drawing'):
+                    cell_violation_parts.append(run['text'])
+                else:
+                    orig_text = self._get_run_original_text(run)
+                    if run is first_run:
+                        if first_run is last_run:
+                            # Single run case: deletion only affects part of this run
+                            # Use both offsets to extract only the deleted portion
+                            cell_violation_parts.append(orig_text[before_offset:after_offset])
+                        else:
+                            # First run of multiple: delete from before_offset to end
+                            cell_violation_parts.append(orig_text[before_offset:])
+                    elif run is last_run:
+                        cell_violation_parts.append(orig_text[:after_offset])
+                    else:
+                        cell_violation_parts.append(orig_text)
+            cell_violation = ''.join(cell_violation_parts)
+            
+            # Check if any affected run overlaps with existing revisions
+            if self._check_overlap_with_revisions(affected_cell_runs):
+                # This cell has conflicts with existing revisions, skip deletion
+                failed_cells.append((para_elem, cell_violation, "Overlaps with existing revision"))
+                continue
+            
+            if not cell_violation:
+                failed_cells.append((para_elem, "", "No text to delete"))
+                continue
+            
+            # Build new elements for this cell
+            new_elements = []
+            
+            # Before text (unchanged)
+            if before_text:
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+            
+            # Deleted text with track changes
+            change_id = self._get_next_change_id()
+            run_or_container = self._create_run(cell_violation, rPr_xml)
+            
+            if run_or_container.tag == 'container':
+                # Multiple runs (has markup) - wrap each in w:del
+                for del_run in run_or_container:
+                    # Change w:t to w:delText
+                    t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                    if t_elem is not None:
+                        t_elem.tag = f'{{{NS["w"]}}}delText'
+                    
+                    # Wrap in w:del
+                    del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                    del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    del_elem.set(f'{{{NS["w"]}}}author', author)
+                    del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    del_elem.append(del_run)
+                    new_elements.append(del_elem)
+            else:
+                # Single run - wrap in w:del
+                t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+                if t_elem is not None:
+                    t_elem.tag = f'{{{NS["w"]}}}delText'
+                
+                del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                del_elem.set(f'{{{NS["w"]}}}author', author)
+                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                del_elem.append(run_or_container)
+                new_elements.append(del_elem)
+            
+            # After text (unchanged)
+            if after_text:
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+            
+            # Replace the affected runs in this cell
+            self._replace_runs(para_elem, affected_cell_runs, new_elements)
+            success_count += 1
+            if first_success_para is None:
+                first_success_para = para_elem
+        
+        # Handle results based on success/failure counts
+        if success_count > 0:
+            # At least one cell deleted - add overall comment
+            if first_success_para is not None:
+                comment_id = self.next_comment_id
+                self.next_comment_id += 1
+                
+                # Insert commentReference at end of first successful paragraph
+                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                    <w:commentReference w:id="{comment_id}"/>
+                </w:r>'''
+                first_success_para.append(etree.fromstring(ref_xml))
+                
+                # Record comment with -R suffix author
+                self.comments.append({
+                    'id': comment_id,
+                    'text': violation_reason,
+                    'author': f"{author}-R"
+                })
+            
+            # Add individual comments for failed cells
+            for para_elem, cell_violation, error_reason in failed_cells:
+                if para_elem is not None:
+                    self._apply_cell_fallback_comment(
+                        para_elem,
+                        cell_violation,
+                        "",  # No revised text for delete operation
+                        error_reason,
+                        item
+                    )
+            
+            if self.verbose:
+                if failed_cells:
+                    print(f"  [Multi-cell delete] Partial success: {success_count}/{len(cell_groups)} cells processed, {len(failed_cells)} failed")
+                else:
+                    print(f"  [Multi-cell delete] Successfully deleted from all {len(cell_groups)} cells")
+            elif failed_cells:
+                # Summary logging for partial failures in non-verbose mode
+                print(f"  [Warning] {len(failed_cells)} cell(s) failed during delete operation")
+            
+            return 'success'
+        else:
+            # All cells failed - fallback to overall comment
+            return 'fallback'
+    
+    def _try_extract_multi_cell_edits(self, violation_text: str, revised_text: str,
+                                        affected_runs: List[Dict], match_start: int) -> Optional[List[Dict]]:
+        """
+        Try to extract multi-cell edits when text spans multiple cells.
+        
+        This method analyzes the diff to determine if changes are distributed across
+        multiple cells, with each change staying within its own cell boundary.
+        
+        Args:
+            violation_text: Original violation text (may span multiple cells)
+            revised_text: Revised text (may span multiple cells)
+            affected_runs: List of run info dicts that would be affected
+            match_start: Absolute position where violation_text starts in document
+        
+        Returns:
+            List of dicts, each with keys: 'cell_violation', 'cell_revised', 'cell_elem', 'cell_runs'
+            Or None if any change crosses cell boundaries
+        """
+        # Calculate diff to find changed positions
+        diff_ops = self._calculate_diff(violation_text, revised_text)
+        
+        # Track positions of all changes (delete/insert operations)
+        change_positions = []
+        current_pos = 0
+        
+        for op, text in diff_ops:
+            if op == 'delete':
+                # Record the position range of deleted text
+                change_positions.append((current_pos, current_pos + len(text)))
+                current_pos += len(text)
+            elif op == 'insert':
+                # Record the insertion point (zero-length range)
+                change_positions.append((current_pos, current_pos))
+                # insert doesn't consume original text position
+            elif op == 'equal':
+                current_pos += len(text)
+        
+        if not change_positions:
+            # No changes detected
+            return None
+        
+        # Find which cell each change affects
+        # Map: cell_id -> list of change indices
+        cell_to_changes = {}
+        
+        base_offset = match_start
+        
+        for change_idx, (change_start_rel, change_end_rel) in enumerate(change_positions):
+            # Translate relative positions to absolute positions
+            change_start = base_offset + change_start_rel
+            change_end = base_offset + change_end_rel
+            
+            is_insert = (change_start == change_end)
+            
+            # Find which cell contains this change
+            change_cell = None
+            for run in affected_runs:
+                if (run.get('is_json_boundary') or 
+                    run.get('is_json_escape') or 
+                    run.get('is_para_boundary')):
+                    continue
+                
+                # Check if this run is affected by the change
+                is_affected = False
+                if is_insert:
+                    if run['start'] <= change_start <= run['end']:
+                        is_affected = True
+                else:
+                    if run['end'] > change_start and run['start'] < change_end:
+                        is_affected = True
+                
+                if is_affected:
+                    cell = run.get('cell_elem')
+                    if cell is not None:
+                        if change_cell is None:
+                            change_cell = cell
+                        elif id(change_cell) != id(cell):
+                            # Change spans multiple cells
+                            return None
+            
+            if change_cell is not None:
+                cell_id = id(change_cell)
+                if cell_id not in cell_to_changes:
+                    cell_to_changes[cell_id] = []
+                cell_to_changes[cell_id].append(change_idx)
+            else:
+                # Change landed on JSON boundary marker (e.g., ", " or "], [")
+                # Cannot be correctly mapped to a cell - this indicates a cross-cell
+                # operation like merge/split that requires fallback to comment
+                return None
+        
+        if not cell_to_changes:
+            return None
+        
+        # Group affected runs by cell
+        cell_runs_map = {}
+        for run in affected_runs:
+            if (run.get('is_json_boundary') or 
+                run.get('is_json_escape') or 
+                run.get('is_para_boundary')):
+                continue
+            
+            cell = run.get('cell_elem')
+            if cell is not None:
+                cell_id = id(cell)
+                if cell_id not in cell_runs_map:
+                    cell_runs_map[cell_id] = {'cell': cell, 'runs': []}
+                cell_runs_map[cell_id]['runs'].append(run)
+        
+        # Extract cell-specific edits
+        result_edits = []
+        
+        for cell_id, change_indices in cell_to_changes.items():
+            if cell_id not in cell_runs_map:
+                continue
+            
+            cell_info = cell_runs_map[cell_id]
+            cell_runs = cell_info['runs']
+            
+            # Find cell boundaries in violation_text
+            cell_start = min(r['start'] for r in cell_runs)
+            cell_end = max(r['end'] for r in cell_runs)
+            
+            relative_start = cell_start - match_start
+            relative_end = cell_end - match_start
+            
+            # Extract cell_violation
+            if self._is_table_mode(affected_runs):
+                cell_violation_escaped = violation_text[relative_start:relative_end]
+                cell_violation = self._decode_json_escaped(cell_violation_escaped)
+            else:
+                cell_violation = violation_text[relative_start:relative_end]
+            
+            # Build cell_revised by applying diff operations within cell range
+            violation_pos = 0
+            revised_accumulator = ''
+            has_changes_in_cell = False  # Track whether any changes affect this cell
+            
+            for op, text in diff_ops:
+                if op == 'equal':
+                    chunk_start = violation_pos
+                    chunk_end = violation_pos + len(text)
+                    
+                    # Check if this chunk overlaps with cell range
+                    if chunk_end > relative_start and chunk_start < relative_end:
+                        overlap_start = max(0, relative_start - chunk_start)
+                        overlap_end = min(len(text), relative_end - chunk_start)
+                        revised_accumulator += text[overlap_start:overlap_end]
+                    
+                    violation_pos += len(text)
+                
+                elif op == 'delete':
+                    chunk_start = violation_pos
+                    chunk_end = violation_pos + len(text)
+                    
+                    # Check if this deletion affects the current cell
+                    if chunk_end > relative_start and chunk_start < relative_end:
+                        has_changes_in_cell = True
+                    
+                    violation_pos += len(text)
+                
+                elif op == 'insert':
+                    # Check if insertion point is within cell range (exclude right boundary)
+                    # Insertions at exact cell boundary (violation_pos == relative_end) are 
+                    # ambiguous and should trigger cross-cell fallback
+                    if relative_start <= violation_pos < relative_end:
+                        revised_accumulator += text
+                        has_changes_in_cell = True
+            
+            # Use accumulator if there were changes (even if empty), otherwise keep original
+            cell_revised = revised_accumulator if has_changes_in_cell else cell_violation
+            
+            # Fix: Decode cell_revised in table mode (same as cell_violation)
+            # cell_revised is accumulated from escaped diff chunks and needs decoding
+            # to match cell_violation which is already decoded
+            if self._is_table_mode(affected_runs) and cell_revised != cell_violation:
+                cell_revised = self._decode_json_escaped(cell_revised)
+            
+            result_edits.append({
+                'cell_violation': cell_violation,
+                'cell_revised': cell_revised,
+                'cell_elem': cell_info['cell'],
+                'cell_runs': cell_runs
+            })
+        
+        return result_edits if result_edits else None
 
     def _try_extract_single_cell_edit(self, violation_text: str, revised_text: str,
                                        affected_runs: List[Dict], match_start: int) -> Optional[Dict]:
@@ -1334,7 +1877,7 @@ class AuditEditApplier:
             elif op == 'insert':
                 # Insert operations don't have a position in violation_text
                 # Check if insertion point is within cell range
-                if relative_start <= violation_pos < relative_end:
+                if relative_start <= violation_pos <= relative_end:
                     revised_accumulator += text
         
         cell_revised = revised_accumulator if revised_accumulator else cell_violation
@@ -1346,6 +1889,63 @@ class AuditEditApplier:
             'cell_runs': cell_runs
         }
 
+    def _extract_text_from_run_element(self, run_elem, rPr) -> str:
+        """
+        Extract text from a single run element with superscript/subscript markup.
+        
+        This matches parse_document.py's extract_text_from_run() behavior to ensure
+        violation_text from LLM matches the text extracted during apply phase.
+        
+        Superscript/subscript detection:
+        - Check w:rPr/w:vertAlign[@w:val="superscript|subscript"]
+        - Wrap text with <sup>...</sup> or <sub>...</sub> markup
+        
+        Args:
+            run_elem: The w:r run element to extract text from
+            rPr: Pre-fetched w:rPr element (may be None)
+        
+        Returns:
+            Extracted text with superscript/subscript markup if applicable
+        """
+        # Check for vertical alignment (superscript/subscript)
+        vert_align = None
+        if rPr is not None:
+            vert_align_elem = rPr.find('w:vertAlign', NS)
+            if vert_align_elem is not None:
+                vert_align = vert_align_elem.get(f'{{{NS["w"]}}}val')
+        
+        # Extract text content from run
+        text_parts = []
+        for elem in run_elem:
+            if elem.tag == f'{{{NS["w"]}}}t':
+                text = elem.text or ''
+                if text:
+                    text_parts.append(text)
+            elif elem.tag == f'{{{NS["w"]}}}delText':
+                # For deleted text in revision markup
+                text = elem.text or ''
+                if text:
+                    text_parts.append(text)
+            elif elem.tag == f'{{{NS["w"]}}}tab':
+                text_parts.append('\t')
+            elif elem.tag == f'{{{NS["w"]}}}br':
+                # Handle line breaks - textWrapping or no type = soft line break
+                br_type = elem.get(f'{{{NS["w"]}}}type')
+                if br_type in (None, 'textWrapping'):
+                    text_parts.append('\n')
+                # Skip page and column breaks (layout elements)
+        
+        combined_text = ''.join(text_parts)
+        
+        # Apply superscript/subscript markup
+        if combined_text and vert_align in ('superscript', 'subscript'):
+            if vert_align == 'superscript':
+                return f'<sup>{combined_text}</sup>'
+            else:  # subscript
+                return f'<sub>{combined_text}</sub>'
+        
+        return combined_text
+
     def _collect_runs_info_original(self, para_elem) -> Tuple[List[Dict], str]:
         """
         Collect run info representing ORIGINAL text (before track changes).
@@ -1355,11 +1955,12 @@ class AuditEditApplier:
         - Include: <w:delText> in <w:del> elements (deleted text was part of original)
         - Include: Normal <w:t>, <w:tab>, <w:br> NOT inside <w:ins> or <w:del> elements
         - Exclude: <w:t> inside <w:ins> elements (inserted text didn't exist in original)
+        - Superscript/subscript: Wrapped with <sup>/<sub> tags for LLM matching
         
         Returns:
             Tuple of (runs_info, combined_text)
             runs_info: [{'text': str, 'start': int, 'end': int}, ...]
-            combined_text: Full text string
+            combined_text: Full text string with <sup>/<sub> markup
         """
         runs_info = []
         pos = 0
@@ -1370,41 +1971,19 @@ class AuditEditApplier:
                 # Deleted text = part of original document
                 for run in child.findall('.//w:r', NS):
                     rPr = run.find('w:rPr', NS)
-                    # Look for w:delText, w:tab, w:br elements
-                    for elem in run:
-                        if elem.tag == f'{{{NS["w"]}}}delText':
-                            text = elem.text or ''
-                            if text:
-                                runs_info.append({
-                                    'text': text,
-                                    'start': pos,
-                                    'end': pos + len(text),
-                                    'elem': run,
-                                    'rPr': rPr
-                                })
-                                pos += len(text)
-                        elif elem.tag == f'{{{NS["w"]}}}tab':
-                            runs_info.append({
-                                'text': '\t',
-                                'start': pos,
-                                'end': pos + 1,
-                                'elem': run,
-                                'rPr': rPr
-                            })
-                            pos += 1
-                        elif elem.tag == f'{{{NS["w"]}}}br':
-                            # Handle line breaks - textWrapping or no type = soft line break
-                            br_type = elem.get(f'{{{NS["w"]}}}type')
-                            if br_type in (None, 'textWrapping'):
-                                runs_info.append({
-                                    'text': '\n',
-                                    'start': pos,
-                                    'end': pos + 1,
-                                    'elem': run,
-                                    'rPr': rPr
-                                })
-                                pos += 1
-                            # Skip page and column breaks (layout elements)
+                    
+                    # Extract text with superscript/subscript markup
+                    text = self._extract_text_from_run_element(run, rPr)
+                    
+                    if text:
+                        runs_info.append({
+                            'text': text,
+                            'start': pos,
+                            'end': pos + len(text),
+                            'elem': run,
+                            'rPr': rPr
+                        })
+                        pos += len(text)
                             
             elif child.tag == f'{{{NS["w"]}}}ins':
                 # Inserted text = NOT part of original, skip completely
@@ -1413,58 +1992,86 @@ class AuditEditApplier:
             elif child.tag == f'{{{NS["w"]}}}r':
                 # Normal run (not in revision markup)
                 rPr = child.find('w:rPr', NS)
+
+                # Check for vertical alignment (superscript/subscript)
+                vert_align = None
+                if rPr is not None:
+                    vert_align_elem = rPr.find('w:vertAlign', NS)
+                    if vert_align_elem is not None:
+                        vert_align = vert_align_elem.get(f'{{{NS["w"]}}}val')
+
+                # Buffer for accumulating text before a drawing
+                text_buffer = []
+                
+                def flush_text_buffer():
+                    """Helper to flush accumulated text as a separate entry."""
+                    nonlocal pos
+                    if not text_buffer:
+                        return
+                    
+                    combined_text = ''.join(text_buffer)
+                    
+                    # Apply superscript/subscript markup if needed
+                    if vert_align in ('superscript', 'subscript'):
+                        if vert_align == 'superscript':
+                            combined_text = f'<sup>{combined_text}</sup>'
+                        else:
+                            combined_text = f'<sub>{combined_text}</sub>'
+                    
+                    runs_info.append({
+                        'text': combined_text,
+                        'start': pos,
+                        'end': pos + len(combined_text),
+                        'elem': child,
+                        'rPr': rPr,
+                        'is_drawing': False
+                    })
+                    pos += len(combined_text)
+                    text_buffer.clear()
+
+                # Process children in order to preserve text/image positions
+                # Split into separate entries: text vs drawing
                 for elem in child:
                     if elem.tag == f'{{{NS["w"]}}}t':
                         text = elem.text or ''
                         if text:
-                            runs_info.append({
-                                'text': text,
-                                'start': pos,
-                                'end': pos + len(text),
-                                'elem': child,
-                                'rPr': rPr
-                            })
-                            pos += len(text)
+                            text_buffer.append(text)
+                    elif elem.tag == f'{{{NS["w"]}}}delText':
+                        text = elem.text or ''
+                        if text:
+                            text_buffer.append(text)
                     elif elem.tag == f'{{{NS["w"]}}}tab':
-                        runs_info.append({
-                            'text': '\t',
-                            'start': pos,
-                            'end': pos + 1,
-                            'elem': child,
-                            'rPr': rPr
-                        })
-                        pos += 1
+                        text_buffer.append('\t')
                     elif elem.tag == f'{{{NS["w"]}}}br':
-                        # Handle line breaks - textWrapping or no type = soft line break
                         br_type = elem.get(f'{{{NS["w"]}}}type')
                         if br_type in (None, 'textWrapping'):
-                            runs_info.append({
-                                'text': '\n',
-                                'start': pos,
-                                'end': pos + 1,
-                                'elem': child,
-                                'rPr': rPr
-                            })
-                            pos += 1
-                        # Skip page and column breaks (layout elements)
+                            text_buffer.append('\n')
                     elif elem.tag == f'{{{NS["w"]}}}drawing':
-                        # Handle inline images (ignore floating/anchor images)
+                        # Flush any accumulated text before the drawing
+                        flush_text_buffer()
+                        
+                        # Create separate entry for drawing
                         inline = elem.find(f'{{{NS["wp"]}}}inline')
                         if inline is not None:
                             doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
                             if doc_pr is not None:
                                 img_id = doc_pr.get('id', '')
                                 img_name = doc_pr.get('name', '')
-                                img_str = f'<drawing id="{img_id}" name="{img_name}" />'
+                                drawing_text = f'<drawing id="{img_id}" name="{img_name}" />'
+                                
                                 runs_info.append({
-                                    'text': img_str,
+                                    'text': drawing_text,
                                     'start': pos,
-                                    'end': pos + len(img_str),
+                                    'end': pos + len(drawing_text),
                                     'elem': child,
                                     'rPr': rPr,
-                                    'is_drawing': True
+                                    'is_drawing': True,
+                                    'drawing_elem': elem  # Store reference to drawing element
                                 })
-                                pos += len(img_str)
+                                pos += len(drawing_text)
+                
+                # Flush any remaining text after all elements
+                flush_text_buffer()
         
         combined_text = ''.join(r['text'] for r in runs_info)
         return runs_info, combined_text
@@ -1623,6 +2230,103 @@ class AuditEditApplier:
         
         return operations
     
+    def _calculate_markup_aware_diff(self, old_text: str, new_text: str) -> List[Tuple[str, str, Optional[str]]]:
+        """
+        Calculate diff with markup awareness for <sup>/<sub> tags.
+        
+        This method parses both texts into segments with formatting info,
+        then performs diff on the text content only (ignoring markup tags).
+        
+        Args:
+            old_text: Original text with possible <sup>/<sub> markup
+            new_text: New text with possible <sup>/<sub> markup
+        
+        Returns:
+            List of (operation, text, vert_align) tuples where:
+            - operation: 'equal' | 'delete' | 'insert'
+            - text: The actual text content (without markup tags)
+            - vert_align: 'superscript' | 'subscript' | None
+        
+        Examples:
+            old: "x<sup>2</sup>"  new: "x<sup>3</sup>"
+            → [('equal', 'x', None), ('delete', '2', 'superscript'), ('insert', '3', 'superscript')]
+        """
+        # Parse both texts into segments
+        old_segments = self._parse_formatted_text(old_text)
+        new_segments = self._parse_formatted_text(new_text)
+        
+        # Build plain text versions for diffing (text content only, no markup)
+        old_plain = ''.join(text for text, _ in old_segments)
+        new_plain = ''.join(text for text, _ in new_segments)
+        
+        # Perform character-level diff on plain text
+        matcher = difflib.SequenceMatcher(None, old_plain, new_plain)
+        operations = []
+        
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                # Find segments in old_text that cover this range
+                ops = self._map_range_to_segments(old_segments, i1, i2, 'equal')
+                operations.extend(ops)
+            elif tag == 'delete':
+                # Find segments in old_text
+                ops = self._map_range_to_segments(old_segments, i1, i2, 'delete')
+                operations.extend(ops)
+            elif tag == 'insert':
+                # Find segments in new_text
+                ops = self._map_range_to_segments(new_segments, j1, j2, 'insert')
+                operations.extend(ops)
+            elif tag == 'replace':
+                # Delete from old, insert from new
+                ops_del = self._map_range_to_segments(old_segments, i1, i2, 'delete')
+                ops_ins = self._map_range_to_segments(new_segments, j1, j2, 'insert')
+                operations.extend(ops_del)
+                operations.extend(ops_ins)
+        
+        return operations
+    
+    def _map_range_to_segments(self, segments: List[Tuple[str, Optional[str]]], 
+                                start: int, end: int, operation: str) -> List[Tuple[str, str, Optional[str]]]:
+        """
+        Map a character range to segments with formatting info.
+        
+        Args:
+            segments: List of (text, vert_align) tuples
+            start: Start position in plain text
+            end: End position in plain text
+            operation: 'equal' | 'delete' | 'insert'
+        
+        Returns:
+            List of (operation, text, vert_align) tuples
+        """
+        result = []
+        pos = 0
+        
+        for text, vert_align in segments:
+            segment_start = pos
+            segment_end = pos + len(text)
+            
+            # Check if this segment overlaps with [start, end)
+            if segment_end <= start:
+                # Before the range
+                pos = segment_end
+                continue
+            if segment_start >= end:
+                # After the range
+                break
+            
+            # Calculate overlap
+            overlap_start = max(0, start - segment_start)
+            overlap_end = min(len(text), end - segment_start)
+            
+            if overlap_start < overlap_end:
+                chunk = text[overlap_start:overlap_end]
+                result.append((operation, chunk, vert_align))
+            
+            pos = segment_end
+        
+        return result
+    
     # ==================== ID Management ====================
     
     def _init_comment_id(self):
@@ -1689,10 +2393,134 @@ class AuditEditApplier:
             .replace('>', '&gt;')
             .replace('"', '&quot;'))
     
+    def _parse_formatted_text(self, text: str) -> List[Tuple[str, Optional[str]]]:
+        """
+        Parse text with <sup>/<sub> markup into segments with format info.
+        
+        This function splits text containing superscript/subscript markup into
+        segments, each with its associated vertical alignment type.
+        
+        Args:
+            text: Text possibly containing <sup>...</sup> or <sub>...</sub> markup
+        
+        Returns:
+            List of (text_content, vert_align) tuples where:
+            - text_content: The actual text without markup tags
+            - vert_align: 'superscript' | 'subscript' | None
+        
+        Examples:
+            "x<sup>2</sup>" -> [("x", None), ("2", "superscript")]
+            "H<sub>2</sub>O" -> [("H", None), ("2", "subscript"), ("O", None)]
+            "normal text" -> [("normal text", None)]
+        """
+        if '<sup>' not in text and '<sub>' not in text:
+            # Fast path: no markup
+            return [(text, None)]
+        
+        segments = []
+        pos = 0
+        
+        # Pattern to match <sup>...</sup> or <sub>...</sub>
+        # Non-greedy match to handle multiple tags correctly
+        pattern = re.compile(r'<(sup|sub)>(.*?)</\1>', re.DOTALL)
+        
+        for match in pattern.finditer(text):
+            # Add text before this tag (if any)
+            if match.start() > pos:
+                segments.append((text[pos:match.start()], None))
+            
+            # Add the tagged content
+            tag_type = match.group(1)  # 'sup' or 'sub'
+            tag_content = match.group(2)
+            vert_align = 'superscript' if tag_type == 'sup' else 'subscript'
+            segments.append((tag_content, vert_align))
+            
+            pos = match.end()
+        
+        # Add remaining text after last tag (if any)
+        if pos < len(text):
+            segments.append((text[pos:], None))
+        
+        return segments
+    
     def _create_run(self, text: str, rPr_xml: str = '') -> etree.Element:
-        """Create a new w:r element with text"""
-        run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
-        return etree.fromstring(run_xml)
+        """
+        Create new w:r element(s) with text, supporting <sup>/<sub> markup.
+        
+        If text contains superscript/subscript markup, returns a document fragment
+        with multiple runs (each with appropriate w:vertAlign in w:rPr).
+        
+        Args:
+            text: Text to insert, may contain <sup>...</sup> or <sub>...</sub>
+            rPr_xml: Base run properties XML (will be modified to add w:vertAlign)
+        
+        Returns:
+            Single w:r element or document fragment containing multiple w:r elements
+        """
+        segments = self._parse_formatted_text(text)
+        
+        if len(segments) == 1 and segments[0][1] is None:
+            # Simple case: no formatting, return single run
+            run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
+            return etree.fromstring(run_xml)
+        
+        # Complex case: need multiple runs with different formatting
+        # Parse base rPr to potentially modify it
+        if rPr_xml:
+            # Check if rPr_xml is already a complete <w:rPr> element
+            # _get_rPr_xml() returns the full element, so parse it directly
+            if rPr_xml.strip().startswith('<w:rPr') or rPr_xml.strip().startswith('<rPr'):
+                # Already a complete element, parse directly
+                base_rPr = etree.fromstring(rPr_xml)
+            else:
+                # Just inner content, wrap in <w:rPr>
+                base_rPr = etree.fromstring(f'<w:rPr xmlns:w="{NS["w"]}">{rPr_xml}</w:rPr>')
+        else:
+            base_rPr = None
+        
+        # Create a container for multiple runs
+        container = etree.Element('container')
+        
+        for segment_text, vert_align in segments:
+            if not segment_text:
+                continue  # Skip empty segments
+            
+            # Start with a copy of base rPr
+            if base_rPr is not None:
+                run_rPr = etree.fromstring(etree.tostring(base_rPr, encoding='unicode'))
+            else:
+                run_rPr = etree.Element(f'{{{NS["w"]}}}rPr')
+            
+            # Add or update w:vertAlign if needed
+            if vert_align:
+                # Remove existing w:vertAlign if present
+                for existing in run_rPr.findall('w:vertAlign', NS):
+                    run_rPr.remove(existing)
+                
+                # Add new w:vertAlign
+                vert_align_elem = etree.SubElement(run_rPr, f'{{{NS["w"]}}}vertAlign')
+                vert_align_elem.set(f'{{{NS["w"]}}}val', vert_align)
+            else:
+                # For normal segments (vert_align=None), strip any inherited vertAlign
+                # to prevent normal text from being incorrectly rendered as super/subscript
+                for existing in run_rPr.findall('w:vertAlign', NS):
+                    run_rPr.remove(existing)
+            
+            # Create run with modified rPr
+            run = etree.Element(f'{{{NS["w"]}}}r')
+            run.append(run_rPr)
+            
+            t_elem = etree.SubElement(run, f'{{{NS["w"]}}}t')
+            t_elem.text = segment_text
+            
+            container.append(run)
+        
+        # If only one run was created, return it directly
+        if len(container) == 1:
+            return container[0]
+        
+        # Otherwise return the container (caller will need to extract children)
+        return container
     
     def _replace_runs(self, _para_elem, affected_runs: List[Dict],
                      new_elements: List[etree.Element]):
@@ -1838,7 +2666,11 @@ class AuditEditApplier:
 
         # Before text (unchanged)
         if before_text:
-            new_elements.append(self._create_run(before_text, rPr_xml))
+            run_or_container = self._create_run(before_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         # Comment range start (before deleted text)
         comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
@@ -1850,11 +2682,39 @@ class AuditEditApplier:
         else:
             del_text = violation_text
 
-        # Deleted text
-        del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-            <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
-        </w:del>'''
-        new_elements.append(etree.fromstring(del_xml))
+        # Deleted text - use _create_run to handle <sup>/<sub> markup
+        change_id = self._get_next_change_id()
+        
+        # Create runs with proper vertAlign formatting
+        run_or_container = self._create_run(del_text, rPr_xml)
+        
+        if run_or_container.tag == 'container':
+            # Multiple runs (has markup) - wrap each in w:del
+            for del_run in run_or_container:
+                # Change w:t to w:delText
+                t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                if t_elem is not None:
+                    t_elem.tag = f'{{{NS["w"]}}}delText'
+                
+                # Wrap in w:del
+                del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                del_elem.set(f'{{{NS["w"]}}}author', author)
+                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                del_elem.append(del_run)
+                new_elements.append(del_elem)
+        else:
+            # Single run - wrap in w:del
+            t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+            if t_elem is not None:
+                t_elem.tag = f'{{{NS["w"]}}}delText'
+            
+            del_elem = etree.Element(f'{{{NS["w"]}}}del')
+            del_elem.set(f'{{{NS["w"]}}}id', change_id)
+            del_elem.set(f'{{{NS["w"]}}}author', author)
+            del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+            del_elem.append(run_or_container)
+            new_elements.append(del_elem)
 
         # Comment range end and reference (after deleted text)
         comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
@@ -1868,7 +2728,11 @@ class AuditEditApplier:
 
         # After text (unchanged)
         if after_text:
-            new_elements.append(self._create_run(after_text, rPr_xml))
+            run_or_container = self._create_run(after_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         self._replace_runs(para_elem, real_runs, new_elements)
 
@@ -1889,7 +2753,8 @@ class AuditEditApplier:
                       violation_reason: str,
                       orig_runs_info: List[Dict],
                       orig_match_start: int,
-                      author: str) -> str:
+                      author: str,
+                      skip_comment: bool = False) -> str:
         """
         Apply replace operation with diff-based track changes and comment annotation.
 
@@ -1905,6 +2770,7 @@ class AuditEditApplier:
             orig_runs_info: Pre-computed original runs info from _process_item
             orig_match_start: Pre-computed match position in original text
             author: Track change author (base author + category suffix)
+            skip_comment: If True, skip adding comment (used for multi-cell operations)
 
         Returns:
             'success': Replace applied (may be partial)
@@ -1924,11 +2790,23 @@ class AuditEditApplier:
         if not real_runs:
             return 'fallback'
 
-        # Calculate diff
-        diff_ops = self._calculate_diff(violation_text, revised_text)
+        # Check if we need markup-aware diff (detect <sup>/<sub> tags)
+        has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or 
+                      '<sup>' in revised_text or '<sub>' in revised_text)
+        
+        if has_markup:
+            # Use markup-aware diff that preserves formatting
+            diff_ops = self._calculate_markup_aware_diff(violation_text, revised_text)
+        else:
+            # Use standard character-level diff for plain text
+            # Convert to markup-aware format for consistent handling
+            plain_diff = self._calculate_diff(violation_text, revised_text)
+            diff_ops = [(op, text, None) for op, text in plain_diff]
 
         # Check for image handling issues: cannot insert images via revision markup
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            op = op_tuple[0]
+            text = op_tuple[1]
             if op == 'insert' and DRAWING_PATTERN.search(text):
                 if self.verbose:
                     print(f"  [Fallback] Cannot insert images via revision markup")
@@ -1936,7 +2814,13 @@ class AuditEditApplier:
 
         # Check for conflicts only on delete operations
         current_pos = match_start
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            # Extract operation and text (ignore vert_align for conflict checking)
+            if len(op_tuple) == 3:
+                op, text, _ = op_tuple
+            else:
+                op, text = op_tuple
+            
             if op == 'delete':
                 del_end = current_pos + len(text)
                 del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
@@ -1950,9 +2834,11 @@ class AuditEditApplier:
 
         rPr_xml = self._get_rPr_xml(real_runs[0].get('rPr'))
 
-        # Allocate comment ID for wrapping the replaced text
-        comment_id = self.next_comment_id
-        self.next_comment_id += 1
+        # Allocate comment ID for wrapping the replaced text (unless skipped)
+        comment_id = None
+        if not skip_comment:
+            comment_id = self.next_comment_id
+            self.next_comment_id += 1
 
         # Calculate split points for before/after text using real runs
         # Use original text for mutations (not JSON-escaped text)
@@ -1973,108 +2859,213 @@ class AuditEditApplier:
 
         # Before text (unchanged part before the match)
         if before_text:
-            new_elements.append(self._create_run(before_text, rPr_xml))
+            run_or_container = self._create_run(before_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
-        # Comment range start (before replaced text)
-        comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-        new_elements.append(etree.fromstring(comment_start_xml))
+        # Comment range start (before replaced text) - only if not skipped
+        if not skip_comment:
+            comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_start_xml))
 
         # Check if we're in table mode (need to decode JSON-escaped text)
         is_table_mode = self._is_table_mode(real_runs)
 
         # Process diff operations
-        violation_pos = 0  # Position within violation_text
+        violation_pos = 0  # Position within violation_text (plain text, no markup)
 
-        for op, text in diff_ops:
+        for op_tuple in diff_ops:
+            # Extract components - handle both 2-tuple and 3-tuple formats
+            if len(op_tuple) == 3:
+                op, text, vert_align = op_tuple
+            else:
+                op, text = op_tuple
+                vert_align = None
             if op == 'equal':
-                # For equal portions, try to preserve original elements (especially images)
-                equal_start = match_start + violation_pos
-                equal_end = equal_start + len(text)
-                equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
-
-                if equal_runs:
-                    # Check if this is a single image run that matches exactly
-                    if (len(equal_runs) == 1 and
-                        equal_runs[0].get('is_drawing') and
-                        equal_runs[0]['start'] == equal_start and
-                        equal_runs[0]['end'] == equal_end):
-                        # Copy original image element
-                        new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
-                    else:
-                        # Extract text from the equal portion
-                        # Handle partial runs at boundaries
-                        # Use original text for document mutations
-                        for eq_run in equal_runs:
-                            escaped_text = eq_run['text']
-                            orig_text = self._get_run_original_text(eq_run)
-
-                            # Calculate offsets in escaped space, then translate
-                            escaped_start = max(0, equal_start - eq_run['start'])
-                            escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
-
-                            # Translate to original space
-                            orig_start = self._translate_escaped_offset(eq_run, escaped_start)
-                            orig_end = self._translate_escaped_offset(eq_run, escaped_end)
-                            portion = orig_text[orig_start:orig_end]
-
-                            if eq_run.get('is_drawing'):
-                                # Image run - copy entire element if fully contained
-                                if escaped_start == 0 and escaped_end == len(escaped_text):
-                                    new_elements.append(copy.deepcopy(eq_run['elem']))
-                            elif portion:
-                                new_elements.append(self._create_run(portion, rPr_xml))
-                else:
-                    # No runs found, create text directly
+                # When has_markup=True, position mapping between plain text (violation_pos)
+                # and combined_text (orig_runs_info positions) is incorrect due to <sup>/<sub> tags.
+                # Skip run preservation and just recreate the text.
+                if has_markup:
                     # Decode if in table mode
                     equal_text = self._decode_json_escaped(text) if is_table_mode else text
-                    new_elements.append(self._create_run(equal_text, rPr_xml))
+                    
+                    # Wrap with markup if vert_align is specified
+                    if vert_align == 'superscript':
+                        equal_text = f'<sup>{equal_text}</sup>'
+                    elif vert_align == 'subscript':
+                        equal_text = f'<sub>{equal_text}</sub>'
+                    
+                    # Create run with proper vertAlign formatting
+                    run_or_container = self._create_run(equal_text, rPr_xml)
+                    if run_or_container.tag == 'container':
+                        new_elements.extend(list(run_or_container))
+                    else:
+                        new_elements.append(run_or_container)
+                else:
+                    # No markup: preserve original elements (especially images)
+                    equal_start = match_start + violation_pos
+                    equal_end = equal_start + len(text)
+                    equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
+
+                    if equal_runs:
+                        # Check if this is a single image run that matches exactly
+                        if (len(equal_runs) == 1 and
+                            equal_runs[0].get('is_drawing') and
+                            equal_runs[0]['start'] == equal_start and
+                            equal_runs[0]['end'] == equal_end):
+                            # Copy original image element
+                            new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
+                        else:
+                            # Extract text from the equal portion
+                            # Handle partial runs at boundaries
+                            # Use original text for document mutations
+                            for eq_run in equal_runs:
+                                escaped_text = eq_run['text']
+                                orig_text = self._get_run_original_text(eq_run)
+
+                                # Calculate offsets in escaped space, then translate
+                                escaped_start = max(0, equal_start - eq_run['start'])
+                                escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
+
+                                # Translate to original space
+                                orig_start = self._translate_escaped_offset(eq_run, escaped_start)
+                                orig_end = self._translate_escaped_offset(eq_run, escaped_end)
+                                portion = orig_text[orig_start:orig_end]
+
+                                if eq_run.get('is_drawing'):
+                                    # Image run - copy entire element if fully contained
+                                    if escaped_start == 0 and escaped_end == len(escaped_text):
+                                        new_elements.append(copy.deepcopy(eq_run['elem']))
+                                elif portion:
+                                    run_or_container = self._create_run(portion, rPr_xml)
+                                    if run_or_container.tag == 'container':
+                                        new_elements.extend(list(run_or_container))
+                                    else:
+                                        new_elements.append(run_or_container)
+                    else:
+                        # No runs found, create text directly
+                        # Decode if in table mode and use _create_run to handle markup
+                        equal_text = self._decode_json_escaped(text) if is_table_mode else text
+                        run_or_container = self._create_run(equal_text, rPr_xml)
+                        if run_or_container.tag == 'container':
+                            new_elements.extend(list(run_or_container))
+                        else:
+                            new_elements.append(run_or_container)
 
                 violation_pos += len(text)
 
             elif op == 'delete':
-                change_id = self._get_next_change_id()
                 # Decode if in table mode
                 del_text = self._decode_json_escaped(text) if is_table_mode else text
-                del_xml = f'''<w:del xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:delText>{self._escape_xml(del_text)}</w:delText></w:r>
-                </w:del>'''
-                new_elements.append(etree.fromstring(del_xml))
+                
+                # Wrap with markup if vert_align is specified
+                if vert_align == 'superscript':
+                    del_text = f'<sup>{del_text}</sup>'
+                elif vert_align == 'subscript':
+                    del_text = f'<sub>{del_text}</sub>'
+                
+                change_id = self._get_next_change_id()
+                
+                # Create runs with proper vertAlign formatting
+                run_or_container = self._create_run(del_text, rPr_xml)
+                
+                if run_or_container.tag == 'container':
+                    # Multiple runs (has markup) - wrap each in w:del
+                    for del_run in run_or_container:
+                        # Change w:t to w:delText
+                        t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                        if t_elem is not None:
+                            t_elem.tag = f'{{{NS["w"]}}}delText'
+                        
+                        # Wrap in w:del
+                        del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                        del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                        del_elem.set(f'{{{NS["w"]}}}author', author)
+                        del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                        del_elem.append(del_run)
+                        new_elements.append(del_elem)
+                else:
+                    # Single run - wrap in w:del
+                    t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+                    if t_elem is not None:
+                        t_elem.tag = f'{{{NS["w"]}}}delText'
+                    
+                    del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                    del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    del_elem.set(f'{{{NS["w"]}}}author', author)
+                    del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    del_elem.append(run_or_container)
+                    new_elements.append(del_elem)
+                
                 violation_pos += len(text)
 
             elif op == 'insert':
-                change_id = self._get_next_change_id()
                 # Decode if in table mode
                 ins_text = self._decode_json_escaped(text) if is_table_mode else text
-                ins_xml = f'''<w:ins xmlns:w="{NS['w']}" w:id="{change_id}" w:author="{author}" w:date="{self.operation_timestamp}">
-                    <w:r>{rPr_xml}<w:t>{self._escape_xml(ins_text)}</w:t></w:r>
-                </w:ins>'''
-                new_elements.append(etree.fromstring(ins_xml))
+                
+                # Wrap with markup if vert_align is specified
+                if vert_align == 'superscript':
+                    ins_text = f'<sup>{ins_text}</sup>'
+                elif vert_align == 'subscript':
+                    ins_text = f'<sub>{ins_text}</sub>'
+                
+                change_id = self._get_next_change_id()
+                
+                # Create runs with proper vertAlign formatting
+                run_or_container = self._create_run(ins_text, rPr_xml)
+                
+                if run_or_container.tag == 'container':
+                    # Multiple runs (has markup) - wrap each in w:ins
+                    for ins_run in run_or_container:
+                        # Wrap in w:ins
+                        ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                        ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                        ins_elem.set(f'{{{NS["w"]}}}author', author)
+                        ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                        ins_elem.append(ins_run)
+                        new_elements.append(ins_elem)
+                else:
+                    # Single run - wrap in w:ins
+                    ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                    ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    ins_elem.set(f'{{{NS["w"]}}}author', author)
+                    ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    ins_elem.append(run_or_container)
+                    new_elements.append(ins_elem)
                 # insert doesn't consume violation_pos
 
-        # Comment range end and reference (after replaced text)
-        comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-        new_elements.append(etree.fromstring(comment_end_xml))
+        # Comment range end and reference (after replaced text) - only if not skipped
+        if not skip_comment:
+            comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_end_xml))
 
-        comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-            <w:commentReference w:id="{comment_id}"/>
-        </w:r>'''
-        new_elements.append(etree.fromstring(comment_ref_xml))
+            comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                <w:commentReference w:id="{comment_id}"/>
+            </w:r>'''
+            new_elements.append(etree.fromstring(comment_ref_xml))
 
         # After text (unchanged part after the match)
         if after_text:
-            new_elements.append(self._create_run(after_text, rPr_xml))
+            run_or_container = self._create_run(after_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                new_elements.extend(list(run_or_container))
+            else:
+                new_elements.append(run_or_container)
 
         # Single DOM operation to replace all real runs (not boundary markers)
         self._replace_runs(para_elem, real_runs, new_elements)
 
-        # Record comment with violation_reason as content
+        # Record comment with violation_reason as content (only if not skipped)
         # Use "-R" suffix to distinguish comment author from track change author
-        self.comments.append({
-            'id': comment_id,
-            'text': violation_reason,
-            'author': f"{author}-R"
-        })
+        if not skip_comment:
+            self.comments.append({
+                'id': comment_id,
+                'text': violation_reason,
+                'author': f"{author}-R"
+            })
 
         return 'success'
 
@@ -2141,6 +3132,43 @@ class AuditEditApplier:
         
         # Format: [FALLBACK] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
         comment_text = f"[FALLBACK] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        
+        self.comments.append({
+            'id': comment_id,
+            'text': comment_text,
+            'author': self._author_for_item(item)
+        })
+        
+        return True
+    
+    def _apply_cell_fallback_comment(self, para_elem, cell_violation: str, 
+                                      cell_revised: str, reason: str, 
+                                      item: EditItem) -> bool:
+        """
+        Insert a fallback comment for a single failed cell in multi-cell operation.
+        
+        Args:
+            para_elem: Paragraph element in the failed cell
+            cell_violation: Cell-specific violation text
+            cell_revised: Cell-specific revised text
+            reason: Reason for failure (e.g., "Text not found")
+            item: Original edit item (for rule_id and violation_reason)
+        
+        Returns:
+            True (always succeeds)
+        """
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        
+        # Insert commentReference at end of paragraph
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+        
+        # Format: [CELL FAILED] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
+        comment_text = f"[CELL FAILED] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{cell_violation}{{SUGGEST}}{cell_revised}"
         
         self.comments.append({
             'id': comment_id,
@@ -2266,9 +3294,15 @@ class AuditEditApplier:
             
             if before_text:
                 # Need to split: create run for before_text, insert before first_run
-                before_run = self._create_run(before_text, rPr_xml)
-                parent.insert(idx, before_run)
-                idx += 1
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    # Unwrap container: insert each child run
+                    for child_run in run_or_container:
+                        parent.insert(idx, child_run)
+                        idx += 1
+                else:
+                    parent.insert(idx, run_or_container)
+                    idx += 1
                 
                 # Update first_run's text content (remove before_text portion)
                 t_elem = first_run.find('w:t', NS)
@@ -2311,8 +3345,15 @@ class AuditEditApplier:
                 # Insert commentReference after range_end
                 parent.insert(idx + 2, comment_ref)
                 # Create after_run and insert after comment_ref
-                after_run = self._create_run(after_text, rPr_xml)
-                parent.insert(idx + 3, after_run)
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    # Unwrap container: insert each child run
+                    insert_pos = idx + 3
+                    for child_run in run_or_container:
+                        parent.insert(insert_pos, child_run)
+                        insert_pos += 1
+                else:
+                    parent.insert(idx + 3, run_or_container)
             else:
                 # No split needed: insert commentRangeEnd and reference after last_run
                 parent.insert(idx + 1, range_end)
@@ -2368,11 +3409,30 @@ class AuditEditApplier:
                 comment_initials = comment_author[:2] if len(comment_author) >= 2 else comment_author
             comment_elem.set(f'{{{NS["w"]}}}initials', comment_initials)
 
-            # Add paragraph with text
+            # Add paragraph with formatted text (handle <sup>/<sub> markup)
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
-            r = etree.SubElement(p, f'{{{NS["w"]}}}r')
-            t = etree.SubElement(r, f'{{{NS["w"]}}}t')
-            t.text = sanitize_xml_string(comment['text'])
+            
+            # Parse text for superscript/subscript markup
+            # sanitize_xml_string first to remove illegal control characters
+            sanitized_text = sanitize_xml_string(comment['text'])
+            segments = self._parse_formatted_text(sanitized_text)
+            
+            for segment_text, vert_align in segments:
+                if not segment_text:
+                    continue
+                
+                r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+                
+                # Add run properties with vertAlign if needed
+                if vert_align:
+                    rPr = etree.SubElement(r, f'{{{NS["w"]}}}rPr')
+                    vert_elem = etree.SubElement(rPr, f'{{{NS["w"]}}}vertAlign')
+                    vert_elem.set(f'{{{NS["w"]}}}val', vert_align)
+                
+                t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+                # Preserve whitespace (Word drops leading/trailing spaces without this)
+                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                t.text = segment_text
         
         # Save via OPC
         blob = etree.tostring(
@@ -2553,8 +3613,10 @@ class AuditEditApplier:
                                     else:
                                         print(f"  [Success] Found in table (JSON format)")
                                 break
-                        except Exception:
+                        except (ValueError, KeyError, IndexError, AttributeError) as e:
                             # If table processing fails, continue to next table
+                            if self.verbose:
+                                print(f"  [Warning] Skipping table: {e}")
                             continue
                     
                     # If found, break outer loop
@@ -2758,9 +3820,7 @@ class AuditEditApplier:
                     if target_para is None:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
-                            reason = "Text crosses body/table boundary (not supported)"
-                        elif boundary_error == 'row_boundary_crossed':
-                            reason = "Text crosses table row boundary (Word doesn't support cross-row comments)"
+                            reason = "Violation text not found in body/table boundary block"
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
@@ -2777,20 +3837,31 @@ class AuditEditApplier:
                 # Only proceed with fallback if target_para is still None
                 # (boundary_error handling may have found a match)
                 if target_para is None:
+                    # Calculate total segments for error message
+                    # Variables are initialized in their respective code paths above
+                    # If not set, default to empty lists
+                    tables_count = len(tables_in_range) if 'tables_in_range' in dir() else 0
+                    body_count = len(body_segments) if 'body_segments' in dir() else 0
+                    total_segments = tables_count + body_count
+                    
+                    if total_segments == 1:
+                        reason = "Violation text not found in mono block"
+                    else:
+                        reason = f"Violation text not found in {total_segments}-segment block"
+                    
                     # For manual fix_action, text not found is expected (not an error)
                     if item.fix_action == 'manual':
                         self._apply_error_comment(anchor_para, item)
                         return EditResult(
                             success=True,
                             item=item,
-                            error_message="Target missing, comment on heading instead: ",
+                            error_message=reason,
                             warning=True
                         )
                     else:
                         # For delete/replace, text not found is an error
                         self._apply_error_comment(anchor_para, item)
-                        return EditResult(False, item,
-                            f"Text not found after anchor: ")
+                        return EditResult(False, item, reason)
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching
@@ -2812,18 +3883,26 @@ class AuditEditApplier:
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
-                    # Check if match spans multiple table rows (most restrictive)
+                    # Check if match spans multiple table rows
                     if self._check_cross_row_boundary(real_runs):
-                        # Cross-row delete not supported - fallback to comment
+                        # Multi-row delete: use cell-by-cell deletion
                         if self.verbose:
-                            print(f"  [Cross-row] delete spans multiple rows, fallback to comment")
-                        success_status = 'cross_row_fallback'
+                            print(f"  [Multi-row] Applying cell-by-cell deletion")
+                        success_status = self._apply_delete_multi_cell(
+                            real_runs, violation_text,
+                            item.violation_reason, item_author, matched_start,
+                            item
+                        )
                     # Check if match spans multiple table cells (within same row)
                     elif self._check_cross_cell_boundary(real_runs):
-                        # Cross-cell delete not supported - fallback to comment
+                        # Multi-cell delete: use cell-by-cell deletion
                         if self.verbose:
-                            print(f"  [Cross-cell] delete spans multiple cells, fallback to comment")
-                        success_status = 'cross_cell_fallback'
+                            print(f"  [Multi-cell] Applying cell-by-cell deletion")
+                        success_status = self._apply_delete_multi_cell(
+                            real_runs, violation_text,
+                            item.violation_reason, item_author, matched_start,
+                            item
+                        )
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
@@ -2870,17 +3949,16 @@ class AuditEditApplier:
                         success_status = 'cross_row_fallback'
                     # Check if match spans multiple table cells (within same row)
                     elif self._check_cross_cell_boundary(real_runs):
-                        # Try to extract single-cell edit
+                        # Try to extract single-cell edit first
                         if self.verbose:
-                            print(f"  [Cross-cell] Detected cross-cell match, trying single-cell extraction...")
+                            print(f"  [Cross-cell] Detected cross-cell match, trying cell-by-cell extraction...")
                         
                         single_cell = self._try_extract_single_cell_edit(
                             violation_text, revised_text, affected, matched_start
                         )
                         
                         if single_cell:
-                            # Successfully extracted single-cell edit - apply it
-                            # Find the paragraph containing this cell
+                            # Successfully extracted single-cell edit - all changes in one cell
                             cell_para = None
                             for run in single_cell['cell_runs']:
                                 if run.get('para_elem') is not None:
@@ -2905,18 +3983,160 @@ class AuditEditApplier:
                                     )
                                     
                                     if self.verbose and success_status == 'success':
-                                        print(f"  [Single-cell] Successfully applied track change to single cell")
+                                        print(f"  [Single-cell] All changes in one cell, applied track change")
                                 else:
-                                    # Fallback if we can't find the text in the cell
                                     success_status = 'cross_cell_fallback'
                             else:
-                                # Fallback if we can't find the paragraph
                                 success_status = 'cross_cell_fallback'
                         else:
-                            # Changes span multiple cells - fallback to comment
-                            if self.verbose:
-                                print(f"  [Cross-cell] Changes span multiple cells, fallback to comment")
-                            success_status = 'cross_cell_fallback'
+                            # Try multi-cell extraction - changes distributed across cells
+                            multi_cells = self._try_extract_multi_cell_edits(
+                                violation_text, revised_text, affected, matched_start
+                            )
+                            
+                            if multi_cells:
+                                # Successfully extracted multi-cell edits - each change within its own cell
+                                if self.verbose:
+                                    print(f"  [Multi-cell] Found {len(multi_cells)} cells with changes, applying track changes...")
+                                
+                                success_count = 0
+                                failed_cells = []  # List of (cell_edit, cell_para, error_reason)
+                                first_success_para = None
+                                
+                                for cell_edit in multi_cells:
+                                    # Collect all paragraphs in this cell (handle multi-paragraph cells)
+                                    cell_paras = set()
+                                    for run in cell_edit['cell_runs']:
+                                        para = run.get('para_elem')
+                                        if para is not None:
+                                            cell_paras.add(para)
+                                    
+                                    if not cell_paras:
+                                        failed_cells.append((cell_edit, None, "No paragraph found"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Build combined runs/text from all paragraphs in this cell
+                                    cell_runs_info = []
+                                    cell_text_parts = []
+                                    pos = 0
+                                    
+                                    # Sort paragraphs by document order (use first run's start position as key)
+                                    para_list = []
+                                    for para in cell_paras:
+                                        # Find first run from this paragraph to get its position
+                                        first_run_pos = None
+                                        for run in cell_edit['cell_runs']:
+                                            if run.get('para_elem') is para:
+                                                first_run_pos = run.get('start', 0)
+                                                break
+                                        para_list.append((first_run_pos or 0, para))
+                                    para_list.sort(key=lambda x: x[0])
+                                    
+                                    first_para = None
+                                    for para_idx, (_, para) in enumerate(para_list):
+                                        if first_para is None:
+                                            first_para = para
+                                        
+                                        # Collect runs for this paragraph
+                                        para_runs, para_text = self._collect_runs_info_original(para)
+                                        
+                                        # Add paragraph boundary (not for first paragraph)
+                                        if para_idx > 0 and cell_runs_info:
+                                            cell_runs_info.append({
+                                                'text': '\n',
+                                                'start': pos,
+                                                'end': pos + 1,
+                                                'para_elem': para,
+                                                'is_para_boundary': True
+                                            })
+                                            cell_text_parts.append('\n')
+                                            pos += 1
+                                        
+                                        # Add paragraph runs with adjusted positions
+                                        for run in para_runs:
+                                            run_copy = dict(run)
+                                            run_copy['para_elem'] = para
+                                            run_copy['start'] = run['start'] + pos
+                                            run_copy['end'] = run['end'] + pos
+                                            cell_runs_info.append(run_copy)
+                                        
+                                        cell_text_parts.append(para_text)
+                                        pos += len(para_text)
+                                    
+                                    cell_text = ''.join(cell_text_parts)
+                                    cell_pos = cell_text.find(cell_edit['cell_violation'])
+                                    
+                                    if cell_pos == -1:
+                                        failed_cells.append((cell_edit, first_para, "Text not found in cell"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Apply replace to this cell WITHOUT comment (skip_comment=True)
+                                    cell_status = self._apply_replace(
+                                        first_para,
+                                        cell_edit['cell_violation'],
+                                        cell_edit['cell_revised'],
+                                        item.violation_reason,
+                                        cell_runs_info,
+                                        cell_pos,
+                                        item_author,
+                                        skip_comment=True  # Skip comment for individual cells
+                                    )
+                                    
+                                    if cell_status != 'success':
+                                        failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
+                                        continue  # Continue processing next cell
+                                    
+                                    # Success - track for overall comment
+                                    success_count += 1
+                                    if first_success_para is None:
+                                        first_success_para = first_para
+                                
+                                # Handle results based on success/failure counts
+                                if success_count > 0:
+                                    # At least one cell succeeded - add overall comment
+                                    if first_success_para is not None:
+                                        comment_id = self.next_comment_id
+                                        self.next_comment_id += 1
+                                        
+                                        # Insert commentReference at end of first successful paragraph
+                                        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                                            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                                            <w:commentReference w:id="{comment_id}"/>
+                                        </w:r>'''
+                                        first_success_para.append(etree.fromstring(ref_xml))
+                                        
+                                        # Record comment with -R suffix author
+                                        self.comments.append({
+                                            'id': comment_id,
+                                            'text': item.violation_reason,
+                                            'author': f"{item_author}-R"
+                                        })
+                                    
+                                    # Add individual comments for failed cells
+                                    for cell_edit, cell_para, error_reason in failed_cells:
+                                        if cell_para is not None:
+                                            self._apply_cell_fallback_comment(
+                                                cell_para,
+                                                cell_edit['cell_violation'],
+                                                cell_edit['cell_revised'],
+                                                error_reason,
+                                                item
+                                            )
+                                    
+                                    success_status = 'success'
+                                    if self.verbose:
+                                        if failed_cells:
+                                            print(f"  [Multi-cell] Partial success: {success_count}/{len(multi_cells)} cells processed, {len(failed_cells)} failed")
+                                        else:
+                                            print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
+                                else:
+                                    # All cells failed - fallback to overall comment
+                                    success_status = 'cross_cell_fallback'
+                            else:
+                                # Changes cross cell boundaries - fallback to comment
+                                if self.verbose:
+                                    print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
+                                success_status = 'cross_cell_fallback'
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs - fallback to comment
                         if self.verbose:
@@ -3000,7 +4220,7 @@ class AuditEditApplier:
                     )
             elif success_status == 'cross_row_fallback':
                 # Cross-row delete/replace not supported - Word doesn't support cross-row comments
-                reason = "Cross-row track change not supported (Word limitation)"
+                reason = "Fallback to comment: cross-row track change not supported (Word limitation)"
                 # Use fallback comment (non-selected) since cross-row comments are not supported
                 self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
