@@ -839,6 +839,7 @@ class AuditEditApplier:
         vmerge_content = {}  # {grid_col: {'runs': [...], 'text': str}}
         last_para = start_para
         reached_end = False  # Flag to stop when uuid_end is found
+        cols_in_range = set()  # Track which columns are within uuid range
         
         # Iterate rows (w:tr elements)
         for tr in table_elem.findall(f'{{{NS["w"]}}}tr'):
@@ -866,10 +867,11 @@ class AuditEditApplier:
                     if para is start_para:
                         in_range = True
                         cell_in_range = True
-                    if in_range and para_id:
+                    if in_range and not reached_end and para_id:
                         cell_in_range = True
                         last_para = para
                         if para_id == uuid_end:
+                            reached_end = True
                             break
                 
                 # Collect cell content if in range
@@ -877,6 +879,8 @@ class AuditEditApplier:
                 cell_text = ''
                 
                 if cell_in_range:
+                    # Mark all columns spanned by this cell as in range
+                    cols_in_range.update(range(grid_col, grid_col + grid_span))
                     # Determine cell content based on vMerge type
                     if vmerge_type == 'restart':
                         # Merge restart: collect content and store in vmerge_content
@@ -1007,6 +1011,10 @@ class AuditEditApplier:
                         if para_id == uuid_end:
                             reached_end = True
                             break
+                
+                # If we've reached the end, stop processing subsequent cells in this row
+                if reached_end:
+                    break
             
             # After processing all cells in row, add to runs_info if row is in range
             if in_range and any(cell_tuple is not None and cell_tuple[0] for cell_tuple in row_data):
@@ -1032,15 +1040,17 @@ class AuditEditApplier:
                     })
                     pos += 6
                 
-                # Add cell data for this row (iterate all columns, handle None for gridSpan gaps)
-                for cell_idx in range(num_cols):
-                    cell_tuple = row_data[cell_idx]
-                    if cell_tuple is None:
-                        # Empty cell (gridSpan gap or out of range)
-                        cell_runs, cell_text = [], ''
-                    else:
-                        cell_runs, cell_text = cell_tuple
-                    if cell_idx > 0:
+                # Output cells based on cols_in_range to preserve gridSpan behavior
+                # For each column in range:
+                #   - If row_data[col] has data: output cell content
+                #   - If row_data[col] is None but col in cols_in_range: output "" (gridSpan placeholder)
+                #   - If col not in cols_in_range: skip (out of range)
+                output_col_count = 0
+                for col_idx in range(num_cols):
+                    if col_idx not in cols_in_range:
+                        continue  # Skip columns outside uuid range
+                    
+                    if output_col_count > 0:
                         # Add cell boundary marker
                         runs_info.append({
                             'text': '", "',
@@ -1052,12 +1062,17 @@ class AuditEditApplier:
                         })
                         pos += 4
                     
-                    # Add cell runs
-                    for run in cell_runs:
-                        run['start'] = pos
-                        run['end'] = pos + len(run['text'])
-                        runs_info.append(run)
-                        pos += len(run['text'])
+                    if row_data[col_idx] is not None:
+                        # Cell has content - output runs
+                        cell_runs, cell_text = row_data[col_idx]
+                        for run in cell_runs:
+                            run['start'] = pos
+                            run['end'] = pos + len(run['text'])
+                            runs_info.append(run)
+                            pos += len(run['text'])
+                    # else: gridSpan placeholder - output nothing (empty string between ", ")
+                    
+                    output_col_count += 1
             
         
         # Add closing '"]'
