@@ -1669,7 +1669,7 @@ class AuditEditApplier:
                 cell_violation = self._decode_json_escaped(cell_violation_escaped)
             else:
                 cell_violation = violation_text[relative_start:relative_end]
-            
+
             # Build cell_revised by applying diff operations within cell range
             violation_pos = 0
             revised_accumulator = ''
@@ -1713,8 +1713,11 @@ class AuditEditApplier:
             # cell_revised is accumulated from escaped diff chunks and needs decoding
             # to match cell_violation which is already decoded
             if self._is_table_mode(affected_runs) and cell_revised != cell_violation:
+                _cell_revised = cell_revised
                 cell_revised = self._decode_json_escaped(cell_revised)
-            
+                if _cell_revised != cell_revised:
+                    print(f"  [Multi-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+
             result_edits.append({
                 'cell_violation': cell_violation,
                 'cell_revised': cell_revised,
@@ -1843,7 +1846,7 @@ class AuditEditApplier:
             cell_violation = self._decode_json_escaped(cell_violation_escaped)
         else:
             cell_violation = violation_text[relative_start:relative_end]
-        
+
         # Build cell_revised by applying diff operations to cell_violation
         # This handles cases where insertion/deletion changes text length
         cell_revised = cell_violation
@@ -1881,7 +1884,16 @@ class AuditEditApplier:
                     revised_accumulator += text
         
         cell_revised = revised_accumulator if revised_accumulator else cell_violation
-        
+
+        # Fix: Decode cell_revised in table mode (same as cell_violation)
+        # cell_revised is accumulated from escaped diff chunks and needs decoding
+        # to avoid injecting JSON boundary characters into the cell text.
+        if self._is_table_mode(affected_runs) and cell_revised != cell_violation:
+            _cell_revised = cell_revised
+            cell_revised = self._decode_json_escaped(cell_revised)
+            if _cell_revised != cell_revised:
+                print("  [Single-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+
         return {
             'cell_violation': cell_violation,
             'cell_revised': cell_revised,
@@ -3598,7 +3610,7 @@ class AuditEditApplier:
                                 matched_start = pos
                                 is_cross_paragraph = True  # Table mode is always cross-paragraph
                                 
-                                # Update violation_text to the matched version
+                                # Update violation_text to the matched version(stripped or not)
                                 violation_text = search_text
                                 
                                 # For replace operations, also strip row numbering from revised_text
@@ -3613,6 +3625,7 @@ class AuditEditApplier:
                                     else:
                                         print(f"  [Success] Found in table (JSON format)")
                                 break
+
                         except (ValueError, KeyError, IndexError, AttributeError) as e:
                             # If table processing fails, continue to next table
                             if self.verbose:
@@ -3942,13 +3955,24 @@ class AuditEditApplier:
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
                     # Check if match spans multiple table rows (most restrictive)
+                    is_cross_cell = False
                     if self._check_cross_row_boundary(real_runs):
                         # Cross-row replace not supported - fallback to comment
                         if self.verbose:
                             print(f"  [Cross-row] replace spans multiple rows, fallback to comment")
                         success_status = 'cross_row_fallback'
                     # Check if match spans multiple table cells (within same row)
-                    elif self._check_cross_cell_boundary(real_runs):
+                    else:
+                        # Detect JSON cell boundaries even if only one cell has text runs.
+                        # This handles cases where empty cells (e.g., stripped row numbers)
+                        # produce boundary markers but no runs with cell_elem.
+                        has_cell_boundary = any(r.get('is_cell_boundary') for r in affected)
+                        is_cross_cell = self._check_cross_cell_boundary(real_runs) or has_cell_boundary
+
+                        if self.verbose and has_cell_boundary and not self._check_cross_cell_boundary(real_runs):
+                            print(f"  [Cross-cell] Boundary markers detected (empty cells), forcing cell extraction")
+
+                    if success_status is None and is_cross_cell:
                         # Try to extract single-cell edit first
                         if self.verbose:
                             print(f"  [Cross-cell] Detected cross-cell match, trying cell-by-cell extraction...")
@@ -3969,7 +3993,7 @@ class AuditEditApplier:
                                 # Collect runs for this single cell only
                                 cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
                                 cell_pos = cell_text.find(single_cell['cell_violation'])
-                                
+
                                 if cell_pos != -1:
                                     # Apply replace to the single cell
                                     success_status = self._apply_replace(
