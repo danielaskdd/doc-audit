@@ -632,6 +632,80 @@ class AuditEditApplier:
 
         return ''.join(normalized_chars), norm_to_orig
 
+    def _normalize_body_runs_for_search(self, runs_info: List[Dict]) -> Tuple[str, List[int], str]:
+        """
+        Normalize body runs for search by stripping trailing whitespace on each line.
+
+        Returns:
+            normalized_text: text with per-line rstrip applied
+            norm_to_orig: list mapping normalized index -> original index
+            combined_text: original combined text
+        """
+        normalized_chars: List[str] = []
+        norm_to_orig: List[int] = []
+        line_chars: List[Tuple[str, int]] = []  # (char, orig_index)
+        combined_parts: List[str] = []
+        orig_pos = 0
+
+        def flush_line():
+            nonlocal line_chars
+            if not line_chars:
+                return
+            end = len(line_chars)
+            while end > 0 and line_chars[end - 1][0].isspace():
+                end -= 1
+            for ch, idx in line_chars[:end]:
+                normalized_chars.append(ch)
+                norm_to_orig.append(idx)
+            line_chars = []
+
+        for run in runs_info:
+            text = run.get('text', '')
+            combined_parts.append(text)
+            for ch in text:
+                if ch == '\n':
+                    flush_line()
+                    normalized_chars.append(ch)
+                    norm_to_orig.append(orig_pos)
+                else:
+                    line_chars.append((ch, orig_pos))
+                orig_pos += 1
+
+        flush_line()
+
+        return ''.join(normalized_chars), norm_to_orig, ''.join(combined_parts)
+
+    def _find_in_runs_with_normalization(self, runs_info: List[Dict], search_text: str) -> Tuple[int, Optional[str]]:
+        """
+        Find search_text in runs_info with trailing-whitespace normalization fallback.
+
+        Returns:
+            (match_start, matched_text_override)
+            - match_start: position in original combined text, or -1 if not found
+            - matched_text_override: original substring that matches the normalized hit,
+              or None if a direct match was found without normalization.
+        """
+        combined_text = ''.join(r.get('text', '') for r in runs_info)
+        if not search_text:
+            return -1, None
+
+        pos_raw = combined_text.find(search_text)
+        if pos_raw != -1:
+            return pos_raw, None
+
+        normalized_text, norm_to_orig, _ = self._normalize_body_runs_for_search(runs_info)
+        pos_norm = normalized_text.find(search_text)
+        if pos_norm == -1:
+            return -1, None
+
+        norm_end = pos_norm + len(search_text) - 1
+        if norm_end >= len(norm_to_orig):
+            return -1, None
+
+        orig_start = norm_to_orig[pos_norm]
+        orig_end = norm_to_orig[norm_end] + 1
+        return orig_start, combined_text[orig_start:orig_end]
+
     def _find_tables_in_range(self, start_para, uuid_end: str) -> List:
         """
         Find all tables within uuid → uuid_end range.
@@ -733,23 +807,37 @@ class AuditEditApplier:
             if not cell_runs:
                 continue
             
-            # Search within this cell only (prevents cross-cell matching)
+            # Build cell text for debug logging
             cell_text = ''.join(r['text'] for r in cell_runs)
-            # Normalize to match parse_document.py behavior (removes trailing whitespace)
-            cell_normalized = self._normalize_text_for_search(cell_text)
-            match_pos = cell_normalized.find(violation_text)
-            
+
+            # Search within this cell only (prevents cross-cell matching)
+            # Use normalization + mapping to handle trailing whitespace safely
+            match_pos, matched_override = self._find_in_runs_with_normalization(
+                cell_runs, violation_text
+            )
+            matched_text = matched_override or violation_text  # Track the actual matched text
+
             # Fallback: If violation_text contains \\n literal (LLM didn't decode JSON escape),
             # try converting to real newline
-            matched_text = violation_text  # Track the actual matched text
             if match_pos == -1 and '\\n' in violation_text:
                 normalized_violation = violation_text.replace('\\n', '\n')
-                match_pos = cell_normalized.find(normalized_violation)
+                match_pos, matched_override = self._find_in_runs_with_normalization(
+                    cell_runs, normalized_violation
+                )
                 if match_pos != -1:
-                    matched_text = normalized_violation  # Use normalized text for consistent span calculation
+                    matched_text = matched_override or normalized_violation
                     if self.verbose:
                         print(f"  [Fallback] Matched after converting \\\\n to real newline")
             
+            # Debug: log snippet from marker on non-JSON match failure
+            if match_pos == -1:
+                DEBUG_MARKER = "伍仟贰佰元"
+                marker_idx = cell_text.find(DEBUG_MARKER)
+                if DEBUG_MARKER and marker_idx != -1:
+                    snippet_len = len(DEBUG_MARKER) + 60
+                    snippet = cell_text[marker_idx:marker_idx + snippet_len]
+                    print(f"  [DEBUG] Non-JSON cell content from marker: {repr(snippet)}")
+
             if match_pos != -1:
                 # Found! Return match info including the matched text
                 if self.verbose:
@@ -1462,6 +1550,29 @@ class AuditEditApplier:
                 groups[key] = []
             groups[key].append(run)
         return groups
+
+    def _group_runs_by_paragraph(self, runs: List[Dict]) -> List[Dict]:
+        """
+        Group runs by paragraph in document order.
+
+        Args:
+            runs: List of run info dicts (must be in document order)
+
+        Returns:
+            List of dicts: [{'para_elem': para, 'runs': [...]}]
+        """
+        groups = {}
+        order = []
+        for run in runs:
+            para = run.get('para_elem')
+            if para is None:
+                continue
+            key = id(para)
+            if key not in groups:
+                groups[key] = {'para_elem': para, 'runs': []}
+                order.append(key)
+            groups[key]['runs'].append(run)
+        return [groups[k] for k in order]
     
     def _is_multi_row_json(self, text: str) -> bool:
         """
@@ -2395,6 +2506,85 @@ class AuditEditApplier:
         if rPr_elem is None:
             return ''
         return etree.tostring(rPr_elem, encoding='unicode')
+
+    def _append_del_elements(self, new_elements: List[etree.Element],
+                             del_text: str, rPr_xml: str, author: str):
+        """Append deletion elements for del_text into new_elements."""
+        if not del_text:
+            return
+
+        change_id = self._get_next_change_id()
+        run_or_container = self._create_run(del_text, rPr_xml)
+
+        if run_or_container.tag == 'container':
+            # Multiple runs (has markup) - wrap each in w:del
+            for del_run in run_or_container:
+                t_elem = del_run.find(f'{{{NS["w"]}}}t')
+                if t_elem is not None:
+                    t_elem.tag = f'{{{NS["w"]}}}delText'
+
+                del_elem = etree.Element(f'{{{NS["w"]}}}del')
+                del_elem.set(f'{{{NS["w"]}}}id', change_id)
+                del_elem.set(f'{{{NS["w"]}}}author', author)
+                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                del_elem.append(del_run)
+                new_elements.append(del_elem)
+        else:
+            t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
+            if t_elem is not None:
+                t_elem.tag = f'{{{NS["w"]}}}delText'
+
+            del_elem = etree.Element(f'{{{NS["w"]}}}del')
+            del_elem.set(f'{{{NS["w"]}}}id', change_id)
+            del_elem.set(f'{{{NS["w"]}}}author', author)
+            del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+            del_elem.append(run_or_container)
+            new_elements.append(del_elem)
+
+    def _build_ins_elements_with_breaks(self, text: str, rPr_xml: str, author: str) -> List[etree.Element]:
+        """
+        Build insertion elements for text, converting '\\n' to <w:br/>.
+        Returns a list of w:ins elements.
+        """
+        if not text:
+            return []
+
+        normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+        lines = normalized.split('\n')
+        ins_elements = []
+        change_id = self._get_next_change_id()
+
+        for idx, line in enumerate(lines):
+            if line:
+                run_or_container = self._create_run(line, rPr_xml)
+                if run_or_container.tag == 'container':
+                    for ins_run in run_or_container:
+                        ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                        ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                        ins_elem.set(f'{{{NS["w"]}}}author', author)
+                        ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                        ins_elem.append(ins_run)
+                        ins_elements.append(ins_elem)
+                else:
+                    ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                    ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                    ins_elem.set(f'{{{NS["w"]}}}author', author)
+                    ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    ins_elem.append(run_or_container)
+                    ins_elements.append(ins_elem)
+
+            # Insert line break between lines
+            if idx < len(lines) - 1:
+                br_run = etree.Element(f'{{{NS["w"]}}}r')
+                etree.SubElement(br_run, f'{{{NS["w"]}}}br')
+                ins_elem = etree.Element(f'{{{NS["w"]}}}ins')
+                ins_elem.set(f'{{{NS["w"]}}}id', change_id)
+                ins_elem.set(f'{{{NS["w"]}}}author', author)
+                ins_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                ins_elem.append(br_run)
+                ins_elements.append(ins_elem)
+
+        return ins_elements
     
     # ==================== Diff Calculation ====================
     
@@ -2789,6 +2979,326 @@ class AuditEditApplier:
             current = parent
         
         return outermost_revision
+
+    def _apply_delete_cross_paragraph(self, orig_runs_info: List[Dict],
+                                      orig_match_start: int,
+                                      violation_text: str,
+                                      violation_reason: str,
+                                      author: str) -> str:
+        """
+        Apply delete across multiple paragraphs (body text only).
+
+        Strategy:
+        - Delete ranges per paragraph with track changes (w:del)
+        - Preserve paragraph structure (do not remove w:p)
+        - Add a comment for each paragraph segment
+        """
+        match_start = orig_match_start
+        match_end = match_start + len(violation_text)
+
+        affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
+        if not affected:
+            return 'cross_paragraph_fallback'
+
+        real_runs = self._filter_real_runs(affected)
+        if not real_runs:
+            return 'cross_paragraph_fallback'
+
+        # Do not apply cross-paragraph delete in table mode
+        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+            return 'cross_paragraph_fallback'
+
+        # Check overlap with existing revisions
+        if self._check_overlap_with_revisions(real_runs):
+            return 'conflict'
+
+        para_groups = self._group_runs_by_paragraph(real_runs)
+        if not para_groups:
+            return 'cross_paragraph_fallback'
+
+        prepared = []
+        for group in para_groups:
+            para_elem = group['para_elem']
+            para_runs = group['runs']
+
+            # Identify affected runs within this paragraph
+            first_run = None
+            last_run = None
+            for run in para_runs:
+                if run['end'] > match_start and run['start'] < match_end:
+                    if first_run is None:
+                        first_run = run
+                    last_run = run
+
+            if first_run is None or last_run is None:
+                continue
+
+            rPr_xml = self._get_rPr_xml(first_run.get('rPr'))
+
+            before_offset = self._translate_escaped_offset(first_run, max(0, match_start - first_run['start']))
+            after_offset = self._translate_escaped_offset(last_run, max(0, match_end - last_run['start']))
+
+            first_orig_text = self._get_run_original_text(first_run)
+            last_orig_text = self._get_run_original_text(last_run)
+
+            before_text = first_orig_text[:before_offset]
+            after_text = last_orig_text[after_offset:]
+
+            # Build deleted text from affected runs in this paragraph
+            del_parts = []
+            for run in para_runs:
+                if run['end'] <= match_start or run['start'] >= match_end:
+                    continue
+                if run.get('is_drawing'):
+                    del_parts.append(run['text'])
+                    continue
+                orig_text = self._get_run_original_text(run)
+                if run is first_run and run is last_run:
+                    del_parts.append(orig_text[before_offset:after_offset])
+                elif run is first_run:
+                    del_parts.append(orig_text[before_offset:])
+                elif run is last_run:
+                    del_parts.append(orig_text[:after_offset])
+                else:
+                    del_parts.append(orig_text)
+
+            del_text = ''.join(del_parts)
+            if not del_text:
+                return 'cross_paragraph_fallback'
+
+            prepared.append({
+                'para_elem': para_elem,
+                'para_runs': para_runs,
+                'rPr_xml': rPr_xml,
+                'before_text': before_text,
+                'del_text': del_text,
+                'after_text': after_text,
+            })
+
+        for item in prepared:
+            para_elem = item['para_elem']
+            para_runs = item['para_runs']
+            rPr_xml = item['rPr_xml']
+            before_text = item['before_text']
+            del_text = item['del_text']
+            after_text = item['after_text']
+
+            # Build new elements for this paragraph
+            new_elements = []
+
+            if before_text:
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+
+            # Comment range start
+            comment_id = self.next_comment_id
+            self.next_comment_id += 1
+            comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_start_xml))
+
+            # Deleted text
+            self._append_del_elements(new_elements, del_text, rPr_xml, author)
+
+            # Comment range end and reference
+            comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+            new_elements.append(etree.fromstring(comment_end_xml))
+            comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                <w:commentReference w:id="{comment_id}"/>
+            </w:r>'''
+            new_elements.append(etree.fromstring(comment_ref_xml))
+
+            if after_text:
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+
+            self._replace_runs(para_elem, para_runs, new_elements)
+
+            # Record comment
+            self.comments.append({
+                'id': comment_id,
+                'text': violation_reason,
+                'author': f"{author}-R"
+            })
+
+        return 'success'
+
+    def _apply_replace_cross_paragraph(self, orig_runs_info: List[Dict],
+                                       orig_match_start: int,
+                                       violation_text: str,
+                                       revised_text: str,
+                                       violation_reason: str,
+                                       author: str) -> str:
+        """
+        Apply replace across multiple paragraphs with diff-level edits.
+
+        Strategy:
+        - Compute diff between violation_text and revised_text
+        - Apply per-paragraph replace only on changed segments
+        - If diff deletes paragraph boundary ('\\n'), merge paragraphs by removing
+          the boundary and appending following paragraph content to the previous one
+        """
+        match_start = orig_match_start
+        match_end = match_start + len(violation_text)
+
+        affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
+        if not affected:
+            return 'cross_paragraph_fallback'
+
+        real_runs = self._filter_real_runs(affected)
+        if not real_runs:
+            return 'cross_paragraph_fallback'
+
+        # Do not apply cross-paragraph replace in table mode
+        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+            return 'cross_paragraph_fallback'
+
+        # Check overlap with existing revisions
+        if self._check_overlap_with_revisions(real_runs):
+            return 'conflict'
+
+        # Inserting images via revision markup not supported
+        if DRAWING_PATTERN.search(revised_text or ''):
+            return 'cross_paragraph_fallback'
+
+        # Compute diff ops
+        has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or
+                      '<sup>' in revised_text or '<sub>' in revised_text)
+        if has_markup:
+            diff_ops = self._calculate_markup_aware_diff(violation_text, revised_text)
+        else:
+            plain_diff = self._calculate_diff(violation_text, revised_text)
+            diff_ops = [(op, text, None) for op, text in plain_diff]
+
+        # Detect deleted paragraph boundaries
+        boundary_positions = [idx for idx, ch in enumerate(violation_text) if ch == '\n']
+        boundary_pos_to_idx = {pos: i for i, pos in enumerate(boundary_positions)}
+        deleted_boundary_indices = set()
+        orig_pos = 0
+        for op_tuple in diff_ops:
+            op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
+            if op == 'delete' and '\n' in text:
+                for i, ch in enumerate(text):
+                    if ch == '\n':
+                        bpos = orig_pos + i
+                        if bpos in boundary_pos_to_idx:
+                            deleted_boundary_indices.add(boundary_pos_to_idx[bpos])
+            if op in ('equal', 'delete'):
+                orig_pos += len(text)
+
+        # Build combined text for the match range
+        combined_text = ''.join(r.get('text', '') for r in orig_runs_info)
+        match_text = combined_text[match_start:match_end]
+
+        # Build paragraph groups in order
+        para_groups = self._group_runs_by_paragraph(real_runs)
+        if not para_groups:
+            return 'cross_paragraph_fallback'
+
+        # Build paragraph ranges within combined_text
+        para_ranges = []
+        for group in para_groups:
+            runs = group['runs']
+            para_start = min(r['start'] for r in runs)
+            para_end = max(r['end'] for r in runs)
+            overlap_start = max(match_start, para_start)
+            overlap_end = min(match_end, para_end)
+            if overlap_start < overlap_end:
+                para_ranges.append({
+                    'para_elem': group['para_elem'],
+                    'overlap_start': overlap_start,
+                    'overlap_end': overlap_end,
+                    'para_start': para_start
+                })
+
+        if not para_ranges:
+            return 'cross_paragraph_fallback'
+
+        # Helper: extract revised segment for an original range
+        def extract_revised_segment(seg_start: int, seg_end: int) -> str:
+            orig_pos = 0
+            parts = []
+            for op_tuple in diff_ops:
+                op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
+                if op == 'equal':
+                    op_start = orig_pos
+                    op_end = orig_pos + len(text)
+                    # overlap with [seg_start, seg_end)
+                    if op_end > seg_start and op_start < seg_end:
+                        take_start = max(seg_start, op_start) - op_start
+                        take_end = min(seg_end, op_end) - op_start
+                        parts.append(text[take_start:take_end])
+                    orig_pos += len(text)
+                elif op == 'delete':
+                    orig_pos += len(text)
+                elif op == 'insert':
+                    # insert occurs at current orig_pos
+                    if seg_start <= orig_pos <= seg_end:
+                        parts.append(text)
+            return ''.join(parts)
+
+        # Apply per-paragraph replace
+        any_applied = False
+        for pr in para_ranges:
+            para_elem = pr['para_elem']
+            seg_start = pr['overlap_start'] - match_start
+            seg_end = pr['overlap_end'] - match_start
+            orig_segment = match_text[seg_start:seg_end]
+            revised_segment = extract_revised_segment(seg_start, seg_end)
+
+            if orig_segment == revised_segment:
+                continue
+
+            para_runs_info, _ = self._collect_runs_info_original(para_elem)
+            match_start_in_para = pr['overlap_start'] - pr['para_start']
+            status = self._apply_replace(
+                para_elem,
+                orig_segment,
+                revised_segment,
+                violation_reason,
+                para_runs_info,
+                match_start_in_para,
+                author
+            )
+
+            if status == 'conflict':
+                return 'conflict'
+            if status not in ('success',):
+                return 'cross_paragraph_fallback'
+            any_applied = True
+
+        # Merge paragraphs if boundary deleted
+        if deleted_boundary_indices:
+            # Collect paragraph elements in order
+            para_elems = [pr['para_elem'] for pr in para_ranges]
+            # Merge from right to left to avoid index shifts
+            for b_idx in sorted(deleted_boundary_indices, reverse=True):
+                if b_idx < 0 or b_idx + 1 >= len(para_elems):
+                    continue
+                prev_para = para_elems[b_idx]
+                next_para = para_elems[b_idx + 1]
+                # Move children (except pPr) from next to prev
+                for child in list(next_para):
+                    if child.tag == f'{{{NS["w"]}}}pPr':
+                        continue
+                    next_para.remove(child)
+                    prev_para.append(child)
+                parent = next_para.getparent()
+                if parent is not None:
+                    try:
+                        parent.remove(next_para)
+                    except ValueError:
+                        pass
+                # Remove from list to keep indices consistent
+                para_elems.pop(b_idx + 1)
+
+        return 'success' if any_applied else 'success'
     
     # ==================== Delete Operation ====================
 
@@ -3199,6 +3709,13 @@ class AuditEditApplier:
                     ins_text = f'<sup>{ins_text}</sup>'
                 elif vert_align == 'subscript':
                     ins_text = f'<sub>{ins_text}</sub>'
+
+                # Handle soft line breaks for inserted text
+                if '\n' in ins_text:
+                    ins_elements = self._build_ins_elements_with_breaks(ins_text, rPr_xml, author)
+                    new_elements.extend(ins_elements)
+                    # insert doesn't consume violation_pos
+                    continue
                 
                 change_id = self._get_next_change_id()
                 
@@ -3674,15 +4191,17 @@ class AuditEditApplier:
             
             # Try original text first (using revision-free view) - single paragraph
             for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                runs_info_orig, combined_orig = self._collect_runs_info_original(para)
-                
-                # Normalize to match parse_document.py behavior (removes trailing whitespace)
-                combined_normalized = self._normalize_text_for_search(combined_orig)
-                pos = combined_normalized.find(violation_text)
+                runs_info_orig, _ = self._collect_runs_info_original(para)
+
+                pos, matched_override = self._find_in_runs_with_normalization(
+                    runs_info_orig, violation_text
+                )
                 if pos != -1:
                     target_para = para
                     matched_runs_info = runs_info_orig
                     matched_start = pos
+                    if matched_override is not None:
+                        violation_text = matched_override
                     break
             
             # Fallback 1: Try stripping auto-numbering if original match failed
@@ -3691,15 +4210,17 @@ class AuditEditApplier:
                 
                 if was_stripped:
                     for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                        runs_info_orig, combined_orig = self._collect_runs_info_original(para)
-                        
-                        pos = combined_orig.find(stripped_violation)
+                        runs_info_orig, _ = self._collect_runs_info_original(para)
+
+                        pos, matched_override = self._find_in_runs_with_normalization(
+                            runs_info_orig, stripped_violation
+                        )
                         if pos != -1:
                             target_para = para
                             matched_runs_info = runs_info_orig
                             matched_start = pos
                             numbering_stripped = True
-                            violation_text = stripped_violation
+                            violation_text = matched_override or stripped_violation
                             
                             # Handle revised_text for replace operation
                             if item.fix_action == 'replace':
@@ -3727,15 +4248,32 @@ class AuditEditApplier:
                         print(f"  [Boundary] {boundary_error}")
                 elif is_multi_para:
                     # Only use cross-paragraph mode if there are actually multiple paragraphs
-                    # Normalize to match parse_document.py behavior (removes trailing whitespace)
-                    cross_normalized = self._normalize_text_for_search(cross_text)
-                    pos = cross_normalized.find(violation_text)
+                    if self._is_table_mode(cross_runs):
+                        pos = cross_text.find(violation_text)
+                        matched_override = None
+                        if pos == -1 and violation_text:
+                            normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(cross_runs)
+                            pos_norm = normalized_table_text.find(violation_text)
+                            if pos_norm != -1:
+                                norm_end = pos_norm + len(violation_text) - 1
+                                if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
+                                    orig_start = norm_to_orig[pos_norm]
+                                    orig_end = norm_to_orig[norm_end] + 1
+                                    pos = orig_start
+                                    matched_override = cross_text[orig_start:orig_end]
+                    else:
+                        pos, matched_override = self._find_in_runs_with_normalization(
+                            cross_runs, violation_text
+                        )
+
                     if pos != -1:
                         # Found match across paragraphs
                         target_para = anchor_para  # Use anchor as reference
                         matched_runs_info = cross_runs
                         matched_start = pos
                         is_cross_paragraph = True
+                        if matched_override is not None:
+                            violation_text = matched_override
 
                         if self.verbose:
                             print(f"  [Success] Found in cross-paragraph mode")
@@ -3979,7 +4517,15 @@ class AuditEditApplier:
                                         matched_start = matched_para_start
                                         is_cross_paragraph = False  # Single para in cell
                                         break
-                            
+                                else:
+                                    # Debug: log snippet from marker on non-JSON match failure
+                                    DEBUG_MARKER = "伍仟贰佰元"
+                                    marker_idx = cell_combined_text.find(DEBUG_MARKER)
+                                    if DEBUG_MARKER and marker_idx != -1:
+                                        snippet_len = len(DEBUG_MARKER) + 60
+                                        snippet = cell_combined_text[marker_idx:marker_idx + snippet_len]
+                                        print(f"  [DEBUG] Non-JSON cell content from marker: {repr(snippet)}")
+
                             # If found, break table loop
                             if target_para is not None:
                                 break
@@ -4042,11 +4588,6 @@ class AuditEditApplier:
                                     })
                                     pos += 1
                             
-                            combined_body_text = ''.join(r['text'] for r in all_runs)
-                            
-                            # Normalize to match parse_document.py behavior (removes trailing whitespace)
-                            combined_normalized = self._normalize_text_for_search(combined_body_text)
-                            
                             # Try multiple search patterns (original and stripped numbering)
                             search_attempts = [(violation_text, False)]
                             stripped_v, was_stripped = strip_auto_numbering(violation_text)
@@ -4055,11 +4596,16 @@ class AuditEditApplier:
                             
                             match_pos = -1
                             matched_text = violation_text
+                            matched_override = None
+                            matched_is_stripped = False
                             
                             for search_text, is_stripped in search_attempts:
-                                match_pos = combined_normalized.find(search_text)
+                                match_pos, matched_override = self._find_in_runs_with_normalization(
+                                    all_runs, search_text
+                                )
                                 if match_pos != -1:
-                                    matched_text = search_text
+                                    matched_text = matched_override or search_text
+                                    matched_is_stripped = is_stripped
                                     break
                             
                             if match_pos != -1:
@@ -4069,7 +4615,7 @@ class AuditEditApplier:
                                 matched_start = match_pos
                                 is_cross_paragraph = len(body_paras_data) > 1
                                 violation_text = matched_text  # Update violation_text to matched version
-                                numbering_stripped = (matched_text != item.violation_text.strip())
+                                numbering_stripped = matched_is_stripped
                                 
                                 if self.verbose:
                                     if is_cross_paragraph:
@@ -4166,10 +4712,18 @@ class AuditEditApplier:
                             item
                         )
                     elif len(para_elems) > 1:
-                        # Actually spans multiple paragraphs - fallback to comment
-                        if self.verbose:
-                            print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
-                        success_status = 'cross_paragraph_fallback'
+                        # Actually spans multiple paragraphs
+                        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+                            if self.verbose:
+                                print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
+                            success_status = 'cross_paragraph_fallback'
+                        else:
+                            if self.verbose:
+                                print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, applying cross-paragraph delete")
+                            success_status = self._apply_delete_cross_paragraph(
+                                matched_runs_info, matched_start, violation_text,
+                                item.violation_reason, item_author
+                            )
                     else:
                         # All content is in single paragraph - safe to delete
                         if real_runs:
@@ -4411,10 +4965,30 @@ class AuditEditApplier:
                                     print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
                                 success_status = 'cross_cell_fallback'
                     elif len(para_elems) > 1:
-                        # Actually spans multiple paragraphs - fallback to comment
-                        if self.verbose:
-                            print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
-                        success_status = 'cross_paragraph_fallback'
+                        # Actually spans multiple paragraphs
+                        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+                            if self.verbose:
+                                print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
+                            # Debug: log snippet from marker on cross-paragraph fallback
+                            try:
+                                DEBUG_MARKER = "伍仟贰佰元"
+                                combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
+                                marker_idx = combined_text.find(DEBUG_MARKER)
+                                if marker_idx != -1:
+                                    snippet_len = len(DEBUG_MARKER) + 60
+                                    snippet = combined_text[marker_idx:marker_idx + snippet_len]
+                                    print(f"  [DEBUG] Cross-paragraph content from marker: {repr(snippet)}")
+                            except Exception:
+                                # Debug logging should never break apply flow
+                                pass
+                            success_status = 'cross_paragraph_fallback'
+                        else:
+                            if self.verbose:
+                                print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, applying cross-paragraph replace")
+                            success_status = self._apply_replace_cross_paragraph(
+                                matched_runs_info, matched_start, violation_text,
+                                revised_text, item.violation_reason, item_author
+                            )
                     else:
                         # All content is in single paragraph - safe to replace
                         if real_runs:
