@@ -150,31 +150,71 @@ def strip_auto_numbering(text: str) -> Tuple[str, bool]:
 
 def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
     """
-    Replaces leading table row numbering with empty string to match actual table structure.
+    Replaces leading table row numbering and strips auto-numbering from all cells.
     
     During parse phase, Word auto-numbering shows as "1", "2", "3" etc.
     During apply phase, the same cells contain empty strings "" because auto-numbering
-    is not stored in the cell content. This function replaces the number with empty string
-    to align with the actual table structure.
+    is not stored in the cell content. This function:
+    1. Replaces first cell number with empty string
+    2. Strips auto-numbering prefix from ALL cell contents (e.g., "1. ", "a) ", "• ")
+    3. Handles multi-paragraph cells by processing each paragraph separately
     
     Args:
         text: Text that may start with table row numbering pattern like '["1", '
         
     Returns:
         Tuple of (processed_text, was_stripped):
-        - processed_text: Text with number replaced by "" if found, original otherwise
-        - was_stripped: True if numbering was replaced, False otherwise
+        - processed_text: Text with numbering stripped from all cells if found
+        - was_stripped: True if any numbering was stripped, False otherwise
         
     Examples:
-        '["1", "content"]' -> ('["", "content"]', True)
+        '["1", "1. Intro", "2. Body"]' -> ('["", "Intro", "Body"]', True)
+        '["", "a) First\\nb) Second"]' -> ('["", "First\\nSecond"]', True)
         '["content"]' -> ('["content"]', False)
     """
+    if not text.startswith('["'):
+        return text, False
+    
+    was_modified = False
+    
+    # 1. First cell: Replace row number with empty string
     match = TABLE_ROW_NUMBERING_PATTERN.match(text)
     if match:
-        # Replace row number with empty string to match actual table structure
-        # During parse: '["1", "content"]', during apply: '["", "content"]'
-        return '["", ' + text[match.end():], True
-    return text, False
+        text = '["", ' + text[match.end():]
+        was_modified = True
+    
+    # 2. Parse JSON and strip auto-numbering from each cell and paragraph
+    try:
+        cells = json.loads(text)
+        if not isinstance(cells, list):
+            return text, was_modified
+        
+        new_cells = []
+        for cell in cells:
+            if isinstance(cell, str):
+                # Split cell by newlines (handles both \n and literal \\n after JSON decode)
+                # After json.loads, \\n in JSON becomes \n in string
+                paragraphs = cell.split('\n')
+                
+                # Process each paragraph
+                new_paragraphs = []
+                for para in paragraphs:
+                    stripped, stripped_flag = strip_auto_numbering(para)
+                    if stripped_flag:
+                        was_modified = True
+                    new_paragraphs.append(stripped)
+                
+                # Rejoin with newline
+                new_cells.append('\n'.join(new_paragraphs))
+            else:
+                new_cells.append(cell)
+        
+        if was_modified:
+            return json.dumps(new_cells, ensure_ascii=False), True
+        return text, False
+    except json.JSONDecodeError:
+        # Fallback: return original text if JSON parsing fails
+        return text, was_modified
 
 
 def normalize_table_json(text: str) -> str:
