@@ -13,7 +13,7 @@ import os
 # ============================================================
 
 PROMPT_TEMPLATES = {
-    # Block Audit
+    # Block Audit System Prompt
     "block_audit_system": """You are a professional document auditor. Your task is to analyze text blocks and check for violations of audit rules.
 
 {rules_text}
@@ -82,12 +82,15 @@ If there are no violations, return:
 
 Return ONLY the JSON object, no other text.""",
 
-    "block_audit_user": """Analyze the following content with section context for rule violations:
+    # Block Audit User Prompt
+    "block_audit_user": """Perform a careful and contextual analysis of the text block content to detect rule violations:
 
 {block_text}""",
 
-    # Global Extraction
+    # Global Extraction System Prompt
     "global_extract_system": """You are a precise information extractor. Your task is to identify and extract structured data from document text according to predefined schemas.
+
+Global Extraction Rules:
 
 {rules_text}
 
@@ -109,7 +112,7 @@ Extraction Guidelines:
 2. Each unique entity instance should be a separate extraction result.
 3. Fields must use the exact field names defined in the rule.
 4. If a field value cannot be found, use empty string for both value and evidence.
-5. Evidence must be a SHORT verbatim quote (no more than one sentence) that directly supports the extracted value.
+5. Evidence must be a verbatim quote from origin content that directly supports the extracted value.
 6. For tabular data, extract one entity per row where applicable.
 7. If the same entity appears multiple times with different information, create separate entries.
 8. CRITICAL: The rule_id MUST exactly match the ID of the rule being extracted. If extracting for rule [G003], use "rule_id": "G003". Never default to G001.
@@ -138,11 +141,12 @@ If no relevant information is found, return:
 
 Return ONLY the JSON object, no other text. Output language for value summaries should be {output_language}.""",
 
-    "global_extract_user": """Extract global rule information from the following block:
+    # Global Extraction User Prompt
+    "global_extract_user": """Extract information from the following content of text block according to the provided global extraction rules:
 
 {block_text}""",
 
-    # Global Verification
+    # Global Verification System Prompt
     "global_verify_system": """You are a cross-reference auditor specializing in document consistency verification.
 
 Rule: [{rule_id}] {topic}
@@ -210,7 +214,8 @@ If no violations found, return:
 
 Return ONLY the JSON object, no other text.""",
 
-    "global_verify_user": """Check consistency for the following extracted items:
+    # Global Verification User Prompt
+    "global_verify_user": """Check consistency or violation for the following extracted items according to the provided verification criteria:
 
 {payload_text}""",
 }
@@ -478,5 +483,3 @@ def build_global_verify_user_prompt(rule: dict, items: list) -> str:
     }
     payload_text = json.dumps(payload, ensure_ascii=False, indent=2)
     return PROMPT_TEMPLATES["global_verify_user"].format(payload_text=payload_text)
-
-
