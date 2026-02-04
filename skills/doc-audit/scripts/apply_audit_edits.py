@@ -4215,7 +4215,10 @@ class AuditEditApplier:
                 )
             elif success_status == 'cross_paragraph_fallback':
                 # Cross-paragraph delete/replace not supported - fallback to manual comment
-                reason = "Cross-paragraph delete/replace not supported (Phase 1 limitation)"
+                reason = (
+                    "Cross-paragraph delete/replace not supported (Phase 1 limitation) "
+                    "- fallback to comment"
+                )
                 # Apply manual comment instead
                 manual_status = self._apply_manual(
                     target_para, violation_text,
