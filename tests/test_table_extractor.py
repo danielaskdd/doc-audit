@@ -26,7 +26,7 @@ from table_extractor import TableExtractor  # type: ignore
 # ============================================================================
 
 def create_test_document_with_vmerge():
-    """Create a test document with vertically merged cells"""
+    """Create a test document with vertically merged cells with paraId attributes"""
     doc = Document()
     
     # Create a 3x3 table
@@ -65,6 +65,14 @@ def create_test_document_with_vmerge():
     tcPr_2_0 = tc_2_0.get_or_add_tcPr()
     vmerge_continue_2 = OxmlElement('w:vMerge')
     tcPr_2_0.append(vmerge_continue_2)
+    
+    # Add w14:paraId attributes to all paragraphs (simulate Word 2013+ behavior)
+    body_elem = doc._element.body
+    counter = 0
+    for p in body_elem.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
+        para_id = f'{counter:08X}'
+        p.set('{http://schemas.microsoft.com/office/word/2010/wordml}paraId', para_id)
+        counter += 1
     
     return doc, table
 
@@ -109,6 +117,49 @@ class TestVMerge:
         for i in range(3):
             assert rows[i][0] == expected_content, \
                 f"Row {i}, Col 0: expected '{expected_content}', got '{rows[i][0]}'"
+    
+    def test_vmerge_para_ids_end_uses_actual_para_id(self):
+        """
+        Test that vMerge continue cells use actual paraId for para_ids_end (range boundary).
+        
+        Design:
+        - para_ids: All rows in vMerge use restart's paraId (for edit targeting)
+        - para_ids_end: Each row uses its own actual paraId (for range boundary)
+        """
+        doc, table = create_test_document_with_vmerge()
+        result = TableExtractor.extract_with_metadata(table)
+        
+        para_ids = result['para_ids']
+        para_ids_end = result['para_ids_end']
+        
+        # Verify we have data for all 3 rows
+        assert len(para_ids) == 3
+        assert len(para_ids_end) == 3
+        
+        # Column 0 is vertically merged (restart in row 0, continue in rows 1-2)
+        # para_ids should all be the same (restart's paraId) - for edit targeting
+        restart_para_id = para_ids[0][0]
+        assert restart_para_id is not None, "Restart cell should have paraId"
+        assert para_ids[1][0] == restart_para_id, "Row 1 should share restart's paraId in para_ids"
+        assert para_ids[2][0] == restart_para_id, "Row 2 should share restart's paraId in para_ids"
+        
+        # para_ids_end should be DIFFERENT (each row's actual paraId) - for range boundary
+        # This is the key behavior after the fix
+        para_id_end_0 = para_ids_end[0][0]
+        para_id_end_1 = para_ids_end[1][0]
+        para_id_end_2 = para_ids_end[2][0]
+        
+        assert para_id_end_0 is not None, "Row 0 should have para_id_end"
+        assert para_id_end_1 is not None, "Row 1 should have para_id_end"
+        assert para_id_end_2 is not None, "Row 2 should have para_id_end"
+        
+        # Each continue cell should use its own actual paraId for para_ids_end
+        assert para_id_end_0 != para_id_end_1, \
+            f"Row 0 and Row 1 should have different para_ids_end (got {para_id_end_0} vs {para_id_end_1})"
+        assert para_id_end_1 != para_id_end_2, \
+            f"Row 1 and Row 2 should have different para_ids_end (got {para_id_end_1} vs {para_id_end_2})"
+        assert para_id_end_0 != para_id_end_2, \
+            f"Row 0 and Row 2 should have different para_ids_end (got {para_id_end_0} vs {para_id_end_2})"
 
 
 # ============================================================================

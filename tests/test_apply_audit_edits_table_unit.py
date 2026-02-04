@@ -4,25 +4,19 @@ ABOUTME: Unit tests for apply_audit_edits.py
 """
 
 import sys
-import json
-import tempfile
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TESTS_DIR))
 
-import pytest
-from lxml import etree
-from unittest.mock import patch
+import pytest  # noqa: E402
+from lxml import etree  # noqa: E402
 
-import _apply_audit_edits_helpers as helpers
-from _apply_audit_edits_helpers import (
-    apply_module, AuditEditApplier, NS, DRAWING_PATTERN,
-    strip_auto_numbering, EditItem, EditResult, NSMAP,
-    create_paragraph_xml, create_paragraph_with_inline_image,
-    create_paragraph_with_anchor_image, create_paragraph_with_track_changes,
-    create_mock_applier, create_edit_item, get_test_author,
-    create_mock_body_with_paragraphs, create_table_cell_with_paragraphs,
+from _apply_audit_edits_helpers import (  # noqa: E402
+    apply_module, NS, NSMAP,
+    create_paragraph_xml,
+    create_mock_applier,
+    create_mock_body_with_paragraphs,
     create_table_with_cells, create_multi_row_table,
 )
 
@@ -196,6 +190,34 @@ class TestTableBoundaryDetection:
         )
 
         assert boundary_error is None
+
+    def test_iter_range_duplicate_paraid_in_table(self):
+        """Duplicate paraId across table rows should extend range to last occurrence"""
+        applier = create_mock_applier()
+
+        # Two-row table with duplicate paraId (vertical merge scenario)
+        tbl = create_multi_row_table(
+            [[['Row1']], [['Row2']]],
+            ['AAA', 'AAA']
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+
+        # Add paragraph after table to ensure range does not spill over
+        p_after = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p_after.set(f'{{{NS["w14"]}}}paraId', 'ZZZ')
+        r = etree.SubElement(p_after, f'{{{NS["w"]}}}r')
+        t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+        t.text = 'After table'
+
+        applier.body_elem = body
+
+        start_para = body.find('.//w:tbl//w:p[@w14:paraId="AAA"]', NSMAP)
+        table_paras = body.findall('.//w:tbl//w:p[@w14:paraId="AAA"]', NSMAP)
+        range_paras = list(applier._iter_paragraphs_in_range(start_para, 'AAA'))
+
+        assert len(range_paras) == len(table_paras)
+        assert all(applier._is_paragraph_in_table(p) for p in range_paras)
 
 
 
@@ -909,6 +931,55 @@ class TestApplyMethodsWithBoundaryRuns:
 
         # Should fallback since no real runs to modify
         assert result == 'fallback'
+
+
+class TestStripTableRowNumbering:
+    """Tests for strip_table_row_numbering with multi-row JSON strings"""
+
+    def test_multi_row_json_string(self):
+        text = '["9", "C_RXD+", "RS422发送+", "422接口"], ["10", "C_RXD-", "RS422发送-", "422接口"]'
+        expected = '["", "C_RXD+", "RS422发送+", "422接口"], ["", "C_RXD-", "RS422发送-", "422接口"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_full_table_json_array_string(self):
+        text = '[[\"9\", \"A\"], [\"10\", \"B\"]]'
+        expected = '["", "A"], ["", "B"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_full_table_json_array_with_whitespace(self):
+        text = '[\n  ["9", "A"],\n  ["10", "B"]\n]'
+        expected = '["", "A"], ["", "B"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_full_table_json_array_no_numbering(self):
+        text = '[[\"A\", \"B\"], [\"C\", \"D\"]]'
+        expected = '["A", "B"], ["C", "D"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_first_cell_with_punctuation(self):
+        text = '["9)", "A"], ["10.", "B"]'
+        expected = '["", "A"], ["", "B"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
 
 
 # ============================================================

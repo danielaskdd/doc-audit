@@ -229,31 +229,43 @@ def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
         '["1", "1. Intro", "2. Body"]' -> ('["", "Intro", "Body"]', True)
         '["", "a) First\\nb) Second"]' -> ('["", "First\\nSecond"]', True)
         '["content"]' -> ('["content"]', False)
+        '["1", "A"], ["2", "B"]' -> ('["", "A"], ["", "B"]', True)
+        '[[\"1\", \"A\"], [\"2\", \"B\"]]' -> ('[\"\", \"A\"], [\"\", \"B\"]', True)
     """
-    if not text.startswith('["'):
+    stripped_text = text.strip()
+    if not stripped_text.startswith('['):
         return text, False
     
     was_modified = False
     
-    # 1. First cell: Replace row number with empty string
-    match = TABLE_ROW_NUMBERING_PATTERN.match(text)
-    if match:
-        text = '["", ' + text[match.end():]
-        was_modified = True
-    
-    # 2. Parse JSON and strip auto-numbering from each cell and paragraph
-    try:
-        cells = json.loads(text)
-        if not isinstance(cells, list):
-            return text, was_modified
-        
+    def process_row(row: list) -> list:
+        nonlocal was_modified
+        if not row:
+            return row
+
+        # 1. First cell: Replace row number with empty string
+        first_cell = row[0]
+        if isinstance(first_cell, str):
+            first_cell_stripped = first_cell.strip()
+            stripped_first, stripped_flag = strip_auto_numbering(first_cell_stripped)
+            if stripped_flag:
+                was_modified = True
+                row = list(row)
+                row[0] = stripped_first.strip()
+            elif re.fullmatch(r'\d+(?:[.\d)）]+)?', first_cell_stripped):
+                # Pure row number (e.g., "9", "9.", "9)", "9.1")
+                row = list(row)
+                row[0] = ""
+                was_modified = True
+
+        # 2. Strip auto-numbering from each cell and paragraph
         new_cells = []
-        for cell in cells:
+        for cell in row:
             if isinstance(cell, str):
                 # Split cell by newlines (handles both \n and literal \\n after JSON decode)
                 # After json.loads, \\n in JSON becomes \n in string
                 paragraphs = cell.split('\n')
-                
+
                 # Process each paragraph
                 new_paragraphs = []
                 for para in paragraphs:
@@ -261,18 +273,67 @@ def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
                     if stripped_flag:
                         was_modified = True
                     new_paragraphs.append(stripped)
-                
+
                 # Rejoin with newline
                 new_cells.append('\n'.join(new_paragraphs))
             else:
                 new_cells.append(cell)
-        
-        if was_modified:
-            return json.dumps(new_cells, ensure_ascii=False), True
-        return text, False
+
+        return new_cells
+
+    rows = None
+    mode = None  # "single", "multi", "full"
+
+    # 1) Try direct JSON parse (single row or full table array)
+    try:
+        parsed = json.loads(stripped_text)
+        if isinstance(parsed, list):
+            if parsed and isinstance(parsed[0], list):
+                rows = parsed
+                mode = "full"
+            else:
+                rows = [parsed]
+                mode = "single"
     except json.JSONDecodeError:
+        rows = None
+
+    # 2) Try wrapping multi-row JSON (e.g., '["1",...], ["2",...]')
+    if rows is None and stripped_text.startswith('["'):
+        try:
+            parsed = json.loads(f'[{stripped_text}]')
+            if isinstance(parsed, list) and (not parsed or isinstance(parsed[0], list)):
+                rows = parsed
+                mode = "multi"
+        except json.JSONDecodeError:
+            rows = None
+
+    if rows is None:
         # Fallback: return original text if JSON parsing fails
-        return text, was_modified
+        return text, False
+
+    new_rows = []
+    for row in rows:
+        if isinstance(row, list):
+            new_rows.append(process_row(row))
+        else:
+            new_rows.append(row)
+
+    if mode == "full":
+        # Convert to row-string to match table_text format
+        row_string = ', '.join(json.dumps(row, ensure_ascii=False) for row in new_rows)
+        if was_modified:
+            return row_string, True
+        # If no numbering was stripped, still normalize full-table JSON for matching
+        if stripped_text != row_string:
+            return row_string, True
+        return text, False
+
+    if not was_modified:
+        return text, False
+    if mode == "single":
+        return json.dumps(new_rows[0], ensure_ascii=False), True
+    # mode == "multi"
+    return ', '.join(json.dumps(row, ensure_ascii=False) for row in new_rows), True
 
 
 def normalize_table_json(text: str) -> str:
@@ -506,6 +567,61 @@ class AuditEditApplier:
         xpath_expr = f'.//w:p[@w14:paraId="{para_id}"]'
         nodes = self._xpath(self.body_elem, xpath_expr)
         return nodes[0] if nodes else None
+
+    def _find_last_para_with_id_in_table(self, table_elem, uuid_end: str, start_para=None):
+        """
+        Find the last paragraph in a table (optionally after start_para) with the given paraId.
+
+        This is used to handle vertical-merge cases where Word duplicates paraId
+        across multiple rows.
+        """
+        if table_elem is None or not uuid_end:
+            return None
+
+        found_start = start_para is None
+        end_para = None
+
+        for para in table_elem.iter(f'{{{NS["w"]}}}p'):
+            if not found_start:
+                if para is start_para:
+                    found_start = True
+                else:
+                    continue
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            if para_id == uuid_end:
+                end_para = para
+
+        return end_para
+
+    def _resolve_end_para(self, start_para, uuid_end: str):
+        """
+        Resolve the end paragraph element for a uuid range.
+
+        - If start is in a table, pick the LAST matching paraId in the same table
+          after start (to handle vertical merge duplicate paraIds).
+        - Otherwise, pick the FIRST matching paraId after start in document order.
+        """
+        if start_para is None or not uuid_end:
+            return None
+
+        if self._is_paragraph_in_table(start_para):
+            table = self._find_ancestor_table(start_para)
+            end_para = self._find_last_para_with_id_in_table(table, uuid_end, start_para)
+            if end_para is not None:
+                return end_para
+
+        all_paras = self._xpath(self.body_elem, './/w:p')
+        try:
+            start_index = all_paras.index(start_para)
+        except ValueError:
+            start_index = 0
+
+        for para in all_paras[start_index:]:
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            if para_id == uuid_end:
+                return para
+
+        return None
     
     def _iter_paragraphs_following(self, start_node) -> Generator:
         """
@@ -538,12 +654,17 @@ class AuditEditApplier:
             Paragraph elements in document order, from start_node to uuid_end (inclusive)
         """
         all_paras = self._xpath(self.body_elem, './/w:p')
+        end_para = self._resolve_end_para(start_node, uuid_end)
 
         try:
             start_index = all_paras.index(start_node)
             for p in all_paras[start_index:]:
                 yield p
                 # Stop after reaching the end boundary (inclusive)
+                if end_para is not None:
+                    if p is end_para:
+                        return
+                    continue
                 para_id = p.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
                 if para_id == uuid_end:
                     return
@@ -820,6 +941,8 @@ class AuditEditApplier:
             is often outside the table (e.g., heading before table), so checking for
             it would cause all cells to be skipped.
         """
+        end_para = self._find_last_para_with_id_in_table(table_elem, uuid_end)
+
         # Iterate cells in document order
         for tc in table_elem.iter(f'{{{NS["w"]}}}tc'):
             cell_paras = tc.findall(f'{{{NS["w"]}}}p')
@@ -859,9 +982,13 @@ class AuditEditApplier:
                 if cell_runs:
                     pos = cell_runs[-1]['end']
                 
-                # Stop at uuid_end
-                if para_id == uuid_end:
-                    break
+                # Stop at uuid_end (last occurrence in table if duplicated)
+                if end_para is not None:
+                    if para is end_para:
+                        break
+                else:
+                    if para_id == uuid_end:
+                        break
             
             if not cell_runs:
                 continue
@@ -988,7 +1115,7 @@ class AuditEditApplier:
         start_table = self._find_ancestor_table(start_para) if start_in_table else None
 
         # 2. Find end paragraph and check its context
-        end_para = self._find_para_by_uuid(uuid_end)
+        end_para = self._resolve_end_para(start_para, uuid_end)
         end_in_table = self._is_paragraph_in_table(end_para) if end_para is not None else False
         end_table = self._find_ancestor_table(end_para) if end_in_table else None
 
@@ -1007,11 +1134,11 @@ class AuditEditApplier:
 
         # 4. Dispatch to appropriate collector
         if start_in_table:
-            return self._collect_runs_info_in_table(start_para, uuid_end, start_table)
+            return self._collect_runs_info_in_table(start_para, uuid_end, start_table, end_para=end_para)
         else:
-            return self._collect_runs_info_in_body(start_para, uuid_end)
+            return self._collect_runs_info_in_body(start_para, uuid_end, end_para=end_para)
 
-    def _collect_runs_info_in_body(self, start_para, uuid_end: str) -> Tuple[List[Dict], str, bool, Optional[str]]:
+    def _collect_runs_info_in_body(self, start_para, uuid_end: str, end_para=None) -> Tuple[List[Dict], str, bool, Optional[str]]:
         """
         Collect run info across paragraphs in document body (not in table).
         Paragraph boundaries are represented as '\\n'.
@@ -1023,6 +1150,8 @@ class AuditEditApplier:
         Returns:
             Tuple of (runs_info, combined_text, is_cross_paragraph, boundary_error)
         """
+        if end_para is None:
+            end_para = self._resolve_end_para(start_para, uuid_end)
         runs_info = []
         pos = 0
         para_count = 0
@@ -1047,8 +1176,13 @@ class AuditEditApplier:
             pos += len(para_text)
 
             # Add paragraph boundary (except after last paragraph)
-            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-            if para_id != uuid_end:
+            is_last_para = False
+            if end_para is not None:
+                is_last_para = para is end_para
+            else:
+                para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                is_last_para = (para_id == uuid_end)
+            if not is_last_para:
                 # Not the last paragraph - add boundary marker
                 runs_info.append({
                     'text': '\n',
@@ -1064,7 +1198,7 @@ class AuditEditApplier:
 
         return runs_info, combined_text, is_cross_paragraph, None
 
-    def _collect_runs_info_in_table(self, start_para, uuid_end: str, table_elem) -> Tuple[List[Dict], str, bool, Optional[str]]:
+    def _collect_runs_info_in_table(self, start_para, uuid_end: str, table_elem, end_para=None) -> Tuple[List[Dict], str, bool, Optional[str]]:
         """
         Collect run info within a table using JSON format, handling multiple rows and merged cells.
 
@@ -1094,6 +1228,15 @@ class AuditEditApplier:
             - runs_info includes 'cell_elem' and 'row_elem' fields
             - runs_info includes 'original_text' for actual content (before JSON escaping)
         """
+        if end_para is None:
+            end_para = self._resolve_end_para(start_para, uuid_end)
+
+        def is_end_para(para) -> bool:
+            if end_para is not None:
+                return para is end_para
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            return para_id == uuid_end
+
         # Get number of columns from tblGrid
         tbl_grid = table_elem.find(f'{{{NS["w"]}}}tblGrid')
         num_cols = 0
@@ -1142,7 +1285,7 @@ class AuditEditApplier:
                     if in_range and not reached_end and para_id:
                         cell_in_range = True
                         last_para = para
-                        if para_id == uuid_end:
+                        if is_end_para(para):
                             reached_end = True
                             break
                 
@@ -1198,7 +1341,7 @@ class AuditEditApplier:
                                 })
                                 cell_text += escaped_text
                             
-                            if para_id == uuid_end:
+                            if is_end_para(para):
                                 break
                         
                         # Store in vmerge_content for future continue cells
@@ -1261,7 +1404,7 @@ class AuditEditApplier:
                                 })
                                 cell_text += escaped_text
                             
-                            if para_id == uuid_end:
+                            if is_end_para(para):
                                 break
                         
                         # Check if empty cell inherits from vMerge (TableExtractor logic)
@@ -1285,8 +1428,7 @@ class AuditEditApplier:
                 # Check if we've reached the end - stop immediately when uuid_end is found
                 if cell_in_range:
                     for para in cell_paras:
-                        para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                        if para_id == uuid_end:
+                        if is_end_para(para):
                             reached_end = True
                             break
                 
@@ -1375,6 +1517,14 @@ class AuditEditApplier:
         
         Used as fallback when tblGrid is not available.
         """
+        end_para = self._resolve_end_para(start_para, uuid_end)
+
+        def is_end_para(para) -> bool:
+            if end_para is not None:
+                return para is end_para
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            return para_id == uuid_end
+
         runs_info = []
         pos = 0
         current_cell = None
@@ -1394,8 +1544,6 @@ class AuditEditApplier:
 
         # Iterate all paragraphs in the table (in document order)
         for para in table_elem.iter(f'{{{NS["w"]}}}p'):
-            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-
             # Check if we've entered the range
             if para is start_para:
                 in_range = True
@@ -1470,7 +1618,7 @@ class AuditEditApplier:
                 pos += len(escaped_text)
 
             # Check if we've reached the end
-            if para_id == uuid_end:
+            if is_end_para(para):
                 break
 
         # Add closing '"]'
@@ -1503,6 +1651,7 @@ class AuditEditApplier:
         in_range = False
         reached_end = False
         vmerge_content = {}  # {grid_col: text}
+        end_para = self._find_last_para_with_id_in_table(table_elem, uuid_end)
 
         for tr in table_elem.findall(f'{{{NS["w"]}}}tr'):
             if reached_end:
@@ -1533,9 +1682,14 @@ class AuditEditApplier:
                         if para_text:
                             cell_text_parts.append(para_text)
 
-                    if in_range and para_id == uuid_end:
-                        reached_end = True
-                        break
+                    if in_range:
+                        if end_para is not None:
+                            if para is end_para:
+                                reached_end = True
+                                break
+                        elif para_id == uuid_end:
+                            reached_end = True
+                            break
 
                 cell_text = '\n'.join(cell_text_parts).replace('\x07', '')
 

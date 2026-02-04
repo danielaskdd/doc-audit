@@ -259,11 +259,17 @@ class TableExtractor:
                             vmerge_content.pop(grid_col, None)
                 
                 elif is_vmerge_continue:
-                    # Copy content and paraIds from previous merge start
+                    # Copy content and para_id from previous merge start
+                    # But extract actual para_id_end from this continue cell for range boundary
                     if grid_col in vmerge_content:
                         cell_text = vmerge_content[grid_col]['text']
-                        cell_para_id = vmerge_content[grid_col]['para_id']
-                        cell_para_id_end = vmerge_content[grid_col]['para_id_end']
+                        cell_para_id = vmerge_content[grid_col]['para_id']  # Use restart's paraId for edit targeting
+                        
+                        # Extract actual paraId from this continue cell for uuid_end (range boundary)
+                        for para_elem in tc.findall(qn('w:p')):
+                            para_id_attr = para_elem.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                            if para_id_attr:
+                                cell_para_id_end = para_id_attr  # Use actual paraId for range boundary
                 
                 # Place content at starting grid position only
                 if grid_col < num_cols:

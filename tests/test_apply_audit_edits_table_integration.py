@@ -723,6 +723,11 @@ def test_vmerge_restart_in_range():
         def _get_cell_merge_properties(self, tcPr):
             return AuditEditApplier._get_cell_merge_properties(self, tcPr)
 
+        def _find_last_para_with_id_in_table(self, table_elem, uuid_end, start_para=None):
+            return AuditEditApplier._find_last_para_with_id_in_table(
+                self, table_elem, uuid_end, start_para
+            )
+
         def _collect_runs_info_original(self, para_elem):
             # Simple text extraction for testing
             text = ''.join(t.text or '' for t in para_elem.findall('.//w:t', NS))
@@ -778,6 +783,11 @@ def test_vmerge_restart_outside_range():
         def _get_cell_merge_properties(self, tcPr):
             return AuditEditApplier._get_cell_merge_properties(self, tcPr)
 
+        def _find_last_para_with_id_in_table(self, table_elem, uuid_end, start_para=None):
+            return AuditEditApplier._find_last_para_with_id_in_table(
+                self, table_elem, uuid_end, start_para
+            )
+
         def _collect_runs_info_original(self, para_elem):
             text = ''.join(t.text or '' for t in para_elem.findall('.//w:t', NS))
             if not text:
@@ -827,6 +837,11 @@ def test_gridspan_cells_in_range():
 
         def _get_cell_merge_properties(self, tcPr):
             return AuditEditApplier._get_cell_merge_properties(self, tcPr)
+
+        def _find_last_para_with_id_in_table(self, table_elem, uuid_end, start_para=None):
+            return AuditEditApplier._find_last_para_with_id_in_table(
+                self, table_elem, uuid_end, start_para
+            )
 
         def _collect_runs_info_original(self, para_elem):
             text = ''.join(t.text or '' for t in para_elem.findall('.//w:t', NS))
