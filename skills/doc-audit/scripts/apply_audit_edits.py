@@ -831,12 +831,13 @@ class AuditEditApplier:
             
             # Debug: log snippet from marker on non-JSON match failure
             if match_pos == -1:
-                DEBUG_MARKER = "伍仟贰佰元"
-                marker_idx = cell_text.find(DEBUG_MARKER)
-                if DEBUG_MARKER and marker_idx != -1:
-                    snippet_len = len(DEBUG_MARKER) + 60
-                    snippet = cell_text[marker_idx:marker_idx + snippet_len]
-                    print(f"  [DEBUG] Non-JSON cell content from marker: {repr(snippet)}")
+                DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
+                if DEBUG_MARKER:
+                    marker_idx = cell_text.find(DEBUG_MARKER)
+                    if DEBUG_MARKER and marker_idx != -1:
+                        snippet_len = len(DEBUG_MARKER) + 60
+                        snippet = cell_text[marker_idx:marker_idx + snippet_len]
+                        print(f"  [DEBUG] Non-JSON cell content from marker: {repr(snippet)}")
 
             if match_pos != -1:
                 # Found! Return match info including the matched text
@@ -4338,7 +4339,7 @@ class AuditEditApplier:
                                         matched_text_override = table_text[orig_start:orig_end]
                             
                             # Debug logging for specific content
-                            DEBUG_MARKER = "CT41-1210-X7R-100V-4.7"
+                            DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                             if pos == -1 and DEBUG_MARKER and (DEBUG_MARKER in table_text or DEBUG_MARKER in search_text):
                                 print(f"\n  [DEBUG] Table matching failed for row containing '{DEBUG_MARKER}':")
                                 
@@ -4519,7 +4520,7 @@ class AuditEditApplier:
                                         break
                                 else:
                                     # Debug: log snippet from marker on non-JSON match failure
-                                    DEBUG_MARKER = "伍仟贰佰元"
+                                    DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                                     marker_idx = cell_combined_text.find(DEBUG_MARKER)
                                     if DEBUG_MARKER and marker_idx != -1:
                                         snippet_len = len(DEBUG_MARKER) + 60
@@ -4971,13 +4972,14 @@ class AuditEditApplier:
                                 print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
                             # Debug: log snippet from marker on cross-paragraph fallback
                             try:
-                                DEBUG_MARKER = "伍仟贰佰元"
-                                combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
-                                marker_idx = combined_text.find(DEBUG_MARKER)
-                                if marker_idx != -1:
-                                    snippet_len = len(DEBUG_MARKER) + 60
-                                    snippet = combined_text[marker_idx:marker_idx + snippet_len]
-                                    print(f"  [DEBUG] Cross-paragraph content from marker: {repr(snippet)}")
+                                DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
+                                if DEBUG_MARKER:
+                                    combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
+                                    marker_idx = combined_text.find(DEBUG_MARKER)
+                                    if marker_idx != -1:
+                                        snippet_len = len(DEBUG_MARKER) + 60
+                                        snippet = combined_text[marker_idx:marker_idx + snippet_len]
+                                        print(f"  [DEBUG] Cross-paragraph content from marker: {repr(snippet)}")
                             except Exception:
                                 # Debug logging should never break apply flow
                                 pass
