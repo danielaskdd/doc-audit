@@ -176,6 +176,42 @@ def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
         return '["", ' + text[match.end():], True
     return text, False
 
+
+def normalize_table_json(text: str) -> str:
+    """
+    Normalize table JSON by removing duplicate brackets at boundaries.
+    
+    LLM may incorrectly include extra brackets when referencing table rows:
+    - First row: '[["...' instead of '["...'
+    - Last row: '..."]]' instead of '..."]'
+    
+    This function cleans up these artifacts by removing duplicate brackets.
+    
+    Args:
+        text: Table JSON text that may have duplicate brackets
+        
+    Returns:
+        Normalized text with duplicate brackets removed
+        
+    Examples:
+        '[["cell1", "cell2"]' -> '["cell1", "cell2"]'
+        '["cell1", "cell2"]]' -> '["cell1", "cell2"]'
+        '[["cell1", "cell2"]]' -> '["cell1", "cell2"]'
+        '["cell1", "cell2"]' -> '["cell1", "cell2"]' (no change)
+    """
+    if not text.startswith('["'):
+        return text
+    
+    result = text
+    # Remove leading duplicate bracket
+    if result.startswith('[["'):
+        result = result[1:]
+    # Remove trailing duplicate bracket
+    if result.endswith('"]]'):
+        result = result[:-1]
+    
+    return result
+
 # ============================================================
 # Main Class: AuditEditApplier
 # ============================================================
@@ -810,7 +846,7 @@ class AuditEditApplier:
                 break
             
             grid_col = 0
-            row_data = []  # List of (cell_runs, cell_text) for this row
+            row_data = [None] * num_cols  # Pre-fill with None to match TableExtractor behavior
             
             # Iterate cells (w:tc elements) in this row
             for tc in tr.findall(f'{{{NS["w"]}}}tc'):
@@ -863,7 +899,13 @@ class AuditEditApplier:
                                 })
                                 cell_text += '\\n'
                             
-                            para_runs, _ = self._collect_runs_info_original(para)
+                            para_runs, para_orig_text = self._collect_runs_info_original(para)
+                            
+                            # Skip empty paragraphs (match table_extractor.py behavior at line 144/163)
+                            # table_extractor.py strips each paragraph and skips if empty
+                            if not para_orig_text.strip():
+                                continue
+                            
                             for run in para_runs:
                                 original_text = run['text']
                                 escaped_text = json_escape(original_text)
@@ -917,7 +959,13 @@ class AuditEditApplier:
                                 })
                                 cell_text += '\\n'
                             
-                            para_runs, _ = self._collect_runs_info_original(para)
+                            para_runs, para_orig_text = self._collect_runs_info_original(para)
+                            
+                            # Skip empty paragraphs (match table_extractor.py behavior at line 144/163)
+                            # table_extractor.py strips each paragraph and skips if empty
+                            if not para_orig_text.strip():
+                                continue
+                            
                             for run in para_runs:
                                 original_text = run['text']
                                 escaped_text = json_escape(original_text)
@@ -944,15 +992,10 @@ class AuditEditApplier:
                             # Non-empty normal cell ends vMerge region
                             vmerge_content.pop(grid_col, None)
                 
-                # Store cell data - only if cell is in range or has content
-                # This prevents adding empty cells before the start of the range
-                if cell_in_range or cell_runs:
-                    row_data.append((cell_runs, cell_text))
-                else:
-                    # Cell not in range and empty - don't add to row_data
-                    # But we still need to account for it in the row structure
-                    # So we add a placeholder that will be filtered later
-                    pass
+                # Store cell data at grid_col position (matching TableExtractor behavior)
+                # gridSpan cells only occupy the starting position, skipped columns remain None
+                if grid_col < num_cols and (cell_in_range or cell_runs):
+                    row_data[grid_col] = (cell_runs, cell_text)
                 
                 # Advance grid column by gridSpan
                 grid_col += grid_span
@@ -966,7 +1009,7 @@ class AuditEditApplier:
                             break
             
             # After processing all cells in row, add to runs_info if row is in range
-            if in_range and any(runs for runs, _ in row_data):
+            if in_range and any(cell_tuple is not None and cell_tuple[0] for cell_tuple in row_data):
                 # Add row opening marker (first row gets '["', subsequent get '"], ["')
                 if first_row_in_range:
                     runs_info.append({
@@ -989,8 +1032,14 @@ class AuditEditApplier:
                     })
                     pos += 6
                 
-                # Add cell data for this row
-                for cell_idx, (cell_runs, cell_text) in enumerate(row_data):
+                # Add cell data for this row (iterate all columns, handle None for gridSpan gaps)
+                for cell_idx in range(num_cols):
+                    cell_tuple = row_data[cell_idx]
+                    if cell_tuple is None:
+                        # Empty cell (gridSpan gap or out of range)
+                        cell_runs, cell_text = [], ''
+                    else:
+                        cell_runs, cell_text = cell_tuple
                     if cell_idx > 0:
                         # Add cell boundary marker
                         runs_info.append({
@@ -3565,6 +3614,11 @@ class AuditEditApplier:
             
             # Fallback 3: Try table search if violation_text looks like JSON array
             if target_para is None and violation_text.startswith('["'):
+                # Normalize to remove duplicate brackets at boundaries (LLM artifacts)
+                violation_text = normalize_table_json(violation_text)
+                if item.fix_action == 'replace':
+                    revised_text = normalize_table_json(revised_text)
+                
                 # Find all tables in range
                 tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                 
@@ -3579,7 +3633,7 @@ class AuditEditApplier:
                     search_attempts.append((stripped_table_text, True))
                 
                 for search_text, is_stripped in search_attempts:
-                    for table_elem in tables_in_range:
+                    for table_idx, table_elem in enumerate(tables_in_range):
                         # Get the first and last paragraph in this table
                         table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
                         if not table_paras:
