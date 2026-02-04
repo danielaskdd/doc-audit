@@ -28,7 +28,7 @@ from utils import sanitize_xml_string
 # ============================================================
 
 # Set to a specific marker string to WATCH
-DEBUG_MARKER = "焊接点可靠性预计"
+DEBUG_MARKER = ""
 
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -4766,6 +4766,23 @@ class AuditEditApplier:
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
+                        # Debug: log body paragraph content from marker on boundary failure
+                        if DEBUG_MARKER:
+                            try:
+                                for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
+                                    if self._is_paragraph_in_table(para):
+                                        continue
+                                    _, para_text = self._collect_runs_info_original(para)
+                                    marker_idx = para_text.find(DEBUG_MARKER)
+                                    if marker_idx != -1:
+                                        snippet_len = len(DEBUG_MARKER) + 60
+                                        snippet = para_text[marker_idx:marker_idx + snippet_len]
+                                        print(f"  [DEBUG] Body search target: {repr(violation_text)}")
+                                        break
+                            except Exception:
+                                # Debug logging should never break apply flow
+                                pass
+
                         self._apply_fallback_comment(anchor_para, item, reason)
                         if self.verbose:
                             print(f"  [Boundary] {reason}")
@@ -4779,6 +4796,23 @@ class AuditEditApplier:
                 # Only proceed with fallback if target_para is still None
                 # (boundary_error handling may have found a match)
                 if target_para is None:
+                    # Debug: log body paragraph content from marker on overall match failure
+                    if DEBUG_MARKER:
+                        try:
+                            for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
+                                if self._is_paragraph_in_table(para):
+                                    continue
+                                _, para_text = self._collect_runs_info_original(para)
+                                marker_idx = para_text.find(DEBUG_MARKER)
+                                if marker_idx != -1:
+                                    snippet_len = len(DEBUG_MARKER) + 60
+                                    snippet = para_text[marker_idx:marker_idx + snippet_len]
+                                    print(f"  [DEBUG] Body search target: {repr(violation_text)}")
+                                    break
+                        except Exception:
+                            # Debug logging should never break apply flow
+                            pass
+
                     # Calculate total segments for error message
                     # Variables are initialized in their respective code paths above
                     # If not set, default to empty lists
