@@ -565,6 +565,73 @@ class AuditEditApplier:
         lines = text.split('\n')
         return '\n'.join(line.rstrip() for line in lines)
 
+    def _normalize_table_text_for_search(self, runs_info: List[Dict]) -> Tuple[str, List[int]]:
+        """
+        Build a normalized table text for search and a mapping back to original positions.
+
+        This mirrors table_extractor.py behavior by stripping leading/trailing whitespace
+        from each paragraph within a cell. It returns:
+        - normalized_text: text with per-paragraph whitespace stripped
+        - norm_to_orig: list mapping each normalized char index -> original char index
+
+        The mapping allows translating match positions from normalized text
+        back to the original combined table text for accurate run selection.
+        """
+        normalized_chars: List[str] = []
+        norm_to_orig: List[int] = []
+        para_chars: List[Tuple[str, int]] = []  # (char, orig_index)
+        orig_pos = 0
+
+        def flush_paragraph():
+            nonlocal para_chars
+            if not para_chars:
+                return
+            para_text = ''.join(ch for ch, _ in para_chars)
+            if not para_text:
+                para_chars = []
+                return
+            # Strip leading/trailing whitespace like para_text.strip()
+            start = 0
+            end = len(para_text)
+            while start < end and para_text[start].isspace():
+                start += 1
+            while end > start and para_text[end - 1].isspace():
+                end -= 1
+            for ch, orig_idx in para_chars[start:end]:
+                normalized_chars.append(ch)
+                norm_to_orig.append(orig_idx)
+            para_chars = []
+
+        for run in runs_info:
+            text = run.get('text', '')
+            run_len = len(text)
+
+            if run.get('is_para_boundary'):
+                flush_paragraph()
+                for i, ch in enumerate(text):
+                    normalized_chars.append(ch)
+                    norm_to_orig.append(orig_pos + i)
+                orig_pos += run_len
+                continue
+
+            if run.get('is_json_boundary') or run.get('is_cell_boundary') or run.get('is_row_boundary'):
+                flush_paragraph()
+                for i, ch in enumerate(text):
+                    normalized_chars.append(ch)
+                    norm_to_orig.append(orig_pos + i)
+                orig_pos += run_len
+                continue
+
+            # Content run (part of a paragraph)
+            for i, ch in enumerate(text):
+                para_chars.append((ch, orig_pos + i))
+            orig_pos += run_len
+
+        # Flush remaining paragraph at end
+        flush_paragraph()
+
+        return ''.join(normalized_chars), norm_to_orig
+
     def _find_tables_in_range(self, start_para, uuid_end: str) -> List:
         """
         Find all tables within uuid → uuid_end range.
@@ -944,10 +1011,13 @@ class AuditEditApplier:
                                 cell_text += '\\n'
                             
                             para_runs, para_orig_text = self._collect_runs_info_original(para)
+                            # Strip paragraph text to match table_extractor.py behavior (line 144/163)
+                            # table_extractor.py calls para_text.strip() before checking if empty
+                            para_orig_text = para_orig_text.strip()
                             
                             # Skip empty paragraphs (match table_extractor.py behavior at line 144/163)
                             # table_extractor.py strips each paragraph and skips if empty
-                            if not para_orig_text.strip():
+                            if not para_orig_text:
                                 continue
                             
                             for run in para_runs:
@@ -1004,10 +1074,13 @@ class AuditEditApplier:
                                 cell_text += '\\n'
                             
                             para_runs, para_orig_text = self._collect_runs_info_original(para)
+                            # Strip paragraph text to match table_extractor.py behavior (line 144/163)
+                            # table_extractor.py calls para_text.strip() before checking if empty
+                            para_orig_text = para_orig_text.strip()
                             
                             # Skip empty paragraphs (match table_extractor.py behavior at line 144/163)
                             # table_extractor.py strips each paragraph and skips if empty
-                            if not para_orig_text.strip():
+                            if not para_orig_text:
                                 continue
                             
                             for run in para_runs:
@@ -3712,6 +3785,73 @@ class AuditEditApplier:
                             
                             # Search for search_text in table content
                             pos = table_text.find(search_text)
+                            matched_text_override = None
+                            if pos == -1 and search_text:
+                                # Fallback: normalize table text by stripping per-paragraph whitespace
+                                # to match parse_document.py behavior, and map back to original indices.
+                                normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(table_runs)
+                                pos_norm = normalized_table_text.find(search_text)
+                                if pos_norm != -1:
+                                    norm_end = pos_norm + len(search_text) - 1
+                                    if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
+                                        orig_start = norm_to_orig[pos_norm]
+                                        orig_end = norm_to_orig[norm_end] + 1
+                                        pos = orig_start
+                                        matched_text_override = table_text[orig_start:orig_end]
+                            
+                            # Debug logging for specific content
+                            DEBUG_MARKER = "CT41-1210-X7R-100V-4.7"
+                            if pos == -1 and DEBUG_MARKER and (DEBUG_MARKER in table_text or DEBUG_MARKER in search_text):
+                                print(f"\n  [DEBUG] Table matching failed for row containing '{DEBUG_MARKER}':")
+                                
+                                # Extract only the row containing DEBUG_MARKER from table_text
+                                def extract_matching_row(text, marker):
+                                    """Extract the row containing the marker from table JSON format."""
+                                    # Table format: ["cell1", "cell2"], ["cell3", "cell4"]
+                                    # Split by row boundaries '], ['
+                                    if not text.startswith('["'):
+                                        return None
+                                    
+                                    # Remove outer brackets and split by row separator
+                                    rows_text = text[2:-2] if text.endswith('"]') else text[2:]
+                                    rows = rows_text.split('"], ["')
+                                    
+                                    for row in rows:
+                                        if marker in row:
+                                            return '["' + row + '"]'
+                                    return None
+                                
+                                table_row = extract_matching_row(table_text, DEBUG_MARKER)
+                                search_row = extract_matching_row(search_text, DEBUG_MARKER)
+                                
+                                if table_row:
+                                    print(f"  [DEBUG] Table row content:")
+                                    print(f"    {table_row}")
+                                else:
+                                    print(f"  [DEBUG] Table content (marker '{DEBUG_MARKER}' not found in individual row):")
+                                    print(f"    {table_text[:300]}...")
+                                
+                                if search_row:
+                                    print(f"  [DEBUG] Searching for:")
+                                    print(f"    {search_row}")
+                                else:
+                                    print(f"  [DEBUG] Search content (marker '{DEBUG_MARKER}' not found in individual row):")
+                                    print(f"    {search_text[:300]}...")
+                                
+                                # Show character-level diff if both rows found
+                                if table_row and search_row:
+                                    min_len = min(len(table_row), len(search_row))
+                                    for i in range(min_len):
+                                        if table_row[i] != search_row[i]:
+                                            print(f"  [DEBUG] First difference at position {i}:")
+                                            print(f"    Table: ...{repr(table_row[max(0,i-10):i+30])}...")
+                                            print(f"    Search: ...{repr(search_row[max(0,i-10):i+30])}...")
+                                            break
+                                    else:
+                                        # No difference found in common length, check length difference
+                                        if len(table_row) != len(search_row):
+                                            print(f"  [DEBUG] Length mismatch: table={len(table_row)}, search={len(search_row)}")
+                            
                             if pos != -1:
                                 # Found match in this table!
                                 target_para = first_table_para  # Use first para as anchor
@@ -3720,7 +3860,7 @@ class AuditEditApplier:
                                 is_cross_paragraph = True  # Table mode is always cross-paragraph
                                 
                                 # Update violation_text to the matched version(stripped or not)
-                                violation_text = search_text
+                                violation_text = matched_text_override or search_text
                                 
                                 # For replace operations, also strip row numbering from revised_text
                                 if is_stripped and item.fix_action == 'replace':
