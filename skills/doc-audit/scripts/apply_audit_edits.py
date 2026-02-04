@@ -27,6 +27,9 @@ from utils import sanitize_xml_string
 # Constants
 # ============================================================
 
+# Set to a specific marker string to WATCH
+DEBUG_MARKER = "焊接点可靠性预计"
+
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
     'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
@@ -147,6 +150,61 @@ def strip_auto_numbering(text: str) -> Tuple[str, bool]:
         return text[match.end():], True
     return text, False
 
+
+def strip_auto_numbering_lines(text: str) -> Tuple[str, bool]:
+    """
+    Strip auto-numbering prefix from each line in a multi-line string.
+
+    This is needed when violation_text spans multiple numbered list items
+    (e.g., "e) ...\\nf) ...") while Word stores numbering separately.
+
+    Args:
+        text: Text that may contain multiple numbered lines
+
+    Returns:
+        (stripped_text, was_stripped)
+    """
+    if '\n' not in text:
+        return strip_auto_numbering(text)
+
+    lines = text.split('\n')
+    new_lines = []
+    was_stripped = False
+    for line in lines:
+        stripped, stripped_flag = strip_auto_numbering(line)
+        if stripped_flag:
+            was_stripped = True
+        new_lines.append(stripped)
+    return '\n'.join(new_lines), was_stripped
+
+
+def build_numbering_variants(text: str) -> List[Tuple[str, str]]:
+    """
+    Build search variants with auto-numbering stripped.
+
+    Returns list of (variant_text, mode) where mode is "prefix" or "lines".
+    """
+    variants: List[Tuple[str, str]] = []
+    stripped_prefix, was_prefix = strip_auto_numbering(text)
+    if was_prefix:
+        variants.append((stripped_prefix, "prefix"))
+
+    stripped_lines, was_lines = strip_auto_numbering_lines(text)
+    if was_lines and stripped_lines != stripped_prefix:
+        variants.append((stripped_lines, "lines"))
+
+    return variants
+
+
+def strip_numbering_by_mode(text: str, mode: Optional[str]) -> Tuple[str, bool]:
+    """
+    Strip numbering from text based on a specific mode.
+    """
+    if mode == "prefix":
+        return strip_auto_numbering(text)
+    if mode == "lines":
+        return strip_auto_numbering_lines(text)
+    return text, False
 
 def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
     """
@@ -752,8 +810,9 @@ class AuditEditApplier:
             uuid_end: End boundary paraId
         
         Returns:
-            Tuple of (target_para, runs_info, match_start, matched_text) or None if not found
+            Tuple of (target_para, runs_info, match_start, matched_text, strip_mode) or None if not found
             - matched_text: The actual text that was matched (may be normalized if fallback was used)
+            - strip_mode: "prefix" | "lines" | None (if auto-numbering was stripped)
         
         Note:
             The in_range gate has been removed because _find_tables_in_range already
@@ -812,26 +871,43 @@ class AuditEditApplier:
 
             # Search within this cell only (prevents cross-cell matching)
             # Use normalization + mapping to handle trailing whitespace safely
-            match_pos, matched_override = self._find_in_runs_with_normalization(
-                cell_runs, violation_text
-            )
-            matched_text = matched_override or violation_text  # Track the actual matched text
+            # Build search attempts (original + numbering-stripped + newline-normalized)
+            search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
+            search_attempts.extend(build_numbering_variants(violation_text))
 
-            # Fallback: If violation_text contains \\n literal (LLM didn't decode JSON escape),
-            # try converting to real newline
-            if match_pos == -1 and '\\n' in violation_text:
-                normalized_violation = violation_text.replace('\\n', '\n')
+            if '\\n' in violation_text:
+                newline_text = violation_text.replace('\\n', '\n')
+                search_attempts.append((newline_text, None))
+                search_attempts.extend(build_numbering_variants(newline_text))
+
+            # De-duplicate search attempts while preserving order
+            seen = set()
+            deduped_attempts: List[Tuple[str, Optional[str]]] = []
+            for text, mode in search_attempts:
+                key = (text, mode)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_attempts.append((text, mode))
+
+            match_pos = -1
+            matched_text = violation_text
+            matched_override = None
+            matched_strip_mode: Optional[str] = None
+
+            for search_text, strip_mode in deduped_attempts:
                 match_pos, matched_override = self._find_in_runs_with_normalization(
-                    cell_runs, normalized_violation
+                    cell_runs, search_text
                 )
                 if match_pos != -1:
-                    matched_text = matched_override or normalized_violation
-                    if self.verbose:
-                        print(f"  [Fallback] Matched after converting \\\\n to real newline")
+                    matched_text = matched_override or search_text
+                    matched_strip_mode = strip_mode
+                    if self.verbose and '\\n' in violation_text and search_text != violation_text:
+                        print(f"  [Fallback] Matched after converting \\\\n or stripping numbering")
+                    break
             
             # Debug: log snippet from marker on non-JSON match failure
             if match_pos == -1:
-                DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                 if DEBUG_MARKER:
                     marker_idx = cell_text.find(DEBUG_MARKER)
                     if DEBUG_MARKER and marker_idx != -1:
@@ -843,7 +919,7 @@ class AuditEditApplier:
                 # Found! Return match info including the matched text
                 if self.verbose:
                     print(f"  [Success] Found in cell (raw text mode): '{cell_text[:50]}...'")
-                return (cell_first_para, cell_runs, match_pos, matched_text)
+                return (cell_first_para, cell_runs, match_pos, matched_text, matched_strip_mode)
         
         return None
 
@@ -4189,6 +4265,7 @@ class AuditEditApplier:
             
             # Strategy: Try single-paragraph search first, then cross-paragraph if needed
             is_cross_paragraph = False
+            numbering_variants = build_numbering_variants(violation_text)
             
             # Try original text first (using revision-free view) - single paragraph
             for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
@@ -4207,9 +4284,7 @@ class AuditEditApplier:
             
             # Fallback 1: Try stripping auto-numbering if original match failed
             if target_para is None:
-                stripped_violation, was_stripped = strip_auto_numbering(violation_text)
-                
-                if was_stripped:
+                for stripped_violation, strip_mode in numbering_variants:
                     for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
                         runs_info_orig, _ = self._collect_runs_info_original(para)
 
@@ -4222,17 +4297,18 @@ class AuditEditApplier:
                             matched_start = pos
                             numbering_stripped = True
                             violation_text = matched_override or stripped_violation
-                            
+
                             # Handle revised_text for replace operation
                             if item.fix_action == 'replace':
-                                stripped_revised, revised_has_numbering = strip_auto_numbering(revised_text)
-                                
+                                stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
                                 if revised_has_numbering:
                                     # Both have numbering: strip both
                                     revised_text = stripped_revised
                                 # else: Only violation_text had numbering, keep revised_text as-is
-                            
+
                             break
+                    if target_para is not None:
+                        break
             
             # Fallback 2: Try cross-paragraph search (within uuid → uuid_end range)
             # This also handles table content with JSON format matching
@@ -4249,35 +4325,53 @@ class AuditEditApplier:
                         print(f"  [Boundary] {boundary_error}")
                 elif is_multi_para:
                     # Only use cross-paragraph mode if there are actually multiple paragraphs
-                    if self._is_table_mode(cross_runs):
-                        pos = cross_text.find(violation_text)
-                        matched_override = None
-                        if pos == -1 and violation_text:
-                            normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(cross_runs)
-                            pos_norm = normalized_table_text.find(violation_text)
-                            if pos_norm != -1:
-                                norm_end = pos_norm + len(violation_text) - 1
-                                if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
-                                    orig_start = norm_to_orig[pos_norm]
-                                    orig_end = norm_to_orig[norm_end] + 1
-                                    pos = orig_start
-                                    matched_override = cross_text[orig_start:orig_end]
-                    else:
-                        pos, matched_override = self._find_in_runs_with_normalization(
-                            cross_runs, violation_text
-                        )
+                    # Build search attempts: original, numbering-stripped variants, and newline-unescaped
+                    search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
+                    for stripped_violation, strip_mode in numbering_variants:
+                        search_attempts.append((stripped_violation, strip_mode))
+                    if '\\n' in violation_text:
+                        search_attempts.append((violation_text.replace('\\n', '\n'), None))
 
-                    if pos != -1:
-                        # Found match across paragraphs
-                        target_para = anchor_para  # Use anchor as reference
-                        matched_runs_info = cross_runs
-                        matched_start = pos
-                        is_cross_paragraph = True
-                        if matched_override is not None:
-                            violation_text = matched_override
+                    for search_text, strip_mode in search_attempts:
+                        if self._is_table_mode(cross_runs):
+                            pos = cross_text.find(search_text)
+                            matched_override = None
+                            if pos == -1 and search_text:
+                                normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(cross_runs)
+                                pos_norm = normalized_table_text.find(search_text)
+                                if pos_norm != -1:
+                                    norm_end = pos_norm + len(search_text) - 1
+                                    if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
+                                        orig_start = norm_to_orig[pos_norm]
+                                        orig_end = norm_to_orig[norm_end] + 1
+                                        pos = orig_start
+                                        matched_override = cross_text[orig_start:orig_end]
+                        else:
+                            pos, matched_override = self._find_in_runs_with_normalization(
+                                cross_runs, search_text
+                            )
 
-                        if self.verbose:
-                            print(f"  [Success] Found in cross-paragraph mode")
+                        if pos != -1:
+                            # Found match across paragraphs
+                            target_para = anchor_para  # Use anchor as reference
+                            matched_runs_info = cross_runs
+                            matched_start = pos
+                            is_cross_paragraph = True
+                            if matched_override is not None:
+                                violation_text = matched_override
+                            else:
+                                violation_text = search_text
+
+                            if strip_mode:
+                                numbering_stripped = True
+                                if item.fix_action == 'replace':
+                                    stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
+                                    if revised_has_numbering:
+                                        revised_text = stripped_revised
+
+                            if self.verbose:
+                                print(f"  [Success] Found in cross-paragraph mode")
+                            break
             
             # Fallback 3: Try table search if violation_text looks like JSON array
             if target_para is None and violation_text.startswith('["'):
@@ -4339,7 +4433,6 @@ class AuditEditApplier:
                                         matched_text_override = table_text[orig_start:orig_end]
                             
                             # Debug logging for specific content
-                            DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                             if pos == -1 and DEBUG_MARKER and (DEBUG_MARKER in table_text or DEBUG_MARKER in search_text):
                                 print(f"\n  [DEBUG] Table matching failed for row containing '{DEBUG_MARKER}':")
                                 
@@ -4437,11 +4530,17 @@ class AuditEditApplier:
                     )
                     
                     if result:
-                        target_para, matched_runs_info, matched_start, matched_text = result
+                        target_para, matched_runs_info, matched_start, matched_text, strip_mode = result
                         # Update violation_text with the actual matched text (handles fallback normalization)
                         violation_text = matched_text
                         # Cell content is always treated as single-paragraph for now
                         is_cross_paragraph = False
+                        if strip_mode:
+                            numbering_stripped = True
+                            if item.fix_action == 'replace':
+                                stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
+                                if revised_has_numbering:
+                                    revised_text = stripped_revised
                         
                         if self.verbose:
                             print(f"  [Success] Found in table cell (plain text mode)")
@@ -4479,12 +4578,47 @@ class AuditEditApplier:
                                 # Normalize to match parse_document.py behavior (removes trailing whitespace)
                                 cell_normalized = self._normalize_text_for_search(cell_combined_text)
                                 
-                                # Search for violation_text in cell's raw text
-                                pos = cell_normalized.find(violation_text)
-                                if pos != -1:
+                                # Build search attempts for raw text in cell
+                                search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
+                                search_attempts.extend(build_numbering_variants(violation_text))
+                                if '\\n' in violation_text:
+                                    newline_text = violation_text.replace('\\n', '\n')
+                                    search_attempts.append((newline_text, None))
+                                    search_attempts.extend(build_numbering_variants(newline_text))
+
+                                # De-duplicate while preserving order
+                                seen = set()
+                                deduped_attempts: List[Tuple[str, Optional[str]]] = []
+                                for text, mode in search_attempts:
+                                    key = (text, mode)
+                                    if key in seen:
+                                        continue
+                                    seen.add(key)
+                                    deduped_attempts.append((text, mode))
+
+                                match_pos = -1
+                                matched_search_text = violation_text
+                                matched_strip_mode: Optional[str] = None
+                                for search_text, strip_mode in deduped_attempts:
+                                    match_pos = cell_normalized.find(search_text)
+                                    if match_pos != -1:
+                                        matched_search_text = search_text
+                                        matched_strip_mode = strip_mode
+                                        break
+
+                                if match_pos != -1:
                                     # Found match in this cell!
                                     if self.verbose:
                                         print(f"  [Success] Found in table cell (raw text match)")
+                                    if matched_strip_mode:
+                                        numbering_stripped = True
+                                        violation_text = matched_search_text
+                                        if item.fix_action == 'replace':
+                                            stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, matched_strip_mode)
+                                            if revised_has_numbering:
+                                                revised_text = stripped_revised
+                                    else:
+                                        violation_text = matched_search_text
                                     
                                     # Determine which paragraph(s) contain the match
                                     # For simplicity, if match is within first paragraph, use it
@@ -4503,10 +4637,10 @@ class AuditEditApplier:
                                         para_len = len(para_text)
                                         
                                         # Check if match starts in this paragraph
-                                        if current_offset <= pos < current_offset + para_len:
+                                        if current_offset <= match_pos < current_offset + para_len:
                                             matched_para = cell_para
                                             matched_para_runs = para_runs
-                                            matched_para_start = pos - current_offset
+                                            matched_para_start = match_pos - current_offset
                                             break
                                         
                                         current_offset += para_len + 1  # +1 for \n separator
@@ -4520,7 +4654,6 @@ class AuditEditApplier:
                                         break
                                 else:
                                     # Debug: log snippet from marker on non-JSON match failure
-                                    DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                                     marker_idx = cell_combined_text.find(DEBUG_MARKER)
                                     if DEBUG_MARKER and marker_idx != -1:
                                         snippet_len = len(DEBUG_MARKER) + 60
@@ -4972,7 +5105,6 @@ class AuditEditApplier:
                                 print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
                             # Debug: log snippet from marker on cross-paragraph fallback
                             try:
-                                DEBUG_MARKER = ""  # Set to a specific marker string to WATCH
                                 if DEBUG_MARKER:
                                     combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
                                     marker_idx = combined_text.find(DEBUG_MARKER)
