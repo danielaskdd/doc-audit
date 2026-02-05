@@ -39,9 +39,9 @@ violation_text guidelines:
 - The violation_text field is used to locate the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
     - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
-- Preserve the original subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to plain text.
-    - Example 1: Keep `H<sub>2</sub>O` as is, do not convert to `H2O`
-    - Example 2: Keep `65×12×10<sup>-6</sup>/h＝7.8×10<sup>-4</sup>/h` as is, do not convert to `65×12×10-6/h＝7.8×10-4/h`
+- Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
+    - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
+    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
 - If an entire section is in violation, select the first paragraph as the violation_text
@@ -190,9 +190,9 @@ violation_text guidelines:
 - The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
     - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
-- Preserve the original subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to plain text.
-    - Example 1: Keep `H<sub>2</sub>O` as is, do not convert to `H2O`
-    - Example 2: Keep `65×12×10<sup>-6</sup>/h＝7.8×10<sup>-4</sup>/h` as is, do not convert to `65×12×10-6/h＝7.8×10-4/h`
+- Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
+    - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
+    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
 - For violation_text in table content of JSON format
