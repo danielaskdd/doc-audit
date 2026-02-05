@@ -1190,7 +1190,7 @@ def extract_text_from_run(run, ns: dict) -> str:
     return text
 
 
-def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
+def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = None) -> list:
     """
     Extract text blocks (chunks) from a DOCX file for auditing.
     
@@ -1205,6 +1205,8 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
     Args:
         file_path: Path to the DOCX file
         debug: If True, output debug information when splitting blocks
+        fixlevel: If specified, disable smart splitting/merging and only split at heading levels <= fixlevel
+                 (0 = split at all heading levels, 1 = Heading 1 only, 2 = Heading 1-2, etc.)
         
     Returns:
         List of block dictionaries with heading, content, type, and metadata
@@ -1256,52 +1258,88 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             
             if outline_level is not None:
                 # This is a heading (outline level 0-8)
+                # Convert 0-based to 1-based level
+                level = outline_level + 1
+                
+                # In fixlevel mode, check if this heading should trigger a block split
+                should_split = True
+                if fixlevel is not None and fixlevel > 0:
+                    # If fixlevel is specified and > 0, only split at levels <= fixlevel
+                    should_split = (level <= fixlevel)
+                
                 # Extract paraId for this heading
                 heading_para_id = extract_para_id(element)
                 
                 # Validate heading length
                 validate_heading_length(full_text, heading_para_id)
                 
-                # Only save previous block if it has body content
-                if has_body_content and current_paragraphs:
-                    # Split long blocks if needed
-                    split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
-                    blocks.extend(split_blocks)
-                    
-                    # Reset for new block
-                    current_paragraphs = []
-                    has_body_content = False
-                    table_split_counter = 0  # Reset table split counter for new heading
-                
-                # Convert 0-based to 1-based level
-                level = outline_level + 1
-                
                 # Truncate heading if needed before storing
                 truncated_text = truncate_heading(full_text, heading_para_id)
                 
-                # Add heading to current_paragraphs
-                current_paragraphs.append({
-                    'text': truncated_text,
-                    'para_id': heading_para_id,
-                    'is_table': False
-                })
-                
-                # Update current_heading and parent_headings for the FIRST heading in a block
-                # (when current_paragraphs just had this heading added as its first element)
-                if len(current_paragraphs) == 1:
-                    current_heading = truncated_text
-                    current_heading_level = level  # Only set level when setting heading
-                    # Parent headings = all headings from levels strictly less than current level
-                    # Sort by level to maintain hierarchy order
-                    current_parent_headings = [
-                        current_heading_stack[lvl]
-                        for lvl in sorted(current_heading_stack.keys())
-                        if lvl < level
-                    ]
-                
-                # Update heading stack: remove current level and all lower levels, then add current
-                current_heading_stack = {k: v for k, v in current_heading_stack.items() if k < level}
-                current_heading_stack[level] = truncated_text
+                if should_split:
+                    # This heading triggers a block split
+                    # Only save previous block if it has body content
+                    if has_body_content and current_paragraphs:
+                        # Split long blocks if needed (unless in fixlevel mode)
+                        if fixlevel is None:
+                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
+                        else:
+                            # Fixed level mode: no splitting, create single block
+                            total_content = "\n".join(p['text'] for p in current_paragraphs)
+                            last_para = current_paragraphs[-1]
+                            uuid_end = last_para.get('para_id_end') or last_para.get('para_id')
+                            split_blocks = [{
+                                "uuid": current_paragraphs[0]['para_id'],
+                                "uuid_end": uuid_end,
+                                "heading": current_heading,
+                                "content": total_content,
+                                "type": "text",
+                                "parent_headings": current_parent_headings,
+                                "level": current_heading_level
+                            }]
+                        blocks.extend(split_blocks)
+                        
+                        # Reset for new block
+                        current_paragraphs = []
+                        has_body_content = False
+                        table_split_counter = 0  # Reset table split counter for new heading
+                    
+                    # Add heading to current_paragraphs
+                    current_paragraphs.append({
+                        'text': truncated_text,
+                        'para_id': heading_para_id,
+                        'is_table': False
+                    })
+                    
+                    # Update current_heading and parent_headings for the FIRST heading in a block
+                    # (when current_paragraphs just had this heading added as its first element)
+                    if len(current_paragraphs) == 1:
+                        current_heading = truncated_text
+                        current_heading_level = level  # Only set level when setting heading
+                        # Parent headings = all headings from levels strictly less than current level
+                        # Sort by level to maintain hierarchy order
+                        current_parent_headings = [
+                            current_heading_stack[lvl]
+                            for lvl in sorted(current_heading_stack.keys())
+                            if lvl < level
+                        ]
+                    
+                    # Update heading stack: remove current level and all lower levels, then add current
+                    current_heading_stack = {k: v for k, v in current_heading_stack.items() if k < level}
+                    current_heading_stack[level] = truncated_text
+                else:
+                    # This heading doesn't trigger split - treat as regular paragraph
+                    para_id = heading_para_id
+                    
+                    # Store as regular paragraph with metadata
+                    current_paragraphs.append({
+                        'text': truncated_text,
+                        'para_id': para_id,
+                        'is_table': False
+                    })
+                    
+                    # Mark that we have body content
+                    has_body_content = True
             else:
                 # Regular paragraph content
                 para_id = extract_para_id(element)
@@ -1344,8 +1382,8 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             table_json = json.dumps(table_rows, ensure_ascii=False)
             table_tokens = estimate_tokens(table_json)
             
-            # Check if table needs splitting
-            if table_tokens > TABLE_MAX_TOKENS:
+            # Check if table needs splitting (disabled in fixlevel mode)
+            if fixlevel is None and table_tokens > TABLE_MAX_TOKENS:
                 # Table exceeds limit - split it
                 # Pass table_split_counter to ensure sequential numbering across multiple tables
                 table_chunks = split_table_with_heading(table_rows, para_ids, para_ids_end, header_indices, current_heading, table_split_counter, debug)
@@ -1461,15 +1499,20 @@ def extract_audit_blocks(file_path: str, debug: bool = False) -> list:
             block['table_chunk_role'] = "none"
     
     # Perform small block merging (unified merging after all splits)
-    if debug:
-        print(f"\n[DEBUG] Before merging: {len(blocks)} blocks", file=sys.stderr)
-    
-    merged_blocks, merge_count = merge_small_blocks(blocks, debug)
-    
-    if debug and merge_count > 0:
-        print(f"[DEBUG] After merging: {len(merged_blocks)} blocks ({merge_count} merges performed)", file=sys.stderr)
-    
-    return merged_blocks
+    # Disabled in fixlevel mode
+    if fixlevel is None:
+        if debug:
+            print(f"\n[DEBUG] Before merging: {len(blocks)} blocks", file=sys.stderr)
+        
+        merged_blocks, merge_count = merge_small_blocks(blocks, debug)
+        
+        if debug and merge_count > 0:
+            print(f"[DEBUG] After merging: {len(merged_blocks)} blocks ({merge_count} merges performed)", file=sys.stderr)
+        
+        return merged_blocks
+    else:
+        # Fixed level mode: skip merging
+        return blocks
 
 
 def calculate_file_hash(file_path: str) -> str:
@@ -1596,6 +1639,46 @@ def save_blocks_json(blocks: list, output_path: str, metadata: dict = None):
         print(f"Removed existing manifest: {manifest_path}")
 
 
+class FixLevelAction(argparse.Action):
+    """
+    Custom action for --fixlevel parameter that handles optional integer values.
+    
+    Accepts:
+    - --fixlevel=N (explicit value)
+    - --fixlevel (no value, defaults to 0)
+    - no --fixlevel (defaults to None)
+    
+    Rejects non-integer values (they are treated as positional arguments).
+    """
+    def __init__(self, option_strings, dest, default=None, **kwargs):
+        # Remove nargs, const, type from kwargs since we handle them ourselves
+        kwargs.pop('nargs', None)
+        kwargs.pop('const', None)
+        kwargs.pop('type', None)
+        super().__init__(option_strings, dest, nargs='?', const=0, default=default, **kwargs)
+    
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values is None:
+            # --fixlevel with no value, use const (0)
+            setattr(namespace, self.dest, self.const)
+        else:
+            # --fixlevel=N or --fixlevel N, try to parse as int
+            try:
+                int_value = int(values)
+                setattr(namespace, self.dest, int_value)
+            except (ValueError, TypeError):
+                # Not a valid integer, this is likely a positional argument
+                # Treat as if --fixlevel had no value (use const)
+                setattr(namespace, self.dest, self.const)
+                # Put the value back for positional argument parsing
+                # This is a workaround: we can't easily put it back into sys.argv
+                # So we show an error message instead
+                parser.error(
+                    f"argument --fixlevel: invalid int value: '{values}'\n"
+                    f"Use --fixlevel=N (e.g., --fixlevel=1) or --fixlevel (defaults to 0)"
+                )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Parse DOCX documents into text blocks for auditing"
@@ -1632,6 +1715,14 @@ def main():
         action="store_true",
         help="Enable debug output for block splitting operations"
     )
+    parser.add_argument(
+        "--fixlevel",
+        action=FixLevelAction,
+        default=None,
+        metavar="N",
+        help="Fixed heading level for splitting (0=all levels, 1=Heading 1 only, etc.). "
+             "Disables smart splitting and merging. Use --fixlevel=N or --fixlevel (defaults to 0)."
+    )
 
     args = parser.parse_args()
 
@@ -1646,7 +1737,7 @@ def main():
 
     # Extract blocks
     print(f"Parsing document: {args.document}")
-    blocks = extract_audit_blocks(args.document, debug=args.debug)
+    blocks = extract_audit_blocks(args.document, debug=args.debug, fixlevel=args.fixlevel)
     print(f"Extracted {len(blocks)} text blocks")
 
     # Print statistics
