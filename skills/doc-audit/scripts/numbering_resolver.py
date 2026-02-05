@@ -372,7 +372,7 @@ class NumberingResolver:
         digits = '零一二三四五六七八九'
         if n <= 0 or n > 99:
             return str(n)
-        if n <= 10:
+        if n < 10:
             return digits[n]
         if n < 20:
             return '十' + (digits[n % 10] if n % 10 else '')
