@@ -4068,7 +4068,7 @@ class AuditEditApplier:
         para_elem.append(etree.fromstring(ref_xml))
         
         # Format: [FALLBACK] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
-        comment_text = f"[FALLBACK] {reason}\n{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        comment_text = f"[FALLBACK]{reason} {{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text} {{SUGGEST}}{item.revised_text}"
         
         self.comments.append({
             'id': comment_id,
@@ -4299,7 +4299,7 @@ class AuditEditApplier:
         
         # Record comment content
         if fallback_reason:
-            comment_text = f"[FALLBACK] {fallback_reason}\n{violation_reason}"
+            comment_text = f"[FALLBACK]{fallback_reason} {violation_reason}"
         else:
             comment_text = violation_reason
         if revised_text:
