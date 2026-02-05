@@ -409,12 +409,17 @@ class AuditEditApplier:
         # Comment management
         self.next_comment_id = 0
         self.comments: List[Dict] = []
-        
+
         # Track change ID management
         self.next_change_id = 0
 
         # Unified timestamp for all track changes and comments in one apply() run
         self.operation_timestamp: str = None
+
+        # Paragraph order cache (initialized in apply())
+        self._para_list: List = []
+        self._para_order: Dict[int, int] = {}
+        self._para_id_list: List[Optional[str]] = []
 
         # Results tracking
         self.results: List[EditResult] = []
@@ -1161,6 +1166,7 @@ class AuditEditApplier:
 
             # Collect runs for this paragraph
             para_runs, para_text = self._collect_runs_info_original(para)
+            para_id = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
 
             # Skip empty paragraphs to match parse_document.py behavior
             if not para_text.strip():
@@ -1169,6 +1175,8 @@ class AuditEditApplier:
             # Add paragraph element reference to each run
             for run in para_runs:
                 run['para_elem'] = para
+                run['host_para_elem'] = para
+                run['host_para_id'] = para_id
                 run['start'] += pos
                 run['end'] += pos
                 runs_info.append(run)
@@ -1336,6 +1344,8 @@ class AuditEditApplier:
                                     'original_text': original_text,
                                     'text': escaped_text,
                                     'para_elem': para,
+                                    'host_para_elem': para,
+                                    'host_para_id': para_id,
                                     'cell_elem': tc,
                                     'row_elem': tr
                                 })
@@ -1359,6 +1369,12 @@ class AuditEditApplier:
                             # Update row_elem to current row
                             for run in cell_runs:
                                 run['row_elem'] = tr
+                                # Override host para to current row cell para
+                                if cell_paras:
+                                    host_para = cell_paras[0]
+                                    host_para_id = host_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                                    run['host_para_elem'] = host_para
+                                    run['host_para_id'] = host_para_id
                         # else: restart outside range, keep empty
                     
                     else:
@@ -1399,6 +1415,8 @@ class AuditEditApplier:
                                     'original_text': original_text,
                                     'text': escaped_text,
                                     'para_elem': para,
+                                    'host_para_elem': para,
+                                    'host_para_id': para_id,
                                     'cell_elem': tc,
                                     'row_elem': tr
                                 })
@@ -1413,6 +1431,12 @@ class AuditEditApplier:
                             cell_text = vmerge_content[grid_col]['text']
                             for run in cell_runs:
                                 run['row_elem'] = tr
+                                # Override host para to current row cell para
+                                if cell_paras:
+                                    host_para = cell_paras[0]
+                                    host_para_id = host_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+                                    run['host_para_elem'] = host_para
+                                    run['host_para_id'] = host_para_id
                         elif cell_text:
                             # Non-empty normal cell ends vMerge region
                             vmerge_content.pop(grid_col, None)
@@ -1609,6 +1633,8 @@ class AuditEditApplier:
                 run['original_text'] = original_text
                 run['text'] = escaped_text
                 run['para_elem'] = para
+                run['host_para_elem'] = para
+                run['host_para_id'] = para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
                 run['cell_elem'] = cell
                 run['row_elem'] = row
                 run['start'] = pos
@@ -1804,6 +1830,48 @@ class AuditEditApplier:
                 order.append(key)
             groups[key]['runs'].append(run)
         return [groups[k] for k in order]
+
+    def _init_para_order(self):
+        """Initialize paragraph order cache for document-order comparisons."""
+        if self.body_elem is None:
+            return
+        self._para_list = list(self._xpath(self.body_elem, './/w:p'))
+        self._para_order = {id(p): i for i, p in enumerate(self._para_list)}
+        self._para_id_list = [
+            p.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
+            for p in self._para_list
+        ]
+
+    def _get_run_doc_key(self, run_elem, para_elem,
+                         para_order: Optional[Dict[int, int]] = None) -> Optional[Tuple[int, int]]:
+        """
+        Get a stable document-order key for a run element.
+
+        Returns (para_index, run_index_in_para) or None if unavailable.
+        This is used to detect inverted ordering when runs are reused
+        across rows (e.g., vMerge continue cells).
+        """
+        if run_elem is None or para_elem is None:
+            return None
+        if para_order is None:
+            para_order = self._para_order
+        if not para_order:
+            self._init_para_order()
+            para_order = self._para_order
+        para_idx = para_order.get(id(para_elem))
+        if para_idx is None:
+            # Refresh cache in case body_elem was replaced in tests
+            self._init_para_order()
+            para_order = self._para_order
+            para_idx = para_order.get(id(para_elem))
+        if para_idx is None:
+            return None
+        try:
+            run_list = list(para_elem.iter(f'{{{NS["w"]}}}r'))
+            run_idx = run_list.index(run_elem)
+        except ValueError:
+            run_idx = 0
+        return (para_idx, run_idx)
     
     def _is_multi_row_json(self, text: str) -> bool:
         """
@@ -4172,9 +4240,150 @@ class AuditEditApplier:
 
         first_run_info = real_runs[0]
         last_run_info = real_runs[-1]
+
+        def _doc_key_for_run(run_info: Dict) -> Optional[Tuple[int, int]]:
+            """Compute document-order key using host para if available, else para_elem."""
+            host_para = run_info.get('host_para_elem')
+            para = run_info.get('para_elem', para_elem)
+            key = None
+            if host_para is not None:
+                key = self._get_run_doc_key(run_info.get('elem'), host_para)
+            if key is None and para is not None and para is not host_para:
+                key = self._get_run_doc_key(run_info.get('elem'), para)
+            return key
+
+        start_key = _doc_key_for_run(first_run_info)
+        end_key = _doc_key_for_run(last_run_info)
+
+        if start_key is not None and end_key is None:
+            # No valid end run to anchor range - fallback to reference-only comment
+            fallback_para = (first_run_info.get('host_para_elem') or
+                             first_run_info.get('para_elem') or
+                             para_elem)
+            if fallback_para is None:
+                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                return 'fallback'
+            ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                <w:commentReference w:id="{comment_id}"/>
+            </w:r>'''
+            fallback_para.append(etree.fromstring(ref_xml))
+            comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
+            if revised_text:
+                comment_text += f"\nSuggestion: {revised_text}"
+            self.comments.append({
+                'id': comment_id,
+                'text': comment_text,
+                'author': author
+            })
+            return 'success'
+
+        if start_key is not None and end_key is not None and end_key < start_key:
+            candidate = None
+            for run_info in reversed(real_runs):
+                cand_key = _doc_key_for_run(run_info)
+                if cand_key is not None and cand_key >= start_key:
+                    candidate = run_info
+                    break
+            if candidate is None:
+                fallback_para = (first_run_info.get('host_para_elem') or
+                                 first_run_info.get('para_elem') or
+                                 para_elem)
+                if fallback_para is None:
+                    print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                    return 'fallback'
+                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                    <w:commentReference w:id="{comment_id}"/>
+                </w:r>'''
+                fallback_para.append(etree.fromstring(ref_xml))
+                comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
+                if revised_text:
+                    comment_text += f"\nSuggestion: {revised_text}"
+                self.comments.append({
+                    'id': comment_id,
+                    'text': comment_text,
+                    'author': author
+                })
+                if self.verbose:
+                    print("  [Debug] ParaId order inverted; fallback to reference-only comment")
+                return 'success'
+            if self.verbose:
+                print("  [Debug] ParaId order inverted; adjusted end run")
+            last_run_info = candidate
+            # Clamp match_end to avoid splitting beyond the adjusted end run
+            match_end = min(match_end, last_run_info.get('end', match_end))
+
         first_run = first_run_info['elem']
         last_run = last_run_info['elem']
         rPr_xml = self._get_rPr_xml(first_run_info.get('rPr'))
+
+        # Host paragraph anchors (for vMerge continue cases where runs are reused)
+        start_host_para = first_run_info.get('host_para_elem')
+        end_host_para = last_run_info.get('host_para_elem')
+        start_use_host = start_host_para is not None and start_host_para is not first_run_info.get('para_elem')
+        end_use_host = end_host_para is not None and end_host_para is not last_run_info.get('para_elem')
+
+        # If any run is a host mismatch (vMerge continue reuse), prefer host-para anchors
+        has_host_mismatch = any(
+            r.get('host_para_elem') is not None and r.get('host_para_elem') is not r.get('para_elem')
+            for r in real_runs
+        )
+        if has_host_mismatch:
+            start_use_host = True
+            end_use_host = True
+
+        if start_use_host and start_host_para is None:
+            start_host_para = first_run_info.get('para_elem', para_elem)
+        if end_use_host and end_host_para is None:
+            end_host_para = last_run_info.get('para_elem', para_elem)
+
+        # Choose a reference paragraph that actually has visible content.
+        reference_para = None
+        for run_info in reversed(real_runs):
+            para_candidate = run_info.get('host_para_elem')
+            if para_candidate is None:
+                para_candidate = run_info.get('para_elem')
+            if para_candidate is None:
+                continue
+            try:
+                _, para_text = self._collect_runs_info_original(para_candidate)
+                if para_text.strip():
+                    reference_para = para_candidate
+                    break
+            except Exception:
+                continue
+        if reference_para is None:
+            reference_para = end_host_para if end_host_para is not None else start_host_para
+            if reference_para is None:
+                reference_para = para_elem
+
+        # If host anchors are inverted, fallback to reference-only comment
+        if start_use_host and end_use_host and start_host_para is not None and reference_para is not None:
+            self._init_para_order()
+            start_idx = self._para_order.get(id(start_host_para))
+            end_idx = self._para_order.get(id(reference_para))
+            if start_idx is not None and end_idx is not None and end_idx < start_idx:
+                fallback_para = start_host_para or para_elem
+                if fallback_para is None:
+                    print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                    return 'fallback'
+                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                    <w:commentReference w:id="{comment_id}"/>
+                </w:r>'''
+                fallback_para.append(etree.fromstring(ref_xml))
+                comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
+                if revised_text:
+                    comment_text += f"\nSuggestion: {revised_text}"
+                self.comments.append({
+                    'id': comment_id,
+                    'text': comment_text,
+                    'author': author
+                })
+                if self.verbose:
+                    print("  [Debug] ParaId order inverted; fallback to reference-only comment")
+                return 'success'
 
         # Get parent paragraphs (may be different in cross-paragraph mode)
         if is_cross_paragraph:
@@ -4213,7 +4422,20 @@ class AuditEditApplier:
         </w:r>''')
         
         # === Handle START position ===
-        if start_revision is not None:
+        if start_use_host:
+            # Insert commentRangeStart at start of host paragraph (no run split)
+            target_para = start_host_para
+            if target_para is None:
+                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                return 'fallback'
+            insert_idx = 0
+            for i, child in enumerate(list(target_para)):
+                if child.tag == f'{{{NS["w"]}}}pPr':
+                    continue
+                insert_idx = i
+                break
+            target_para.insert(insert_idx, range_start)
+        elif start_revision is not None:
             # Start is inside revision: insert commentRangeStart before revision container
             parent = start_revision.getparent()
             if parent is not None:
@@ -4251,7 +4473,17 @@ class AuditEditApplier:
             parent.insert(idx, range_start)
         
         # === Handle END position ===
-        if end_revision is not None:
+        if end_use_host:
+            # Insert commentRangeEnd and reference at end of host paragraph (no run split)
+            target_para = reference_para if reference_para is not None else end_host_para
+            if target_para is None:
+                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                return 'fallback'
+            if self.verbose and reference_para is not None and end_host_para is not None and reference_para is not end_host_para:
+                print("  [Debug] End anchor moved to previous non-empty paragraph")
+            target_para.append(range_end)
+            target_para.append(comment_ref)
+        elif end_revision is not None:
             # End is inside revision: insert commentRangeEnd after revision container
             parent = end_revision.getparent()
             if parent is not None:
@@ -4296,7 +4528,7 @@ class AuditEditApplier:
                 # No split needed: insert commentRangeEnd and reference after last_run
                 parent.insert(idx + 1, range_end)
                 parent.insert(idx + 2, comment_ref)
-        
+
         # Record comment content
         if fallback_reason:
             comment_text = f"[FALLBACK]{fallback_reason} {violation_reason}"
@@ -4374,12 +4606,19 @@ class AuditEditApplier:
                 # Preserve whitespace (Word drops leading/trailing spaces without this)
                 t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
                 t.text = segment_text
+
+        if self.verbose:
+            try:
+                total = len(comments_xml.findall(f'{{{NS["w"]}}}comment'))
+                print(f"[Comments] comments.xml count after merge: {total}")
+            except Exception:
+                pass
         
         # Save via OPC
         blob = etree.tostring(
             comments_xml, xml_declaration=True, encoding='UTF-8'
         )
-        
+
         try:
             comments_part = self.doc.part.part_related_by(RT.COMMENTS)
             comments_part._blob = blob
@@ -4392,6 +4631,12 @@ class AuditEditApplier:
                 self.doc.part.package
             )
             self.doc.part.relate_to(comments_part, RT.COMMENTS)
+
+        if self.verbose:
+            try:
+                print(f"[Comments] Saved {len(self.comments)} comment(s) to comments.xml")
+            except Exception:
+                pass
     
     # ==================== Main Processing ====================
     
@@ -5083,23 +5328,19 @@ class AuditEditApplier:
                     # Check if actual match spans multiple paragraphs
                     para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
 
-                    # Check if match spans multiple table rows (most restrictive)
-                    is_cross_cell = False
-                    if self._check_cross_row_boundary(real_runs):
-                        # Cross-row replace not supported - fallback to comment
-                        if self.verbose:
-                            print(f"  [Cross-row] replace spans multiple rows, fallback to comment")
-                        success_status = 'cross_row_fallback'
-                    # Check if match spans multiple table cells (within same row)
-                    else:
-                        # Detect JSON cell boundaries even if only one cell has text runs.
-                        # This handles cases where empty cells (e.g., stripped row numbers)
-                        # produce boundary markers but no runs with cell_elem.
-                        has_cell_boundary = any(r.get('is_cell_boundary') for r in affected)
-                        is_cross_cell = self._check_cross_cell_boundary(real_runs) or has_cell_boundary
+                    # Check if match spans multiple table rows
+                    is_cross_row = self._check_cross_row_boundary(real_runs)
 
-                        if self.verbose and has_cell_boundary and not self._check_cross_cell_boundary(real_runs):
-                            print(f"  [Cross-cell] Boundary markers detected (empty cells), forcing cell extraction")
+                    # Detect JSON cell boundaries even if only one cell has text runs.
+                    # This handles cases where empty cells (e.g., stripped row numbers)
+                    # produce boundary markers but no runs with cell_elem.
+                    has_cell_boundary = any(r.get('is_cell_boundary') for r in affected)
+                    is_cross_cell = self._check_cross_cell_boundary(real_runs) or has_cell_boundary or is_cross_row
+
+                    if is_cross_row and self.verbose:
+                        print(f"  [Cross-row] replace spans multiple rows, trying cell-by-cell extraction...")
+                    if self.verbose and has_cell_boundary and not self._check_cross_cell_boundary(real_runs):
+                        print(f"  [Cross-cell] Boundary markers detected (empty cells), forcing cell extraction")
 
                     if success_status is None and is_cross_cell:
                         # Try to extract single-cell edit first
@@ -5290,6 +5531,11 @@ class AuditEditApplier:
                                 if self.verbose:
                                     print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
                                 success_status = 'cross_cell_fallback'
+                        if success_status is None and is_cross_row:
+                            # Cell extraction failed for cross-row content
+                            if self.verbose:
+                                print(f"  [Cross-row] Cell extraction failed, fallback to comment")
+                            success_status = 'cross_row_fallback'
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs
                         if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
@@ -5478,6 +5724,9 @@ class AuditEditApplier:
         # 2. Load document
         self.doc = Document(str(self.source_path))
         self.body_elem = self.doc._element.body
+
+        # 2.5 Initialize paragraph order cache
+        self._init_para_order()
         
         # 3. Initialize IDs
         self._init_comment_id()
@@ -5500,8 +5749,21 @@ class AuditEditApplier:
                 if not result.success:
                     print(f"  [{status}]", end="")
                     print(f" {result.error_message}")
-        
-        # 5. Save comments
+
+        # 5. Debug: count comment markers in document
+        if self.verbose:
+            try:
+                rs = self._xpath(self.body_elem, './/w:commentRangeStart')
+                re = self._xpath(self.body_elem, './/w:commentRangeEnd')
+                rf = self._xpath(self.body_elem, './/w:commentReference')
+                print(
+                    f"[Comments] Markers in document.xml: "
+                    f"rangeStart={len(rs)} rangeEnd={len(re)} reference={len(rf)}"
+                )
+            except Exception:
+                pass
+
+        # 6. Save comments
         self._save_comments()
         
         return self.results

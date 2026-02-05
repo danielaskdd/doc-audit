@@ -218,6 +218,10 @@ def create_mock_applier():
         applier.next_change_id = 0
         applier.next_comment_id = 0
         applier.comments = []
+        applier.body_elem = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        applier._para_list = []
+        applier._para_order = {}
+        applier._para_id_list = []
         # Set a fixed timestamp for tests
         applier.operation_timestamp = '2025-01-01T00:00:00Z'
         return applier

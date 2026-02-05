@@ -5,27 +5,22 @@ ABOUTME: Unit tests for apply_audit_edits.py
 
 import sys
 import json
-import tempfile
 from pathlib import Path
-
-TESTS_DIR = Path(__file__).parent
-sys.path.insert(0, str(TESTS_DIR))
-
 import pytest
 from lxml import etree
 from unittest.mock import patch
 
-import _apply_audit_edits_helpers as helpers
 from _apply_audit_edits_helpers import (
     apply_module, AuditEditApplier, NS, DRAWING_PATTERN,
-    strip_auto_numbering, EditItem, EditResult, NSMAP,
+    strip_auto_numbering, EditResult, NSMAP,
     create_paragraph_xml, create_paragraph_with_inline_image,
     create_paragraph_with_anchor_image, create_paragraph_with_track_changes,
     create_mock_applier, create_edit_item, get_test_author,
-    create_mock_body_with_paragraphs, create_table_cell_with_paragraphs,
-    create_table_with_cells, create_multi_row_table,
+    create_mock_body_with_paragraphs
 )
 
+TESTS_DIR = Path(__file__).parent
+sys.path.insert(0, str(TESTS_DIR))
 
 class TestCollectRunsInfoOriginal:
     """Tests for _collect_runs_info_original method"""

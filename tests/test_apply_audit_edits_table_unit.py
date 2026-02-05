@@ -21,6 +21,58 @@ from _apply_audit_edits_helpers import (  # noqa: E402
 )
 
 
+def create_table_with_vmerge_continue(para_ids):
+    """Create a 2-row table with a vMerge continue cell in row 2, col 2."""
+    table_xml = f'''<w:tbl xmlns:w="{NS['w']}" xmlns:w14="{NS['w14']}">
+        <w:tblGrid>
+            <w:gridCol/>
+            <w:gridCol/>
+            <w:gridCol/>
+        </w:tblGrid>
+        <w:tr>
+            <w:tc>
+                <w:p w14:paraId="{para_ids[0]}">
+                    <w:r><w:t>R1C1</w:t></w:r>
+                </w:p>
+            </w:tc>
+            <w:tc>
+                <w:tcPr>
+                    <w:vMerge w:val="restart"/>
+                </w:tcPr>
+                <w:p w14:paraId="{para_ids[1]}">
+                    <w:r><w:t>Merged</w:t></w:r>
+                </w:p>
+            </w:tc>
+            <w:tc>
+                <w:p w14:paraId="{para_ids[2]}">
+                    <w:r><w:t>R1C3</w:t></w:r>
+                </w:p>
+            </w:tc>
+        </w:tr>
+        <w:tr>
+            <w:tc>
+                <w:p w14:paraId="{para_ids[3]}">
+                    <w:r><w:t>R2C1</w:t></w:r>
+                </w:p>
+            </w:tc>
+            <w:tc>
+                <w:tcPr>
+                    <w:vMerge/>
+                </w:tcPr>
+                <w:p w14:paraId="{para_ids[4]}">
+                    <w:r><w:t></w:t></w:r>
+                </w:p>
+            </w:tc>
+            <w:tc>
+                <w:p w14:paraId="{para_ids[5]}">
+                    <w:r><w:t>R2C3</w:t></w:r>
+                </w:p>
+            </w:tc>
+        </w:tr>
+    </w:tbl>'''
+    return etree.fromstring(table_xml)
+
+
 class TestTableDetection:
     """Tests for table detection helper methods"""
 
@@ -980,6 +1032,102 @@ class TestStripTableRowNumbering:
 
         assert was_stripped is True
         assert stripped == expected
+
+
+# ============================================================
+# Comment Range Ordering (vMerge continue)
+# ============================================================
+
+class TestManualCommentOrdering:
+    def test_vmerge_continue_end_ordering(self):
+        """Comment range should not be inverted when end is in vMerge continue cell."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_vmerge_continue(
+            ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="P1"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'P6'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+
+        violation_text = 'R2C1", "Merged'
+        pos = combined_text.find(violation_text)
+        assert pos != -1
+
+        status = applier._apply_manual(
+            start_para,
+            violation_text,
+            "Reason",
+            "",
+            runs_info,
+            pos,
+            "Test",
+            is_cross_paragraph=True
+        )
+        assert status == 'success'
+
+        all_elems = list(body.iter())
+        start_elems = list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))
+        end_elems = list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))
+
+        assert len(start_elems) == 1
+        assert len(end_elems) == 1
+        assert all_elems.index(start_elems[0]) < all_elems.index(end_elems[0])
+
+    def test_reference_only_fallback_when_no_valid_end(self):
+        """When no valid end run is found, fallback to reference-only comment."""
+        applier = create_mock_applier()
+
+        # Build paragraph with two runs
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p.set(f'{{{NS["w14"]}}}paraId', 'AAA')
+        r1 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t1 = etree.SubElement(r1, f'{{{NS["w"]}}}t')
+        t1.text = 'AAA'
+        r2 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t2 = etree.SubElement(r2, f'{{{NS["w"]}}}t')
+        t2.text = 'BBB'
+
+        applier.body_elem = body
+
+        orig_runs_info, _ = applier._collect_runs_info_original(p)
+        violation_text = 'AAABBB'
+        match_start = 0
+
+        # Force end_key to be None by stubbing _get_run_doc_key
+        first_run_elem = orig_runs_info[0]['elem']
+
+        def fake_get_run_doc_key(run_elem, para_elem, para_order=None):
+            if run_elem is first_run_elem:
+                return (1, 0)
+            return None
+
+        applier._get_run_doc_key = fake_get_run_doc_key
+
+        status = applier._apply_manual(
+            p,
+            violation_text,
+            "Reason",
+            "",
+            orig_runs_info,
+            match_start,
+            "Test",
+            is_cross_paragraph=False
+        )
+
+        assert status == 'success'
+        assert list(body.iter(f'{{{NS["w"]}}}commentRangeStart')) == []
+        assert list(body.iter(f'{{{NS["w"]}}}commentRangeEnd')) == []
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
 
 
 # ============================================================
