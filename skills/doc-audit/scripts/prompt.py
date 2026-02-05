@@ -36,14 +36,14 @@ Instructions:
    - The revised text based on fix_action
 
 violation_text guidelines:
-- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
-- Keep subscript and superscript formatting as in the original text, i.e., keep <sub> and <sup> tags and do not convert to plain text
+- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
+- Preserve the original subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to plain text.
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
 - If an entire section is in violation, select the first paragraph as the violation_text
 - For table content in JSON format
     - Report violation_text at cell level without JSON format if cell content is long enough for unique matching
-    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row(i.e., starting with '[' )
+    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
@@ -183,13 +183,13 @@ Instructions:
 6. Mark fix_action as "manual" since resolution requires human judgment
 
 violation_text guidelines:
-- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence, preserving all line breaks, tabs, and other whitespace characters.
-- Keep subscript and superscript formatting as in the original text, i.e., keep <sub> and <sup> tags and do not convert to plain text
+- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
+- Preserve the original subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to plain text.
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
 - For table content in JSON format
     - Report violation_text at cell level without JSON format if cell content is long enough for unique matching
-    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row(i.e., starting with '[' )
+    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
