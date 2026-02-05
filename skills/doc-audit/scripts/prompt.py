@@ -36,7 +36,7 @@ Instructions:
    - The revised text based on fix_action
 
 violation_text guidelines:
-- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
+- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
 - Preserve the original subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to plain text.
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
