@@ -1639,46 +1639,6 @@ def save_blocks_json(blocks: list, output_path: str, metadata: dict = None):
         print(f"Removed existing manifest: {manifest_path}")
 
 
-class FixLevelAction(argparse.Action):
-    """
-    Custom action for --fixlevel parameter that handles optional integer values.
-    
-    Accepts:
-    - --fixlevel=N (explicit value)
-    - --fixlevel (no value, defaults to 0)
-    - no --fixlevel (defaults to None)
-    
-    Rejects non-integer values (they are treated as positional arguments).
-    """
-    def __init__(self, option_strings, dest, default=None, **kwargs):
-        # Remove nargs, const, type from kwargs since we handle them ourselves
-        kwargs.pop('nargs', None)
-        kwargs.pop('const', None)
-        kwargs.pop('type', None)
-        super().__init__(option_strings, dest, nargs='?', const=0, default=default, **kwargs)
-    
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values is None:
-            # --fixlevel with no value, use const (0)
-            setattr(namespace, self.dest, self.const)
-        else:
-            # --fixlevel=N or --fixlevel N, try to parse as int
-            try:
-                int_value = int(values)
-                setattr(namespace, self.dest, int_value)
-            except (ValueError, TypeError):
-                # Not a valid integer, this is likely a positional argument
-                # Treat as if --fixlevel had no value (use const)
-                setattr(namespace, self.dest, self.const)
-                # Put the value back for positional argument parsing
-                # This is a workaround: we can't easily put it back into sys.argv
-                # So we show an error message instead
-                parser.error(
-                    f"argument --fixlevel: invalid int value: '{values}'\n"
-                    f"Use --fixlevel=N (e.g., --fixlevel=1) or --fixlevel (defaults to 0)"
-                )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Parse DOCX documents into text blocks for auditing"
@@ -1717,12 +1677,46 @@ def main():
     )
     parser.add_argument(
         "--fixlevel",
-        action=FixLevelAction,
-        default=None,
         metavar="N",
+        type=int,
+        default=None,
         help="Fixed heading level for splitting (0=all levels, 1=Heading 1 only, etc.). "
-             "Disables smart splitting and merging. Use --fixlevel=N or --fixlevel (defaults to 0)."
+             "Disables smart splitting and merging. Use --fixlevel=N (e.g., --fixlevel=1)."
     )
+
+    def _is_int_token(value: str) -> bool:
+        try:
+            int(value)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _validate_fixlevel_args():
+        argv = sys.argv[1:]
+        for token in argv:
+            if token == "--fixlevel":
+                # Always reject space-separated usage to avoid consuming document path.
+                parser.error(
+                    "argument --fixlevel: value must be provided with '='\n"
+                    "Use --fixlevel=N (e.g., --fixlevel=1).\n"
+                    "N must be an integer >= 0.\n"
+                    "Meaning: N=0 splits at all heading levels; N>0 splits only at heading levels <= N.\n"
+                    "Note: fixlevel disables smart splitting, merging, and table splitting.\n"
+                    "Example: parse_document.py --fixlevel=1 document.docx"
+                )
+            if token.startswith("--fixlevel="):
+                value = token.split("=", 1)[1]
+                if value == "" or not _is_int_token(value):
+                    parser.error(
+                        f"argument --fixlevel: invalid int value: '{value}'\n"
+                        "Use --fixlevel=N (e.g., --fixlevel=1).\n"
+                        "N must be an integer >= 0.\n"
+                        "Meaning: N=0 splits at all heading levels; N>0 splits only at heading levels <= N.\n"
+                        "Note: fixlevel disables smart splitting, merging, and table splitting."
+                    )
+                break
+
+    _validate_fixlevel_args()
 
     args = parser.parse_args()
 
