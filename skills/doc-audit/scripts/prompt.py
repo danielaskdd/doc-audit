@@ -45,8 +45,8 @@ violation_text guidelines:
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
 - If an entire section is in violation, select the first paragraph as the violation_text
-- For table content in JSON format
-    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching
+- For violation_text in table content of JSON format
+    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
     - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
@@ -195,8 +195,8 @@ violation_text guidelines:
     - Example 2: Keep `65×12×10<sup>-6</sup>/h＝7.8×10<sup>-4</sup>/h` as is, do not convert to `65×12×10-6/h＝7.8×10-4/h`
 - Do not use ellipses to replace or omit any part of the original text
 - If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
-- For table content in JSON format
-    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching
+- For violation_text in table content of JSON format
+    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
     - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
 - Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
