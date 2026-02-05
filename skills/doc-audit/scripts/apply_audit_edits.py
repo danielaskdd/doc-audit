@@ -4120,7 +4120,8 @@ class AuditEditApplier:
                      orig_runs_info: List[Dict],
                      orig_match_start: int,
                      author: str,
-                     is_cross_paragraph: bool = False) -> str:
+                     is_cross_paragraph: bool = False,
+                     fallback_reason: Optional[str] = None) -> str:
         """
         Apply manual operation by adding a Word comment.
         
@@ -4297,7 +4298,10 @@ class AuditEditApplier:
                 parent.insert(idx + 2, comment_ref)
         
         # Record comment content
-        comment_text = violation_reason
+        if fallback_reason:
+            comment_text = f"[FALLBACK] {fallback_reason}\n{violation_reason}"
+        else:
+            comment_text = violation_reason
         if revised_text:
             comment_text += f"\nSuggestion: {revised_text}"
         
@@ -4916,7 +4920,7 @@ class AuditEditApplier:
                     if target_para is None:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
-                            reason = "Violation text not found in body/table boundary block"
+                            reason = "Violation text not found(C)."  # Table/body boundary crossed
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
@@ -4975,9 +4979,9 @@ class AuditEditApplier:
                     total_segments = tables_count + body_count
                     
                     if total_segments == 1:
-                        reason = "Violation text not found in mono block"
+                        reason = "Violation text not found(S)."  # Single segment
                     else:
-                        reason = f"Violation text not found in {total_segments}-segment block"
+                        reason = f"Violation text not found(M)."  # Multiple segments
                     
                     # For manual fix_action, text not found is expected (not an error)
                     if item.fix_action == 'manual':
@@ -5348,7 +5352,7 @@ class AuditEditApplier:
                 return EditResult(True, item)
             elif success_status == 'conflict':
                 # Text overlaps with previous rule modification - mark as warning
-                reason = "Text overlaps with previous rule modification"
+                reason = "Multiple changes overlap."
                 self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
                     print(f"  [Conflict] {reason}")
@@ -5370,7 +5374,8 @@ class AuditEditApplier:
                     item.violation_reason, revised_text,
                     matched_runs_info, matched_start,
                     item_author,
-                    is_cross_paragraph
+                    is_cross_paragraph,
+                    fallback_reason=reason
                 )
                 if manual_status == 'success':
                     if self.verbose:
@@ -5405,14 +5410,15 @@ class AuditEditApplier:
                 )
             elif success_status == 'cross_cell_fallback':
                 # Cross-cell delete/replace not supported - fallback to manual comment
-                reason = "Cross-cell track change not supported, fallback to comment"
+                reason = "Cross-cell track change."
                 # Apply manual comment instead (same row comment is supported)
                 manual_status = self._apply_manual(
                     target_para, violation_text,
                     item.violation_reason, revised_text,
                     matched_runs_info, matched_start,
                     item_author,
-                    is_cross_paragraph
+                    is_cross_paragraph,
+                    fallback_reason=reason
                 )
                 if manual_status == 'success':
                     if self.verbose:

@@ -410,6 +410,27 @@ class TestApplyManual:
         assert len(range_start) == 1
         assert len(range_end) == 1
 
+    def test_manual_comment_with_fallback_reason(self):
+        """Test fallback prefix is added when fallback_reason is provided"""
+        applier = create_mock_applier()
+        para = create_paragraph_xml("This is problematic text here")
+
+        runs_info, _ = applier._collect_runs_info_original(para)
+
+        result = applier._apply_manual(
+            para, "problematic text",
+            "This text is wrong", "Fix suggestion",
+            runs_info, 8,
+            get_test_author(applier),
+            fallback_reason="Cross-cell track change not supported, fallback to comment"
+        )
+
+        assert result == 'success'
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'].startswith(
+            "[FALLBACK] Cross-cell track change not supported, fallback to comment\n"
+        )
+
 
 # ============================================================
 # Tests: _apply_delete with Images
