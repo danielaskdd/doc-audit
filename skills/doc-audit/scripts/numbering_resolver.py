@@ -77,11 +77,18 @@ class NumberingResolver:
                         
                         lvl_text_elem = lvl.find('w:lvlText', NSMAP)
                         lvl_text = lvl_text_elem.get(f'{{{NSMAP["w"]}}}val') if lvl_text_elem is not None else '%1.'
-                        
+
+                        is_lgl_elem = lvl.find('w:isLgl', NSMAP)
+                        is_lgl = False
+                        if is_lgl_elem is not None:
+                            val = is_lgl_elem.get(f'{{{NSMAP["w"]}}}val')
+                            is_lgl = val is None or val not in ('0', 'false')
+
                         levels[ilvl] = {
                             'start': start,
                             'numFmt': num_fmt,
-                            'lvlText': lvl_text
+                            'lvlText': lvl_text,
+                            'isLgl': is_lgl
                         }
                     
                     self.abstract_nums[abstract_id] = levels
@@ -328,15 +335,18 @@ class NumberingResolver:
         try:
             lvl_text = levels[ilvl]['lvlText']
             result = lvl_text
-            
+            current_is_lgl = levels[ilvl].get('isLgl', False)
+
             for i in range(ilvl + 1):
                 if i in levels and i in self.counters.get(num_id, {}):
                     num_fmt = levels[i]['numFmt']
+                    if current_is_lgl and i < ilvl:
+                        num_fmt = 'decimal'
                     count = self.counters[num_id][i]
                     converter = self.FORMAT_CONVERTERS.get(num_fmt, lambda n: str(n))
                     formatted = converter(count)
                     result = result.replace(f'%{i+1}', formatted)
-            
+
             return result
         except Exception:
             return ""
