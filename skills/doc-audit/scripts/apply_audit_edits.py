@@ -1289,17 +1289,11 @@ class AuditEditApplier:
                             reached_end = True
                             break
                 
-                # Expand in-range for vertical merges to keep row JSON consistent
-                effective_in_range = cell_in_range
-                if not effective_in_range and in_range and grid_col in vmerge_content:
-                    # vMerge continue/empty cells may lack paraId; still inherit content within range
-                    effective_in_range = True
-
                 # Collect cell content if in range
                 cell_runs = []
                 cell_text = ''
                 
-                if effective_in_range:
+                if cell_in_range:
                     # Mark all columns spanned by this cell as in range
                     cols_in_range.update(range(grid_col, grid_col + grid_span))
                     # Determine cell content based on vMerge type
@@ -1358,7 +1352,6 @@ class AuditEditApplier:
                     
                     elif vmerge_type == 'continue':
                         # Merge continue: copy from vmerge_content if available
-                        anchor_para = cell_paras[0] if cell_paras else None
                         if grid_col in vmerge_content:
                             # Deep copy runs to avoid reference issues
                             cell_runs = [dict(r) for r in vmerge_content[grid_col]['runs']]
@@ -1366,8 +1359,6 @@ class AuditEditApplier:
                             # Update row_elem to current row
                             for run in cell_runs:
                                 run['row_elem'] = tr
-                                if anchor_para is not None:
-                                    run['anchor_para'] = anchor_para
                         # else: restart outside range, keep empty
                     
                     else:
@@ -1418,13 +1409,10 @@ class AuditEditApplier:
                         
                         # Check if empty cell inherits from vMerge (TableExtractor logic)
                         if not cell_text and grid_col in vmerge_content:
-                            anchor_para = cell_paras[0] if cell_paras else None
                             cell_runs = [dict(r) for r in vmerge_content[grid_col]['runs']]
                             cell_text = vmerge_content[grid_col]['text']
                             for run in cell_runs:
                                 run['row_elem'] = tr
-                                if anchor_para is not None:
-                                    run['anchor_para'] = anchor_para
                         elif cell_text:
                             # Non-empty normal cell ends vMerge region
                             vmerge_content.pop(grid_col, None)
@@ -4126,26 +4114,6 @@ class AuditEditApplier:
         })
         
         return True
-
-    def _append_comment_end(self, para_elem, comment_id: int) -> bool:
-        """
-        Append commentRangeEnd and commentReference at the end of a paragraph.
-        Used when the end run cannot be safely split (e.g., vMerge continue anchor).
-        """
-        if para_elem is None:
-            return False
-        
-        range_end = etree.fromstring(
-            f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-        )
-        comment_ref = etree.fromstring(f'''<w:r xmlns:w="{NS['w']}">
-            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-            <w:commentReference w:id="{comment_id}"/>
-        </w:r>''')
-        
-        para_elem.append(range_end)
-        para_elem.append(comment_ref)
-        return True
     
     def _apply_manual(self, para_elem, violation_text: str,
                      violation_reason: str, revised_text: str,
@@ -4207,7 +4175,6 @@ class AuditEditApplier:
         first_run = first_run_info['elem']
         last_run = last_run_info['elem']
         rPr_xml = self._get_rPr_xml(first_run_info.get('rPr'))
-        anchor_end_para = last_run_info.get('anchor_para')
 
         # Get parent paragraphs (may be different in cross-paragraph mode)
         if is_cross_paragraph:
@@ -4284,13 +4251,7 @@ class AuditEditApplier:
             parent.insert(idx, range_start)
         
         # === Handle END position ===
-        if anchor_end_para is not None:
-            # vMerge continue anchor: end at paragraph boundary to avoid reversed range
-            if self.verbose:
-                anchor_id = anchor_end_para.get(f'{{{NS["w14"]}}}paraId')
-                print(f"  [vMerge] Using anchor_para for comment end (paraId={anchor_id})")
-            self._append_comment_end(anchor_end_para, comment_id)
-        elif end_revision is not None:
+        if end_revision is not None:
             # End is inside revision: insert commentRangeEnd after revision container
             parent = end_revision.getparent()
             if parent is not None:
@@ -5124,15 +5085,13 @@ class AuditEditApplier:
 
                     # Check if match spans multiple table rows (most restrictive)
                     is_cross_cell = False
-                    is_cross_row = self._check_cross_row_boundary(real_runs)
-                    fallback_status = 'cross_row_fallback' if is_cross_row else 'cross_cell_fallback'
-                    if is_cross_row:
-                        # Cross-row replace: try cell-by-cell extraction across rows
+                    if self._check_cross_row_boundary(real_runs):
+                        # Cross-row replace not supported - fallback to comment
                         if self.verbose:
-                            print(f"  [Cross-row] replace spans multiple rows, trying cell-by-cell replace")
-                        is_cross_cell = True
+                            print(f"  [Cross-row] replace spans multiple rows, fallback to comment")
+                        success_status = 'cross_row_fallback'
+                    # Check if match spans multiple table cells (within same row)
                     else:
-                        # Check if match spans multiple table cells (within same row)
                         # Detect JSON cell boundaries even if only one cell has text runs.
                         # This handles cases where empty cells (e.g., stripped row numbers)
                         # produce boundary markers but no runs with cell_elem.
@@ -5181,7 +5140,7 @@ class AuditEditApplier:
                                 else:
                                     success_status = 'cross_cell_fallback'
                             else:
-                                success_status = fallback_status
+                                success_status = 'cross_cell_fallback'
                         else:
                             # Try multi-cell extraction - changes distributed across cells
                             multi_cells = self._try_extract_multi_cell_edits(
@@ -5325,12 +5284,12 @@ class AuditEditApplier:
                                             print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
                                 else:
                                     # All cells failed - fallback to overall comment
-                                    success_status = fallback_status
+                                    success_status = 'cross_cell_fallback'
                             else:
                                 # Changes cross cell boundaries - fallback to comment
                                 if self.verbose:
                                     print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
-                                success_status = fallback_status
+                                success_status = 'cross_cell_fallback'
                     elif len(para_elems) > 1:
                         # Actually spans multiple paragraphs
                         if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):

@@ -428,7 +428,7 @@ class TestApplyManual:
         assert result == 'success'
         assert len(applier.comments) == 1
         assert applier.comments[0]['text'].startswith(
-            "[FALLBACK]Cross-cell track change not supported, fallback to comment This text is wrong\n"
+            "[FALLBACK] Cross-cell track change not supported, fallback to comment\n"
         )
 
 
