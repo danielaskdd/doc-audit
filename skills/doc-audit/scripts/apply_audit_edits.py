@@ -28,7 +28,7 @@ from utils import sanitize_xml_string
 # ============================================================
 
 # Set to a specific marker string to WATCH
-DEBUG_MARKER = ""
+DEBUG_MARKER = "产品表面不允许有金属丝、金属屑、杂物及其它多余物"
 
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -2853,12 +2853,21 @@ class AuditEditApplier:
         return etree.tostring(rPr_elem, encoding='unicode')
 
     def _append_del_elements(self, new_elements: List[etree.Element],
-                             del_text: str, rPr_xml: str, author: str):
-        """Append deletion elements for del_text into new_elements."""
+                             del_text: str, rPr_xml: str, author: str,
+                             change_id: Optional[str] = None):
+        """Append deletion elements for del_text into new_elements.
+        
+        Args:
+            new_elements: List to append deletion elements to
+            del_text: Text to delete
+            rPr_xml: Run properties XML
+            author: Author name
+            change_id: Optional pre-generated change ID. If None, generates new ID.
+        """
         if not del_text:
             return
 
-        change_id = self._get_next_change_id()
+        change_id = change_id or self._get_next_change_id()
         run_or_container = self._create_run(del_text, rPr_xml)
 
         if run_or_container.tag == 'container':
@@ -3444,23 +3453,32 @@ class AuditEditApplier:
         return container
     
     def _replace_runs(self, _para_elem, affected_runs: List[Dict],
-                     new_elements: List[etree.Element]):
-        """Replace affected runs with new elements in the paragraph"""
+                     new_elements: List[etree.Element]) -> bool:
+        """
+        Replace affected runs with new elements in the paragraph.
+        
+        Returns:
+            True if replacement succeeded, False if DOM operation failed
+        """
         if not affected_runs or not new_elements:
-            return
+            return False
         
         first_run = affected_runs[0]['elem']
         parent = first_run.getparent()
         
         # Safety check: if element is no longer in DOM, skip
         if parent is None:
-            return
+            if self.verbose:
+                print("  [Warning] _replace_runs failed: first_run has no parent")
+            return False
         
         try:
             insert_idx = list(parent).index(first_run)
         except ValueError:
             # Element no longer in parent
-            return
+            if self.verbose:
+                print("  [Warning] _replace_runs failed: first_run not in parent")
+            return False
         
         # Remove old runs
         for info in affected_runs:
@@ -3473,6 +3491,8 @@ class AuditEditApplier:
         # Insert new elements
         for i, elem in enumerate(new_elements):
             parent.insert(insert_idx + i, elem)
+        
+        return True
     
     def _check_overlap_with_revisions(self, affected_runs: List[Dict]) -> bool:
         """
@@ -3540,23 +3560,36 @@ class AuditEditApplier:
 
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         if not affected:
+            if self.verbose:
+                print("  [Cross-paragraph delete] No affected runs found")
             return 'cross_paragraph_fallback'
 
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
+            if self.verbose:
+                print("  [Cross-paragraph delete] No real runs after filtering")
             return 'cross_paragraph_fallback'
 
         # Do not apply cross-paragraph delete in table mode
         if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+            if self.verbose:
+                print("  [Cross-paragraph delete] Table mode detected, fallback")
             return 'cross_paragraph_fallback'
 
         # Check overlap with existing revisions
         if self._check_overlap_with_revisions(real_runs):
+            if self.verbose:
+                print("  [Cross-paragraph delete] Overlap with existing revisions")
             return 'conflict'
 
         para_groups = self._group_runs_by_paragraph(real_runs)
         if not para_groups:
+            if self.verbose:
+                print("  [Cross-paragraph delete] No paragraph groups")
             return 'cross_paragraph_fallback'
+
+        if self.verbose:
+            print(f"  [Cross-paragraph delete] Processing {len(para_groups)} paragraph(s)")
 
         prepared = []
         for group in para_groups:
@@ -3566,13 +3599,17 @@ class AuditEditApplier:
             # Identify affected runs within this paragraph
             first_run = None
             last_run = None
+            affected_runs_in_para = []
             for run in para_runs:
                 if run['end'] > match_start and run['start'] < match_end:
                     if first_run is None:
                         first_run = run
                     last_run = run
+                    affected_runs_in_para.append(run)
 
             if first_run is None or last_run is None:
+                if self.verbose:
+                    print(f"  [Cross-paragraph delete] Skipping paragraph: no affected runs")
                 continue
 
             rPr_xml = self._get_rPr_xml(first_run.get('rPr'))
@@ -3588,9 +3625,7 @@ class AuditEditApplier:
 
             # Build deleted text from affected runs in this paragraph
             del_parts = []
-            for run in para_runs:
-                if run['end'] <= match_start or run['start'] >= match_end:
-                    continue
+            for run in affected_runs_in_para:
                 if run.get('is_drawing'):
                     del_parts.append(run['text'])
                     continue
@@ -3606,25 +3641,59 @@ class AuditEditApplier:
 
             del_text = ''.join(del_parts)
             if not del_text:
-                return 'cross_paragraph_fallback'
+                if self.verbose:
+                    print(f"  [Cross-paragraph delete] Skipping paragraph: no text to delete")
+                continue
 
             prepared.append({
                 'para_elem': para_elem,
-                'para_runs': para_runs,
+                'affected_runs': affected_runs_in_para,
                 'rPr_xml': rPr_xml,
                 'before_text': before_text,
                 'del_text': del_text,
                 'after_text': after_text,
             })
 
-        for item in prepared:
+        if not prepared:
+            if self.verbose:
+                print("  [Cross-paragraph delete] No paragraphs prepared for deletion")
+            return 'cross_paragraph_fallback'
+
+        # Pre-generate shared change_id and comment_id for unified deletion
+        shared_change_id = self._get_next_change_id()
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+
+        # Apply deletions and track success
+        success_count = 0
+        is_first_para = True
+        is_last_para = False
+        
+        for item_idx, item in enumerate(prepared):
             para_elem = item['para_elem']
-            para_runs = item['para_runs']
+            affected_runs = item['affected_runs']
             rPr_xml = item['rPr_xml']
             before_text = item['before_text']
             del_text = item['del_text']
             after_text = item['after_text']
+            
+            is_last_para = (item_idx == len(prepared) - 1)
 
+            # Debug: verify elem references before _replace_runs
+            if self.verbose:
+                print(f"    [Debug] Paragraph {item_idx + 1}/{len(prepared)} has {len(affected_runs)} runs to replace:")
+                for run_idx, run in enumerate(affected_runs):
+                    elem = run.get('elem')
+                    actual_parent = elem.getparent() if elem is not None else None
+                    expected_para = run.get('para_elem')
+                    if actual_parent is not None:
+                        parent_tag = actual_parent.tag.split('}')[-1] if '}' in actual_parent.tag else actual_parent.tag
+                    else:
+                        parent_tag = 'None'
+                    print(f"      Run {run_idx}: has_elem={elem is not None}, "
+                          f"parent_tag={parent_tag}, "
+                          f"matches_para_elem={actual_parent is expected_para}")
+            
             # Build new elements for this paragraph
             new_elements = []
 
@@ -3635,23 +3704,30 @@ class AuditEditApplier:
                 else:
                     new_elements.append(run_or_container)
 
-            # Comment range start
-            comment_id = self.next_comment_id
-            self.next_comment_id += 1
-            comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-            new_elements.append(etree.fromstring(comment_start_xml))
+            # Comment range start (only for first paragraph)
+            if is_first_para:
+                comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+                new_elements.append(etree.fromstring(comment_start_xml))
 
-            # Deleted text
-            self._append_del_elements(new_elements, del_text, rPr_xml, author)
+            # Deleted text with shared change_id
+            if self.verbose:
+                print(f"    [Debug] Creating deletion elements for text: {repr(del_text[:50])}... (shared_change_id={shared_change_id})")
+            self._append_del_elements(new_elements, del_text, rPr_xml, author, change_id=shared_change_id)
+            
+            # Debug: verify deletion elements were created
+            if self.verbose:
+                del_count = sum(1 for elem in new_elements if elem.tag == f'{{{NS["w"]}}}del')
+                print(f"    [Debug] Created {del_count} <w:del> elements, total new_elements={len(new_elements)}")
 
-            # Comment range end and reference
-            comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-            new_elements.append(etree.fromstring(comment_end_xml))
-            comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                <w:commentReference w:id="{comment_id}"/>
-            </w:r>'''
-            new_elements.append(etree.fromstring(comment_ref_xml))
+            # Comment range end and reference (only for last paragraph)
+            if is_last_para:
+                comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+                new_elements.append(etree.fromstring(comment_end_xml))
+                comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                    <w:commentReference w:id="{comment_id}"/>
+                </w:r>'''
+                new_elements.append(etree.fromstring(comment_ref_xml))
 
             if after_text:
                 run_or_container = self._create_run(after_text, rPr_xml)
@@ -3660,14 +3736,71 @@ class AuditEditApplier:
                 else:
                     new_elements.append(run_or_container)
 
-            self._replace_runs(para_elem, para_runs, new_elements)
+            # Replace runs and check success
+            if self.verbose:
+                print(f"    [Debug] About to call _replace_runs with {len(affected_runs)} affected runs and {len(new_elements)} new elements")
+            
+            replace_success = self._replace_runs(para_elem, affected_runs, new_elements)
+            
+            if self.verbose:
+                print(f"    [Debug] _replace_runs returned: {replace_success}")
+                
+            if replace_success:
+                # Verify elements were actually inserted
+                if self.verbose:
+                    # Count <w:del> elements in the paragraph after replacement
+                    del_elements_in_para = para_elem.findall(f'{{{NS["w"]}}}del')
+                    print(f"    [Debug] After replacement, paragraph has {len(del_elements_in_para)} <w:del> elements")
+                    if del_elements_in_para:
+                        # Show first <w:del> element structure
+                        first_del = del_elements_in_para[0]
+                        del_xml_preview = etree.tostring(first_del, encoding='unicode')[:200]
+                        print(f"    [Debug] First <w:del> element: {del_xml_preview}...")
 
-            # Record comment
-            self.comments.append({
-                'id': comment_id,
-                'text': violation_reason,
-                'author': f"{author}-R"
-            })
+                # For non-last paragraphs, mark paragraph mark (¶) as deleted
+                # so Word merges consecutive deleted paragraphs into one unified deletion.
+                # Without this, Word displays each paragraph's deletion separately.
+                if not is_last_para:
+                    pPr = para_elem.find(f'{{{NS["w"]}}}pPr')
+                    if pPr is None:
+                        pPr = etree.SubElement(para_elem, f'{{{NS["w"]}}}pPr')
+                        # pPr must be the first child of w:p
+                        para_elem.insert(0, pPr)
+                    rPr_in_pPr = pPr.find(f'{{{NS["w"]}}}rPr')
+                    if rPr_in_pPr is None:
+                        rPr_in_pPr = etree.SubElement(pPr, f'{{{NS["w"]}}}rPr')
+                    del_mark = etree.SubElement(rPr_in_pPr, f'{{{NS["w"]}}}del')
+                    del_mark.set(f'{{{NS["w"]}}}id', shared_change_id)
+                    del_mark.set(f'{{{NS["w"]}}}author', author)
+                    del_mark.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+                    if self.verbose:
+                        print(f"    [Debug] Added paragraph mark deletion to pPr (shared_change_id={shared_change_id})")
+
+                success_count += 1
+            else:
+                if self.verbose:
+                    print(f"  [Cross-paragraph delete] Failed to replace runs in paragraph")
+            
+            is_first_para = False
+
+        if success_count == 0:
+            if self.verbose:
+                print(f"  [Cross-paragraph delete] All paragraphs failed, fallback to comment")
+            return 'cross_paragraph_fallback'
+        
+        # Record single comment for the unified deletion
+        self.comments.append({
+            'id': comment_id,
+            'text': violation_reason,
+            'author': f"{author}-R"
+        })
+        
+        if success_count < len(prepared):
+            if self.verbose:
+                print(f"  [Cross-paragraph delete] Partial success: {success_count}/{len(prepared)} paragraphs")
+        else:
+            if self.verbose:
+                print(f"  [Cross-paragraph delete] All {success_count} paragraphs succeeded with unified deletion")
 
         return 'success'
 
@@ -5406,10 +5539,10 @@ class AuditEditApplier:
                                     pos += 1
                             
                             # Try multiple search patterns (original and stripped numbering)
-                            search_attempts = [(violation_text, False)]
-                            stripped_v, was_stripped = strip_auto_numbering(violation_text)
-                            if was_stripped:
-                                search_attempts.append((stripped_v, True))
+                            # Use build_numbering_variants() to support multi-line numbering removal
+                            search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
+                            numbering_variants = build_numbering_variants(violation_text)
+                            search_attempts.extend(numbering_variants)
                             
                             match_pos = -1
                             matched_text = violation_text
