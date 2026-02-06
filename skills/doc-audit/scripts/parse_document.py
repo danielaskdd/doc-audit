@@ -1190,6 +1190,51 @@ def extract_text_from_run(run, ns: dict) -> str:
     return text
 
 
+def extract_paragraph_content(element, ns) -> str:
+    """
+    Extract text and equations from a paragraph element in document order.
+
+    Handles w:r (text runs), m:oMath (inline equations), and m:oMathPara
+    (block equations). Recurses into container elements (e.g., w:hyperlink,
+    w:ins, w:sdt, w:fldSimple, w:smartTag) to avoid dropping content.
+
+    Args:
+        element: lxml paragraph element (w:p)
+        ns: XML namespace dictionary
+
+    Returns:
+        Text string with equations wrapped in <equation> tags
+    """
+    parts = []
+
+    def append_from(node) -> None:
+        tag = node.tag.split('}')[-1]
+        if tag == 'r':
+            parts.append(extract_text_from_run(node, ns))
+            return
+        if tag == 'oMath':
+            from omml import convert_omml_to_latex
+            latex = convert_omml_to_latex(node)
+            if latex:
+                parts.append(f'<equation>{latex}</equation>')
+            return
+        if tag == 'oMathPara':
+            from omml import convert_omml_to_latex
+            for omath in node:
+                if omath.tag.split('}')[-1] == 'oMath':
+                    latex = convert_omml_to_latex(omath)
+                    if latex:
+                        parts.append(f'<equation>{latex}</equation>')
+            return
+        for child in node:
+            append_from(child)
+
+    for child in element:
+        append_from(child)
+
+    return ''.join(parts)
+
+
 def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = None) -> list:
     """
     Extract text blocks (chunks) from a DOCX file for auditing.
@@ -1235,15 +1280,14 @@ def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = No
             continue
         
         if tag == 'p':  # Paragraph
-            # Get paragraph text with superscript/subscript markup
+            # Get paragraph text with superscript/subscript markup and equations
             para_text = ''
             ns = {
                 'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-                'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+                'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+                'm': 'http://schemas.openxmlformats.org/officeDocument/2006/math',
             }
-            for run in element.findall('.//w:r', ns):
-                # Use new function to extract text with format preservation
-                para_text += extract_text_from_run(run, ns)
+            para_text = extract_paragraph_content(element, ns)
             
             para_text = para_text.strip()
             if not para_text:
