@@ -115,7 +115,9 @@ $DOC_AUDIT_SKILL_PATH/scripts/workflow.sh document.docx --rules-only -r custom_r
 2. **Run audit** → `.claude-work/doc-audit/<docname>_manifest.jsonl`
 3. **Generate report** → `<document_directory>/<docname>_audit_report.html`
 
-⚠️ **Error handling**: If parsing fails (e.g., missing paraId error), **stop the workflow immediately** and inform the user.
+⚠️ **Error handling**: 
+- **Parsing phase**: If parsing fails (e.g., missing paraId error), **stop the workflow immediately** and inform the user.
+- **Audit phase**: If audit completes with failed blocks (output shows "Blocks failed: N" where N > 0), the workflow will exit with error code 1. **Do NOT proceed to Phase 3** if there are failed blocks. The audit is incomplete and applying results would be unreliable.
 
 **Fallback (Manual Execution)**: If workflow.sh fails or you need finer control, run individual scripts:
 

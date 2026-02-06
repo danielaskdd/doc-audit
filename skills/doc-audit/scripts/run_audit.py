@@ -2054,7 +2054,7 @@ def main():
         return
 
     # Run full audit (block-level + global) in a single event loop
-    asyncio.run(run_full_audit_async(
+    result = asyncio.run(run_full_audit_async(
         args=args,
         blocks=blocks,
         block_rules=block_rules,
@@ -2069,6 +2069,17 @@ def main():
         thinking_budget=thinking_budget,
         reasoning_effort=reasoning_effort
     ))
+
+    # Exit with error code if audit failed or was aborted
+    if result.get("status") == "aborted":
+        print("\nAudit aborted due to failures.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Check for block-level failures even in completed audits
+    block_stats = result.get("block_stats", {})
+    if block_stats and block_stats.get("blocks_failed", 0) > 0:
+        print(f"\nAudit incomplete: {block_stats['blocks_failed']} block(s) failed.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
