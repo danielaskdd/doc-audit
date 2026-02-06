@@ -459,7 +459,12 @@ class OMMLParser:
             if child.tag == qn("m:naryPr"):
                 for child2 in child:
                     if child2.tag == qn("m:chr"):
-                        char = ord(child2.attrib.get(qn("m:val")))
+                        val = child2.attrib.get(qn("m:val"))
+                        if val:
+                            try:
+                                char = ord(val)
+                            except TypeError:
+                                pass
         text = character_map.get(char, character_map[8721])
         sub = ""
         sup = ""
