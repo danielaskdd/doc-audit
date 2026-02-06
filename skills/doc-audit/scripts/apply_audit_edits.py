@@ -65,6 +65,10 @@ TABLE_ROW_NUMBERING_PATTERN = re.compile(
 # Matches: <drawing id="1" name="图片 1" />
 DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
 
+# Equation pattern for detecting LaTeX equation placeholders
+# Matches: <equation>latex_content</equation>
+EQUATION_PATTERN = re.compile(r'<equation>.*?</equation>', re.DOTALL)
+
 # ============================================================
 # Data Classes
 # ============================================================
@@ -2929,6 +2933,203 @@ class AuditEditApplier:
     
     # ==================== Diff Calculation ====================
     
+    def _check_special_element_modification(self, violation_text: str, diff_ops: List, has_markup: bool = False) -> Tuple[bool, str]:
+        """
+        Check if any diff operation modifies content inside special elements (<drawing> or <equation>).
+        
+        Strategy:
+        1. Find all special element position ranges in violation_text
+        2. If has_markup=True, map ranges to plain-text coordinate space (diff ops work on plain text)
+        3. Track position through diff ops
+        4. If any delete/insert operation overlaps with special element ranges, reject
+        
+        Args:
+            violation_text: Original violation text (may contain special elements and markup)
+            diff_ops: List of diff operations from _calculate_diff or _calculate_markup_aware_diff
+            has_markup: If True, diff_ops work on plain text (markup stripped), need coordinate mapping
+        
+        Returns:
+            Tuple of (should_reject, reason)
+            - should_reject: True if modification involves special element content
+            - reason: Description of why rejection is needed
+        """
+        # Find all special element position ranges in violation_text (original coordinates)
+        special_ranges_orig = []  # [(start, end, element_type), ...]
+        
+        for match in DRAWING_PATTERN.finditer(violation_text):
+            special_ranges_orig.append((match.start(), match.end(), 'drawing'))
+        
+        for match in EQUATION_PATTERN.finditer(violation_text):
+            special_ranges_orig.append((match.start(), match.end(), 'equation'))
+        
+        # If no special elements, only check if inserting new ones
+        if not special_ranges_orig:
+            # Rebuild complete inserted text from consecutive insert operations
+            # This handles the case where markup-aware diff splits insertions containing
+            # <equation> tags into multiple chunks (e.g., '<equation>H', '2', 'O</equation>')
+            # where individual chunks don't match the full pattern
+            full_insert_text = ''.join(
+                op_tuple[1] for op_tuple in diff_ops 
+                if op_tuple[0] == 'insert'
+            )
+            
+            if full_insert_text:
+                if DRAWING_PATTERN.search(full_insert_text):
+                    return True, "Cannot insert drawing via revision markup"
+                if EQUATION_PATTERN.search(full_insert_text):
+                    return True, "Cannot insert equation via revision markup"
+            return False, ""
+        
+        # Check if diff operations would modify content inside special elements
+        # Strategy: Track position through diff ops and check overlap with special element ranges
+        
+        # Map special_ranges to plain-text coordinates if markup is present
+        if has_markup and special_ranges_orig:
+            # Build mapping from original position to plain-text position
+            segments = self._parse_formatted_text(violation_text)
+            orig_to_plain = {}  # Map original char index -> plain char index
+            plain_pos = 0
+            orig_pos = 0
+            
+            for text, vert_align in segments:
+                # Original text may have <sup>text</sup> (11 chars for "text")
+                # Plain text has just "text" (4 chars)
+                if vert_align == 'superscript':
+                    # Original: <sup>text</sup>
+                    markup_before = '<sup>'
+                    markup_after = '</sup>'
+                elif vert_align == 'subscript':
+                    # Original: <sub>text</sub>
+                    markup_before = '<sub>'
+                    markup_after = '</sub>'
+                else:
+                    # No markup
+                    markup_before = ''
+                    markup_after = ''
+                
+                # Skip markup_before in original, map content
+                orig_pos += len(markup_before)
+                for char in text:
+                    orig_to_plain[orig_pos] = plain_pos
+                    orig_pos += 1
+                    plain_pos += 1
+                orig_pos += len(markup_after)
+            
+            # Transform special_ranges to plain-text coordinates
+            special_ranges = []
+            for elem_start_orig, elem_end_orig, elem_type in special_ranges_orig:
+                # Find plain-text positions for element boundaries
+                # Use the first and last content positions within the element
+                elem_start_plain = None
+                elem_end_plain = None
+                
+                # Find first content position in element
+                for orig_idx in range(elem_start_orig, elem_end_orig):
+                    if orig_idx in orig_to_plain:
+                        elem_start_plain = orig_to_plain[orig_idx]
+                        break
+                
+                # Find last content position in element
+                for orig_idx in range(elem_end_orig - 1, elem_start_orig - 1, -1):
+                    if orig_idx in orig_to_plain:
+                        elem_end_plain = orig_to_plain[orig_idx] + 1  # +1 for exclusive end
+                        break
+                
+                # If element is entirely within markup tags (no content mapped), skip it
+                # This shouldn't happen for <drawing> or <equation> but handle gracefully
+                if elem_start_plain is not None and elem_end_plain is not None:
+                    special_ranges.append((elem_start_plain, elem_end_plain, elem_type))
+        else:
+            # No markup: use original coordinates directly
+            special_ranges = special_ranges_orig
+        
+        # Pre-check: Rebuild full insert text and check for new special elements
+        # This must be done BEFORE the main loop to catch markup-split insertions
+        # (e.g., '<equation>H', '2', 'O</equation>' from markup-aware diff)
+        full_insert_text = ''.join(
+            op_tuple[1] for op_tuple in diff_ops 
+            if op_tuple[0] == 'insert'
+        )
+        
+        if full_insert_text:
+            if DRAWING_PATTERN.search(full_insert_text):
+                return True, "Cannot insert drawing via revision markup"
+            if EQUATION_PATTERN.search(full_insert_text):
+                return True, "Cannot insert equation via revision markup"
+        
+        # Track cumulative deletion coverage for each special element
+        # This handles cases where markup-aware diff splits a complete deletion into multiple delete ops
+        # (e.g., deleting <equation>H<sub>2</sub>O</equation> produces separate deletes for non-markup and subscript segments)
+        elem_deleted_ranges = {i: [] for i in range(len(special_ranges))}
+        
+        # First pass: collect all delete operations and their coverage of each special element
+        # Also check if any special element would survive in "equal" segments when has_markup=True
+        current_pos = 0
+        for op_tuple in diff_ops:
+            # Handle both 2-tuple and 3-tuple formats
+            op = op_tuple[0]
+            text = op_tuple[1]
+
+            if op == 'equal' and has_markup:
+                # When has_markup=True, equal segments preserve content unchanged
+                # No need to check special elements - they remain intact
+                current_pos += len(text)
+
+            elif op == 'delete':
+                del_start = current_pos
+                del_end = current_pos + len(text)
+
+                # Record overlap with each special element
+                for idx, (elem_start, elem_end, elem_type) in enumerate(special_ranges):
+                    if del_end > elem_start and del_start < elem_end:
+                        # Calculate overlap relative to element start
+                        overlap_start = max(del_start, elem_start) - elem_start
+                        overlap_end = min(del_end, elem_end) - elem_start
+                        elem_deleted_ranges[idx].append((overlap_start, overlap_end))
+
+                current_pos += len(text)
+
+            elif op == 'equal':
+                current_pos += len(text)
+
+            elif op == 'insert':
+                # Check if inserting at a position inside special element
+                for elem_start, elem_end, elem_type in special_ranges:
+                    if elem_start < current_pos < elem_end:
+                        return True, f"Cannot insert inside {elem_type}"
+                
+                # Note: Full insert text is already checked before loop (see pre-check above)
+                # Individual chunk checks are redundant and buggy - removed
+
+        # Second pass: check if any special element was partially deleted
+        for idx, (elem_start, elem_end, elem_type) in enumerate(special_ranges):
+            deleted_ranges = elem_deleted_ranges[idx]
+            
+            if not deleted_ranges:
+                continue  # Element not affected by deletions
+            
+            elem_len = elem_end - elem_start
+            
+            # Merge overlapping ranges and calculate total coverage
+            merged_ranges = []
+            for start, end in sorted(deleted_ranges):
+                if merged_ranges and start <= merged_ranges[-1][1]:
+                    # Overlapping or adjacent - merge
+                    merged_ranges[-1] = (merged_ranges[-1][0], max(merged_ranges[-1][1], end))
+                else:
+                    merged_ranges.append((start, end))
+            
+            total_deleted = sum(end - start for start, end in merged_ranges)
+            
+            if total_deleted == elem_len:
+                # Complete deletion - reject (cannot track change delete special elements)
+                return True, f"Cannot delete {elem_type} via revision markup"
+            else:
+                # Partial deletion - reject
+                return True, f"Cannot partially modify {elem_type} content"
+
+        return False, ""
+    
     def _calculate_diff(self, old_text: str, new_text: str) -> List[Tuple[str, str]]:
         """
         Calculate minimal diff between two texts.
@@ -3504,10 +3705,6 @@ class AuditEditApplier:
         if self._check_overlap_with_revisions(real_runs):
             return 'conflict'
 
-        # Inserting images via revision markup not supported
-        if DRAWING_PATTERN.search(revised_text or ''):
-            return 'cross_paragraph_fallback'
-
         # Compute diff ops
         has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or
                       '<sup>' in revised_text or '<sub>' in revised_text)
@@ -3516,6 +3713,13 @@ class AuditEditApplier:
         else:
             plain_diff = self._calculate_diff(violation_text, revised_text)
             diff_ops = [(op, text, None) for op, text in plain_diff]
+
+        # Check for special element modification (drawing/equation)
+        should_reject, reject_reason = self._check_special_element_modification(violation_text, diff_ops, has_markup)
+        if should_reject:
+            if self.verbose:
+                print(f"  [Fallback] {reject_reason}")
+            return 'cross_paragraph_fallback'
 
         # Detect deleted paragraph boundaries
         boundary_positions = [idx for idx, ch in enumerate(violation_text) if ch == '\n']
@@ -3849,14 +4053,12 @@ class AuditEditApplier:
             plain_diff = self._calculate_diff(violation_text, revised_text)
             diff_ops = [(op, text, None) for op, text in plain_diff]
 
-        # Check for image handling issues: cannot insert images via revision markup
-        for op_tuple in diff_ops:
-            op = op_tuple[0]
-            text = op_tuple[1]
-            if op == 'insert' and DRAWING_PATTERN.search(text):
-                if self.verbose:
-                    print(f"  [Fallback] Cannot insert images via revision markup")
-                return 'fallback'
+        # Check for special element modification (drawing/equation)
+        should_reject, reject_reason = self._check_special_element_modification(violation_text, diff_ops, has_markup)
+        if should_reject:
+            if self.verbose:
+                print(f"  [Fallback] {reject_reason}")
+            return 'fallback'
 
         # Check for conflicts only on delete operations
         current_pos = match_start
