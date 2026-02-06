@@ -28,7 +28,7 @@ from utils import sanitize_xml_string
 # ============================================================
 
 # Set to a specific marker string to WATCH
-DEBUG_MARKER = "产品表面不允许有金属丝、金属屑、杂物及其它多余物"
+DEBUG_MARKER = ""
 
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
