@@ -1916,22 +1916,22 @@ class AuditEditApplier:
         """
         if not real_runs:
             return 'fallback'
-        
+
         match_end = match_start + len(violation_text)
-        
+
         # Group runs by cell
         cell_groups = self._group_runs_by_cell(real_runs)
-        
+
         # Track success/failure for each cell
         success_count = 0
         failed_cells = []  # List of (para_elem, cell_violation, error_reason)
         first_success_para = None
-        
+
         # Process each cell independently
         for (para_id, cell_id), cell_runs in cell_groups.items():
             if not cell_runs:
                 continue
-            
+
             # De-duplicate runs by their underlying elem reference
             # This prevents duplicates when vMerge='continue' cells copy runs from restart cells
             seen_elems = set()
@@ -1942,143 +1942,90 @@ class AuditEditApplier:
                     seen_elems.add(elem_id)
                     unique_cell_runs.append(run)
             cell_runs = unique_cell_runs
-            
+
             if not cell_runs:
                 continue
-            
+
             # Get the paragraph element from first run
             para_elem = cell_runs[0].get('para_elem')
             if para_elem is None:
                 failed_cells.append((None, "", "No paragraph found"))
                 continue
-            
-            # Get rPr for formatting
-            rPr_xml = self._get_rPr_xml(cell_runs[0].get('rPr'))
-            
+
             # Find cell boundaries in the match range
             cell_start = min(r['start'] for r in cell_runs)
             cell_end = max(r['end'] for r in cell_runs)
-            
+
             # Calculate intersection with match range
             del_start_in_cell = max(cell_start, match_start)
             del_end_in_cell = min(cell_end, match_end)
-            
+
             if del_start_in_cell >= del_end_in_cell:
                 # No overlap with this cell
                 continue
-            
-            # Find first and last run in this cell that are affected
-            first_run = None
-            last_run = None
-            for run in cell_runs:
-                if run['end'] > del_start_in_cell and run['start'] < del_end_in_cell:
-                    if first_run is None:
-                        first_run = run
-                    last_run = run
-            
-            if first_run is None or last_run is None:
+
+            # Identify affected runs in this cell
+            affected_cell_runs = [r for r in cell_runs
+                                  if r['end'] > del_start_in_cell and r['start'] < del_end_in_cell]
+
+            if not affected_cell_runs:
                 failed_cells.append((para_elem, "", "No affected runs found"))
                 continue
-            
-            # Calculate split points for first and last run
-            first_orig_text = self._get_run_original_text(first_run)
-            last_orig_text = self._get_run_original_text(last_run)
-            
-            # Translate offsets from escaped space to original space
-            before_offset = self._translate_escaped_offset(first_run, max(0, del_start_in_cell - first_run['start']))
-            after_offset = self._translate_escaped_offset(last_run, max(0, del_end_in_cell - last_run['start']))
-            
-            before_text = first_orig_text[:before_offset]
-            after_text = last_orig_text[after_offset:]
-            
-            # Collect text to delete (from all affected runs in this cell)
-            affected_cell_runs = [r for r in cell_runs 
-                                  if r['end'] > del_start_in_cell and r['start'] < del_end_in_cell]
-            
+
             # Extract cell violation text for error reporting
             cell_violation_parts = []
+            first_run = affected_cell_runs[0]
+            last_run = affected_cell_runs[-1]
+            before_offset = self._translate_escaped_offset(
+                first_run, max(0, del_start_in_cell - first_run['start']))
+            after_offset = self._translate_escaped_offset(
+                last_run, max(0, del_end_in_cell - last_run['start']))
+
             for run in affected_cell_runs:
                 if run.get('is_drawing'):
                     cell_violation_parts.append(run['text'])
+                    continue
+                orig_text = self._get_run_original_text(run)
+                if run is first_run and run is last_run:
+                    cell_violation_parts.append(orig_text[before_offset:after_offset])
+                elif run is first_run:
+                    cell_violation_parts.append(orig_text[before_offset:])
+                elif run is last_run:
+                    cell_violation_parts.append(orig_text[:after_offset])
                 else:
-                    orig_text = self._get_run_original_text(run)
-                    if run is first_run:
-                        if first_run is last_run:
-                            # Single run case: deletion only affects part of this run
-                            # Use both offsets to extract only the deleted portion
-                            cell_violation_parts.append(orig_text[before_offset:after_offset])
-                        else:
-                            # First run of multiple: delete from before_offset to end
-                            cell_violation_parts.append(orig_text[before_offset:])
-                    elif run is last_run:
-                        cell_violation_parts.append(orig_text[:after_offset])
-                    else:
-                        cell_violation_parts.append(orig_text)
+                    cell_violation_parts.append(orig_text)
             cell_violation = ''.join(cell_violation_parts)
-            
+
             # Check if any affected run overlaps with existing revisions
             if self._check_overlap_with_revisions(affected_cell_runs):
-                # This cell has conflicts with existing revisions, skip deletion
                 failed_cells.append((para_elem, cell_violation, "Overlaps with existing revision"))
                 continue
-            
+
             if not cell_violation:
                 failed_cells.append((para_elem, "", "No text to delete"))
                 continue
-            
-            # Build new elements for this cell
-            new_elements = []
-            
-            # Before text (unchanged)
-            if before_text:
-                run_or_container = self._create_run(before_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    new_elements.extend(list(run_or_container))
-                else:
-                    new_elements.append(run_or_container)
-            
-            # Deleted text with track changes
-            change_id = self._get_next_change_id()
-            run_or_container = self._create_run(cell_violation, rPr_xml)
-            
-            if run_or_container.tag == 'container':
-                # Multiple runs (has markup) - wrap each in w:del
-                for del_run in run_or_container:
-                    # Change w:t to w:delText
-                    t_elem = del_run.find(f'{{{NS["w"]}}}t')
-                    if t_elem is not None:
-                        t_elem.tag = f'{{{NS["w"]}}}delText'
-                    
-                    # Wrap in w:del
-                    del_elem = etree.Element(f'{{{NS["w"]}}}del')
-                    del_elem.set(f'{{{NS["w"]}}}id', change_id)
-                    del_elem.set(f'{{{NS["w"]}}}author', author)
-                    del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
-                    del_elem.append(del_run)
-                    new_elements.append(del_elem)
-            else:
-                # Single run - wrap in w:del
-                t_elem = run_or_container.find(f'{{{NS["w"]}}}t')
-                if t_elem is not None:
-                    t_elem.tag = f'{{{NS["w"]}}}delText'
-                
-                del_elem = etree.Element(f'{{{NS["w"]}}}del')
-                del_elem.set(f'{{{NS["w"]}}}id', change_id)
-                del_elem.set(f'{{{NS["w"]}}}author', author)
-                del_elem.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
-                del_elem.append(run_or_container)
-                new_elements.append(del_elem)
-            
-            # After text (unchanged)
-            if after_text:
-                run_or_container = self._create_run(after_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    new_elements.extend(list(run_or_container))
-                else:
-                    new_elements.append(run_or_container)
-            
-            # Replace the affected runs in this cell
-            self._replace_runs(para_elem, affected_cell_runs, new_elements)
+
+            para_groups = self._group_runs_by_paragraph(affected_cell_runs)
+            if not para_groups:
+                failed_cells.append((para_elem, cell_violation, "No paragraph groups found"))
+                continue
+
+            prepared = self._prepare_deletion_items(
+                para_groups, del_start_in_cell, del_end_in_cell
+            )
+            if not prepared:
+                failed_cells.append((para_elem, cell_violation, "No paragraphs prepared for deletion"))
+                continue
+
+            shared_change_id = self._get_next_change_id()
+            success_paragraphs = self._delete_paragraphs_in_unit(
+                prepared, shared_change_id, author, comment_id=None
+            )
+
+            if success_paragraphs == 0:
+                failed_cells.append((para_elem, cell_violation, "Failed to replace runs"))
+                continue
+
             success_count += 1
             if first_success_para is None:
                 first_success_para = para_elem
@@ -2852,6 +2799,208 @@ class AuditEditApplier:
             return ''
         return etree.tostring(rPr_elem, encoding='unicode')
 
+    def _prepare_deletion_items(self, para_groups: List[Dict],
+                                match_start: int, match_end: int) -> List[Dict]:
+        """
+        Build prepared deletion items from paragraph-grouped runs.
+
+        Shared preparation logic for _apply_delete_cross_paragraph and
+        _apply_delete_multi_cell. Computes before_text, del_text, after_text
+        for each paragraph in the deletion range.
+
+        Args:
+            para_groups: List of {'para_elem': ..., 'runs': [...]} dicts
+                         (from _group_runs_by_paragraph)
+            match_start: Start position of the matched violation text
+            match_end: End position of the matched violation text
+
+        Returns:
+            List of dicts with keys:
+            - para_elem, affected_runs, rPr_xml, before_text, del_text, after_text
+        """
+        prepared = []
+        for group in para_groups:
+            para_elem = group['para_elem']
+            para_runs = group['runs']
+
+            # Identify affected runs within this paragraph
+            first_run = None
+            last_run = None
+            affected_runs_in_para = []
+            for run in para_runs:
+                if run['end'] > match_start and run['start'] < match_end:
+                    if first_run is None:
+                        first_run = run
+                    last_run = run
+                    affected_runs_in_para.append(run)
+
+            if first_run is None or last_run is None:
+                if self.verbose:
+                    print(f"  [Prepare] Skipping paragraph: no affected runs")
+                continue
+
+            rPr_xml = self._get_rPr_xml(first_run.get('rPr'))
+
+            before_offset = self._translate_escaped_offset(
+                first_run, max(0, match_start - first_run['start']))
+            after_offset = self._translate_escaped_offset(
+                last_run, max(0, match_end - last_run['start']))
+
+            first_orig_text = self._get_run_original_text(first_run)
+            last_orig_text = self._get_run_original_text(last_run)
+
+            before_text = first_orig_text[:before_offset]
+            after_text = last_orig_text[after_offset:]
+
+            # Build deleted text from affected runs in this paragraph
+            del_parts = []
+            for run in affected_runs_in_para:
+                if run.get('is_drawing'):
+                    del_parts.append(run['text'])
+                    continue
+                orig_text = self._get_run_original_text(run)
+                if run is first_run and run is last_run:
+                    del_parts.append(orig_text[before_offset:after_offset])
+                elif run is first_run:
+                    del_parts.append(orig_text[before_offset:])
+                elif run is last_run:
+                    del_parts.append(orig_text[:after_offset])
+                else:
+                    del_parts.append(orig_text)
+
+            del_text = ''.join(del_parts)
+            if not del_text:
+                if self.verbose:
+                    print(f"  [Prepare] Skipping paragraph: no text to delete")
+                continue
+
+            prepared.append({
+                'para_elem': para_elem,
+                'affected_runs': affected_runs_in_para,
+                'rPr_xml': rPr_xml,
+                'before_text': before_text,
+                'del_text': del_text,
+                'after_text': after_text,
+            })
+
+        return prepared
+
+    def _delete_paragraphs_in_unit(self, prepared: List[Dict],
+                                    shared_change_id: str, author: str,
+                                    comment_id: Optional[int] = None) -> int:
+        """
+        Delete content across multiple paragraphs in a single unit.
+
+        Shared core loop for _apply_delete_cross_paragraph and _apply_delete_multi_cell.
+        Handles building deletion elements, replacing runs, and adding paragraph mark
+        deletion for non-last paragraphs so Word displays a unified deletion.
+
+        Args:
+            prepared: List from _prepare_deletion_items()
+            shared_change_id: Change ID shared across all paragraphs in this unit
+            author: Track change author
+            comment_id: If set, insert commentRangeStart before first deletion
+                        and commentRangeEnd+ref after last deletion
+
+        Returns:
+            Number of paragraphs successfully processed
+        """
+        if not prepared:
+            return 0
+
+        success_count = 0
+        is_first_para = True
+
+        for item_idx, item in enumerate(prepared):
+            para_elem = item['para_elem']
+            affected_runs = item['affected_runs']
+            rPr_xml = item['rPr_xml']
+            before_text = item['before_text']
+            del_text = item['del_text']
+            after_text = item['after_text']
+
+            is_last_para = (item_idx == len(prepared) - 1)
+
+            # Build new elements for this paragraph
+            new_elements = []
+
+            if before_text:
+                run_or_container = self._create_run(before_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+
+            # Comment range start (only for first paragraph, if comment_id provided)
+            if is_first_para and comment_id is not None:
+                comment_start_xml = (
+                    f'<w:commentRangeStart xmlns:w="{NS["w"]}" '
+                    f'w:id="{comment_id}"/>'
+                )
+                new_elements.append(etree.fromstring(comment_start_xml))
+
+            # Deleted text with shared change_id
+            self._append_del_elements(
+                new_elements, del_text, rPr_xml, author,
+                change_id=shared_change_id
+            )
+
+            # Comment range end and reference (only for last paragraph)
+            if is_last_para and comment_id is not None:
+                comment_end_xml = (
+                    f'<w:commentRangeEnd xmlns:w="{NS["w"]}" '
+                    f'w:id="{comment_id}"/>'
+                )
+                new_elements.append(etree.fromstring(comment_end_xml))
+                comment_ref_xml = (
+                    f'<w:r xmlns:w="{NS["w"]}">'
+                    f'<w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>'
+                    f'<w:commentReference w:id="{comment_id}"/>'
+                    f'</w:r>'
+                )
+                new_elements.append(etree.fromstring(comment_ref_xml))
+
+            if after_text:
+                run_or_container = self._create_run(after_text, rPr_xml)
+                if run_or_container.tag == 'container':
+                    new_elements.extend(list(run_or_container))
+                else:
+                    new_elements.append(run_or_container)
+
+            # Replace runs and check success
+            replace_success = self._replace_runs(
+                para_elem, affected_runs, new_elements
+            )
+
+            if replace_success:
+                # For non-last paragraphs, mark paragraph mark (¶) as deleted
+                # so Word merges consecutive deleted paragraphs into one unified
+                # deletion. Without this, Word displays each deletion separately.
+                if not is_last_para:
+                    pPr = para_elem.find(f'{{{NS["w"]}}}pPr')
+                    if pPr is None:
+                        pPr = etree.SubElement(para_elem, f'{{{NS["w"]}}}pPr')
+                        # pPr must be the first child of w:p
+                        para_elem.insert(0, pPr)
+                    rPr_in_pPr = pPr.find(f'{{{NS["w"]}}}rPr')
+                    if rPr_in_pPr is None:
+                        rPr_in_pPr = etree.SubElement(pPr, f'{{{NS["w"]}}}rPr')
+                    del_mark = etree.SubElement(
+                        rPr_in_pPr, f'{{{NS["w"]}}}del'
+                    )
+                    del_mark.set(f'{{{NS["w"]}}}id', shared_change_id)
+                    del_mark.set(f'{{{NS["w"]}}}author', author)
+                    del_mark.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
+
+                success_count += 1
+            else:
+                if self.verbose:
+                    print(f"  [Delete unit] Failed to replace runs in paragraph")
+
+            is_first_para = False
+
+        return success_count
+
     def _append_del_elements(self, new_elements: List[etree.Element],
                              del_text: str, rPr_xml: str, author: str,
                              change_id: Optional[str] = None):
@@ -3591,68 +3740,8 @@ class AuditEditApplier:
         if self.verbose:
             print(f"  [Cross-paragraph delete] Processing {len(para_groups)} paragraph(s)")
 
-        prepared = []
-        for group in para_groups:
-            para_elem = group['para_elem']
-            para_runs = group['runs']
-
-            # Identify affected runs within this paragraph
-            first_run = None
-            last_run = None
-            affected_runs_in_para = []
-            for run in para_runs:
-                if run['end'] > match_start and run['start'] < match_end:
-                    if first_run is None:
-                        first_run = run
-                    last_run = run
-                    affected_runs_in_para.append(run)
-
-            if first_run is None or last_run is None:
-                if self.verbose:
-                    print(f"  [Cross-paragraph delete] Skipping paragraph: no affected runs")
-                continue
-
-            rPr_xml = self._get_rPr_xml(first_run.get('rPr'))
-
-            before_offset = self._translate_escaped_offset(first_run, max(0, match_start - first_run['start']))
-            after_offset = self._translate_escaped_offset(last_run, max(0, match_end - last_run['start']))
-
-            first_orig_text = self._get_run_original_text(first_run)
-            last_orig_text = self._get_run_original_text(last_run)
-
-            before_text = first_orig_text[:before_offset]
-            after_text = last_orig_text[after_offset:]
-
-            # Build deleted text from affected runs in this paragraph
-            del_parts = []
-            for run in affected_runs_in_para:
-                if run.get('is_drawing'):
-                    del_parts.append(run['text'])
-                    continue
-                orig_text = self._get_run_original_text(run)
-                if run is first_run and run is last_run:
-                    del_parts.append(orig_text[before_offset:after_offset])
-                elif run is first_run:
-                    del_parts.append(orig_text[before_offset:])
-                elif run is last_run:
-                    del_parts.append(orig_text[:after_offset])
-                else:
-                    del_parts.append(orig_text)
-
-            del_text = ''.join(del_parts)
-            if not del_text:
-                if self.verbose:
-                    print(f"  [Cross-paragraph delete] Skipping paragraph: no text to delete")
-                continue
-
-            prepared.append({
-                'para_elem': para_elem,
-                'affected_runs': affected_runs_in_para,
-                'rPr_xml': rPr_xml,
-                'before_text': before_text,
-                'del_text': del_text,
-                'after_text': after_text,
-            })
+        # Use shared helper to build prepared deletion items
+        prepared = self._prepare_deletion_items(para_groups, match_start, match_end)
 
         if not prepared:
             if self.verbose:
@@ -3664,124 +3753,10 @@ class AuditEditApplier:
         comment_id = self.next_comment_id
         self.next_comment_id += 1
 
-        # Apply deletions and track success
-        success_count = 0
-        is_first_para = True
-        is_last_para = False
-        
-        for item_idx, item in enumerate(prepared):
-            para_elem = item['para_elem']
-            affected_runs = item['affected_runs']
-            rPr_xml = item['rPr_xml']
-            before_text = item['before_text']
-            del_text = item['del_text']
-            after_text = item['after_text']
-            
-            is_last_para = (item_idx == len(prepared) - 1)
-
-            # Debug: verify elem references before _replace_runs
-            if self.verbose:
-                print(f"    [Debug] Paragraph {item_idx + 1}/{len(prepared)} has {len(affected_runs)} runs to replace:")
-                for run_idx, run in enumerate(affected_runs):
-                    elem = run.get('elem')
-                    actual_parent = elem.getparent() if elem is not None else None
-                    expected_para = run.get('para_elem')
-                    if actual_parent is not None:
-                        parent_tag = actual_parent.tag.split('}')[-1] if '}' in actual_parent.tag else actual_parent.tag
-                    else:
-                        parent_tag = 'None'
-                    print(f"      Run {run_idx}: has_elem={elem is not None}, "
-                          f"parent_tag={parent_tag}, "
-                          f"matches_para_elem={actual_parent is expected_para}")
-            
-            # Build new elements for this paragraph
-            new_elements = []
-
-            if before_text:
-                run_or_container = self._create_run(before_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    new_elements.extend(list(run_or_container))
-                else:
-                    new_elements.append(run_or_container)
-
-            # Comment range start (only for first paragraph)
-            if is_first_para:
-                comment_start_xml = f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-                new_elements.append(etree.fromstring(comment_start_xml))
-
-            # Deleted text with shared change_id
-            if self.verbose:
-                print(f"    [Debug] Creating deletion elements for text: {repr(del_text[:50])}... (shared_change_id={shared_change_id})")
-            self._append_del_elements(new_elements, del_text, rPr_xml, author, change_id=shared_change_id)
-            
-            # Debug: verify deletion elements were created
-            if self.verbose:
-                del_count = sum(1 for elem in new_elements if elem.tag == f'{{{NS["w"]}}}del')
-                print(f"    [Debug] Created {del_count} <w:del> elements, total new_elements={len(new_elements)}")
-
-            # Comment range end and reference (only for last paragraph)
-            if is_last_para:
-                comment_end_xml = f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
-                new_elements.append(etree.fromstring(comment_end_xml))
-                comment_ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                    <w:commentReference w:id="{comment_id}"/>
-                </w:r>'''
-                new_elements.append(etree.fromstring(comment_ref_xml))
-
-            if after_text:
-                run_or_container = self._create_run(after_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    new_elements.extend(list(run_or_container))
-                else:
-                    new_elements.append(run_or_container)
-
-            # Replace runs and check success
-            if self.verbose:
-                print(f"    [Debug] About to call _replace_runs with {len(affected_runs)} affected runs and {len(new_elements)} new elements")
-            
-            replace_success = self._replace_runs(para_elem, affected_runs, new_elements)
-            
-            if self.verbose:
-                print(f"    [Debug] _replace_runs returned: {replace_success}")
-                
-            if replace_success:
-                # Verify elements were actually inserted
-                if self.verbose:
-                    # Count <w:del> elements in the paragraph after replacement
-                    del_elements_in_para = para_elem.findall(f'{{{NS["w"]}}}del')
-                    print(f"    [Debug] After replacement, paragraph has {len(del_elements_in_para)} <w:del> elements")
-                    if del_elements_in_para:
-                        # Show first <w:del> element structure
-                        first_del = del_elements_in_para[0]
-                        del_xml_preview = etree.tostring(first_del, encoding='unicode')[:200]
-                        print(f"    [Debug] First <w:del> element: {del_xml_preview}...")
-
-                # For non-last paragraphs, mark paragraph mark (¶) as deleted
-                # so Word merges consecutive deleted paragraphs into one unified deletion.
-                # Without this, Word displays each paragraph's deletion separately.
-                if not is_last_para:
-                    pPr = para_elem.find(f'{{{NS["w"]}}}pPr')
-                    if pPr is None:
-                        pPr = etree.SubElement(para_elem, f'{{{NS["w"]}}}pPr')
-                        # pPr must be the first child of w:p
-                        para_elem.insert(0, pPr)
-                    rPr_in_pPr = pPr.find(f'{{{NS["w"]}}}rPr')
-                    if rPr_in_pPr is None:
-                        rPr_in_pPr = etree.SubElement(pPr, f'{{{NS["w"]}}}rPr')
-                    del_mark = etree.SubElement(rPr_in_pPr, f'{{{NS["w"]}}}del')
-                    del_mark.set(f'{{{NS["w"]}}}id', shared_change_id)
-                    del_mark.set(f'{{{NS["w"]}}}author', author)
-                    del_mark.set(f'{{{NS["w"]}}}date', self.operation_timestamp)
-                    if self.verbose:
-                        print(f"    [Debug] Added paragraph mark deletion to pPr (shared_change_id={shared_change_id})")
-
-                success_count += 1
-            else:
-                if self.verbose:
-                    print(f"  [Cross-paragraph delete] Failed to replace runs in paragraph")
-            
-            is_first_para = False
+        # Use shared helper to apply deletions with paragraph mark merging
+        success_count = self._delete_paragraphs_in_unit(
+            prepared, shared_change_id, author, comment_id=comment_id
+        )
 
         if success_count == 0:
             if self.verbose:
