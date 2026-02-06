@@ -28,7 +28,7 @@ from utils import sanitize_xml_string
 # ============================================================
 
 # Set to a specific string from the origin content to WATCH for debuge
-DEBUG_MARKER = "组件架构采用DSP+FPGA，DSP选用国产的6416"
+DEBUG_MARKER = ""
 
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -845,6 +845,66 @@ class AuditEditApplier:
         lines = text.split('\n')
         return '\n'.join(line.rstrip() for line in lines)
 
+    def _strip_runs_whitespace(self, runs: List[Dict]) -> List[Dict]:
+        """
+        Strip leading/trailing whitespace across a paragraph's runs.
+
+        This mirrors table_extractor.py behavior where each paragraph is
+        `para_text.strip()` before being joined into cell text. It removes
+        leading/trailing whitespace (including tabs) across the entire paragraph
+        while preserving internal whitespace.
+
+        Args:
+            runs: List of run dicts from _collect_runs_info_original
+
+        Returns:
+            List of runs with adjusted 'text' values and empty runs removed
+        """
+        if not runs:
+            return []
+
+        combined = ''.join(r.get('text', '') for r in runs)
+        if not combined:
+            return []
+
+        lead = len(combined) - len(combined.lstrip())
+        trail = len(combined) - len(combined.rstrip())
+
+        if lead == 0 and trail == 0:
+            return runs
+
+        # Trim leading whitespace
+        idx = 0
+        while idx < len(runs) and lead > 0:
+            text = runs[idx].get('text', '')
+            if not text:
+                idx += 1
+                continue
+            if lead >= len(text):
+                runs[idx]['text'] = ''
+                lead -= len(text)
+                idx += 1
+            else:
+                runs[idx]['text'] = text[lead:]
+                lead = 0
+
+        # Trim trailing whitespace
+        idx = len(runs) - 1
+        while idx >= 0 and trail > 0:
+            text = runs[idx].get('text', '')
+            if not text:
+                idx -= 1
+                continue
+            if trail >= len(text):
+                runs[idx]['text'] = ''
+                trail -= len(text)
+                idx -= 1
+            else:
+                runs[idx]['text'] = text[:-trail]
+                trail = 0
+
+        return [r for r in runs if r.get('text')]
+
     def _normalize_table_text_for_search(self, runs_info: List[Dict]) -> Tuple[str, List[int]]:
         """
         Build a normalized table text for search and a mapping back to original positions.
@@ -882,6 +942,19 @@ class AuditEditApplier:
                 norm_to_orig.append(orig_idx)
             para_chars = []
 
+        def iter_original_with_escaped_indices(original_text: str) -> List[Tuple[str, int]]:
+            """
+            Yield (char, escaped_index_start) for original_text.
+
+            This maps original characters to positions in the JSON-escaped
+            string stored in runs_info['text'].
+            """
+            escaped_pos = 0
+            for ch in original_text:
+                escaped_chunk = json_escape(ch)
+                yield ch, escaped_pos
+                escaped_pos += len(escaped_chunk)
+
         for run in runs_info:
             text = run.get('text', '')
             run_len = len(text)
@@ -903,8 +976,13 @@ class AuditEditApplier:
                 continue
 
             # Content run (part of a paragraph)
-            for i, ch in enumerate(text):
-                para_chars.append((ch, orig_pos + i))
+            original_text = run.get('original_text', text)
+            if 'original_text' in run:
+                for ch, offset in iter_original_with_escaped_indices(original_text):
+                    para_chars.append((ch, orig_pos + offset))
+            else:
+                for i, ch in enumerate(original_text):
+                    para_chars.append((ch, orig_pos + i))
             orig_pos += run_len
 
         # Flush remaining paragraph at end
@@ -1072,6 +1150,7 @@ class AuditEditApplier:
                 
                 # Collect paragraph runs (original text, no JSON escaping)
                 para_runs, _ = self._collect_runs_info_original(para)
+                para_runs = self._strip_runs_whitespace(para_runs)
                 for run in para_runs:
                     run_copy = dict(run)
                     run_copy['para_elem'] = para
@@ -1432,6 +1511,7 @@ class AuditEditApplier:
                             if not para_orig_text:
                                 continue
                             
+                            para_runs = self._strip_runs_whitespace(para_runs)
                             for run in para_runs:
                                 original_text = run['text']
                                 escaped_text = json_escape(original_text)
@@ -1503,6 +1583,7 @@ class AuditEditApplier:
                             if not para_orig_text:
                                 continue
                             
+                            para_runs = self._strip_runs_whitespace(para_runs)
                             for run in para_runs:
                                 original_text = run['text']
                                 escaped_text = json_escape(original_text)
@@ -1721,6 +1802,7 @@ class AuditEditApplier:
 
             # Collect paragraph content (with JSON escaping)
             para_runs, _ = self._collect_runs_info_original(para)
+            para_runs = self._strip_runs_whitespace(para_runs)
 
             for run in para_runs:
                 original_text = run['text']
