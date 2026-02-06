@@ -42,7 +42,7 @@ violation_text guidelines:
 - Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
     - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
-- Preserve equation formatting by keeping all `<equation>` tags intact; do not simplify them to plain text.
+- Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
 - Do not use ellipses to replace or omit any part of the original text
@@ -196,7 +196,7 @@ violation_text guidelines:
 - Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
     - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
-- Preserve equation formatting by keeping all `<equation>` tags intact; do not simplify them to plain text.
+- Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
 - Do not use ellipses to replace or omit any part of the original text
