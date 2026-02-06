@@ -35,6 +35,7 @@ NS = {
     'w14': 'http://schemas.microsoft.com/office/word/2010/wordml',
     'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
     'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+    'm': 'http://schemas.openxmlformats.org/officeDocument/2006/math',
 }
 
 COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
@@ -2563,114 +2564,153 @@ class AuditEditApplier:
         """
         runs_info = []
         pos = 0
-        
-        # Process direct children to handle track changes correctly
-        for child in para_elem:
-            if child.tag == f'{{{NS["w"]}}}del':
-                # Deleted text = part of original document
-                for run in child.findall('.//w:r', NS):
-                    rPr = run.find('w:rPr', NS)
-                    
-                    # Extract text with superscript/subscript markup
-                    text = self._extract_text_from_run_element(run, rPr)
-                    
+        w_ns = NS['w']
+        wp_ns = NS['wp']
+        m_ns = NS['m']
+        w_ins_tag = f'{{{w_ns}}}ins'
+        w_r_tag = f'{{{w_ns}}}r'
+        m_omath_tag = f'{{{m_ns}}}oMath'
+        m_omathpara_tag = f'{{{m_ns}}}oMathPara'
+
+        def append_equation(omath_elem) -> None:
+            """Append a synthetic run entry for an OMML equation."""
+            nonlocal pos
+            try:
+                from omml import convert_omml_to_latex
+                latex = convert_omml_to_latex(omath_elem)
+            except Exception:
+                return
+            if not latex:
+                return
+            eq_text = f'<equation>{latex}</equation>'
+            runs_info.append({
+                'text': eq_text,
+                'start': pos,
+                'end': pos + len(eq_text),
+                'elem': None,
+                'rPr': None,
+                'is_equation': True
+            })
+            pos += len(eq_text)
+
+        def append_run(run_elem) -> None:
+            """Append run entries in order, splitting drawings and equations."""
+            nonlocal pos
+            rPr = run_elem.find('w:rPr', NS)
+
+            # Check for vertical alignment (superscript/subscript)
+            vert_align = None
+            if rPr is not None:
+                vert_align_elem = rPr.find('w:vertAlign', NS)
+                if vert_align_elem is not None:
+                    vert_align = vert_align_elem.get(f'{{{w_ns}}}val')
+
+            # Buffer for accumulating text before a drawing/equation
+            text_buffer = []
+
+            def flush_text_buffer() -> None:
+                """Helper to flush accumulated text as a separate entry."""
+                nonlocal pos
+                if not text_buffer:
+                    return
+
+                combined_text = ''.join(text_buffer)
+
+                # Apply superscript/subscript markup if needed
+                if vert_align in ('superscript', 'subscript'):
+                    if vert_align == 'superscript':
+                        combined_text = f'<sup>{combined_text}</sup>'
+                    else:
+                        combined_text = f'<sub>{combined_text}</sub>'
+
+                runs_info.append({
+                    'text': combined_text,
+                    'start': pos,
+                    'end': pos + len(combined_text),
+                    'elem': run_elem,
+                    'rPr': rPr,
+                    'is_drawing': False
+                })
+                pos += len(combined_text)
+                text_buffer.clear()
+
+            # Process children in order to preserve text/image/equation positions
+            for elem in run_elem:
+                if elem.tag == f'{{{w_ns}}}t':
+                    text = elem.text or ''
                     if text:
-                        runs_info.append({
-                            'text': text,
-                            'start': pos,
-                            'end': pos + len(text),
-                            'elem': run,
-                            'rPr': rPr
-                        })
-                        pos += len(text)
-                            
-            elif child.tag == f'{{{NS["w"]}}}ins':
+                        text_buffer.append(text)
+                elif elem.tag == f'{{{w_ns}}}delText':
+                    text = elem.text or ''
+                    if text:
+                        text_buffer.append(text)
+                elif elem.tag == f'{{{w_ns}}}tab':
+                    text_buffer.append('\t')
+                elif elem.tag == f'{{{w_ns}}}br':
+                    br_type = elem.get(f'{{{w_ns}}}type')
+                    if br_type in (None, 'textWrapping'):
+                        text_buffer.append('\n')
+                elif elem.tag == f'{{{w_ns}}}drawing':
+                    # Flush any accumulated text before the drawing
+                    flush_text_buffer()
+
+                    # Create separate entry for drawing
+                    inline = elem.find(f'{{{wp_ns}}}inline')
+                    if inline is not None:
+                        doc_pr = inline.find(f'{{{wp_ns}}}docPr')
+                        if doc_pr is not None:
+                            img_id = doc_pr.get('id', '')
+                            img_name = doc_pr.get('name', '')
+                            drawing_text = f'<drawing id="{img_id}" name="{img_name}" />'
+
+                            runs_info.append({
+                                'text': drawing_text,
+                                'start': pos,
+                                'end': pos + len(drawing_text),
+                                'elem': run_elem,
+                                'rPr': rPr,
+                                'is_drawing': True,
+                                'drawing_elem': elem  # Store reference to drawing element
+                            })
+                            pos += len(drawing_text)
+                elif elem.tag == m_omath_tag:
+                    # Flush any accumulated text before the equation
+                    flush_text_buffer()
+                    append_equation(elem)
+                elif elem.tag == m_omathpara_tag:
+                    # Flush any accumulated text before the equation block
+                    flush_text_buffer()
+                    for omath in elem:
+                        if omath.tag == m_omath_tag:
+                            append_equation(omath)
+
+            # Flush any remaining text after all elements
+            flush_text_buffer()
+
+        def walk(node) -> None:
+            tag = node.tag
+            if tag == w_ins_tag:
                 # Inserted text = NOT part of original, skip completely
-                pass
-                
-            elif child.tag == f'{{{NS["w"]}}}r':
-                # Normal run (not in revision markup)
-                rPr = child.find('w:rPr', NS)
+                return
+            if tag == w_r_tag:
+                append_run(node)
+                return
+            if tag == m_omath_tag:
+                append_equation(node)
+                return
+            if tag == m_omathpara_tag:
+                for child in node:
+                    if child.tag == m_omath_tag:
+                        append_equation(child)
+                    else:
+                        walk(child)
+                return
+            for child in node:
+                walk(child)
 
-                # Check for vertical alignment (superscript/subscript)
-                vert_align = None
-                if rPr is not None:
-                    vert_align_elem = rPr.find('w:vertAlign', NS)
-                    if vert_align_elem is not None:
-                        vert_align = vert_align_elem.get(f'{{{NS["w"]}}}val')
-
-                # Buffer for accumulating text before a drawing
-                text_buffer = []
-                
-                def flush_text_buffer():
-                    """Helper to flush accumulated text as a separate entry."""
-                    nonlocal pos
-                    if not text_buffer:
-                        return
-                    
-                    combined_text = ''.join(text_buffer)
-                    
-                    # Apply superscript/subscript markup if needed
-                    if vert_align in ('superscript', 'subscript'):
-                        if vert_align == 'superscript':
-                            combined_text = f'<sup>{combined_text}</sup>'
-                        else:
-                            combined_text = f'<sub>{combined_text}</sub>'
-                    
-                    runs_info.append({
-                        'text': combined_text,
-                        'start': pos,
-                        'end': pos + len(combined_text),
-                        'elem': child,
-                        'rPr': rPr,
-                        'is_drawing': False
-                    })
-                    pos += len(combined_text)
-                    text_buffer.clear()
-
-                # Process children in order to preserve text/image positions
-                # Split into separate entries: text vs drawing
-                for elem in child:
-                    if elem.tag == f'{{{NS["w"]}}}t':
-                        text = elem.text or ''
-                        if text:
-                            text_buffer.append(text)
-                    elif elem.tag == f'{{{NS["w"]}}}delText':
-                        text = elem.text or ''
-                        if text:
-                            text_buffer.append(text)
-                    elif elem.tag == f'{{{NS["w"]}}}tab':
-                        text_buffer.append('\t')
-                    elif elem.tag == f'{{{NS["w"]}}}br':
-                        br_type = elem.get(f'{{{NS["w"]}}}type')
-                        if br_type in (None, 'textWrapping'):
-                            text_buffer.append('\n')
-                    elif elem.tag == f'{{{NS["w"]}}}drawing':
-                        # Flush any accumulated text before the drawing
-                        flush_text_buffer()
-                        
-                        # Create separate entry for drawing
-                        inline = elem.find(f'{{{NS["wp"]}}}inline')
-                        if inline is not None:
-                            doc_pr = inline.find(f'{{{NS["wp"]}}}docPr')
-                            if doc_pr is not None:
-                                img_id = doc_pr.get('id', '')
-                                img_name = doc_pr.get('name', '')
-                                drawing_text = f'<drawing id="{img_id}" name="{img_name}" />'
-                                
-                                runs_info.append({
-                                    'text': drawing_text,
-                                    'start': pos,
-                                    'end': pos + len(drawing_text),
-                                    'elem': child,
-                                    'rPr': rPr,
-                                    'is_drawing': True,
-                                    'drawing_elem': elem  # Store reference to drawing element
-                                })
-                                pos += len(drawing_text)
-                
-                # Flush any remaining text after all elements
-                flush_text_buffer()
+        # Walk paragraph content in document order
+        for child in para_elem:
+            walk(child)
         
         combined_text = ''.join(r['text'] for r in runs_info)
         return runs_info, combined_text
@@ -2705,7 +2745,8 @@ class AuditEditApplier:
         return [r for r in runs
                 if not r.get('is_json_boundary', False)
                 and not r.get('is_json_escape', False)
-                and not r.get('is_para_boundary', False)]
+                and not r.get('is_para_boundary', False)
+                and not r.get('is_equation', False)]
 
     def _get_run_original_text(self, run: Dict) -> str:
         """
