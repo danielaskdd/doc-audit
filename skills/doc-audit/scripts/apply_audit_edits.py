@@ -2463,7 +2463,7 @@ class AuditEditApplier:
                 _cell_revised = cell_revised
                 cell_revised = self._decode_json_escaped(cell_revised)
                 if _cell_revised != cell_revised:
-                    print(f"  [Multi-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+                    print(f"  [Multi-cell] Decoded revised_text json: {format_text_preview(_cell_revised, 60)}")
 
             result_edits.append({
                 'cell_violation': cell_violation,
@@ -2643,7 +2643,7 @@ class AuditEditApplier:
             _cell_revised = cell_revised
             cell_revised = self._decode_json_escaped(cell_revised)
             if _cell_revised != cell_revised:
-                print("  [Single-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+                print(f"  [Single-cell] Decoded revised_text json: {format_text_preview(_cell_revised, 60)}")
 
         return {
             'cell_violation': cell_violation,
@@ -5991,21 +5991,80 @@ class AuditEditApplier:
                         
                         if single_cell:
                             # Successfully extracted single-cell edit - all changes in one cell
-                            cell_para = None
+                            # Collect all unique paragraphs in this cell
+                            cell_paras = set()
                             for run in single_cell['cell_runs']:
-                                if run.get('para_elem') is not None:
-                                    cell_para = run['para_elem']
-                                    break
-                            
-                            if cell_para is not None:
-                                # Collect runs for this single cell only
-                                cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
+                                para = run.get('para_elem')
+                                if para is not None:
+                                    cell_paras.add(para)
+
+                            if cell_paras:
+                                if len(cell_paras) == 1:
+                                    # Single paragraph - original simple path
+                                    cell_para = next(iter(cell_paras))
+                                    cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
+                                    first_para = cell_para
+                                else:
+                                    # Multiple paragraphs - collect runs from all, with \n boundaries
+                                    para_list = []
+                                    for para in cell_paras:
+                                        first_run_pos = None
+                                        for run in single_cell['cell_runs']:
+                                            if run.get('para_elem') is para:
+                                                first_run_pos = run.get('start', 0)
+                                                break
+                                        para_list.append((first_run_pos or 0, para))
+                                    para_list.sort(key=lambda x: x[0])
+
+                                    cell_runs_info = []
+                                    cell_text_parts = []
+                                    pos = 0
+                                    first_para = None
+
+                                    for para_idx, (_, para) in enumerate(para_list):
+                                        if first_para is None:
+                                            first_para = para
+
+                                        para_runs, para_text = self._collect_runs_info_original(para)
+
+                                        # Strip paragraph whitespace to match table collection
+                                        # (_collect_runs_info_in_table strips each paragraph)
+                                        if not para_text.strip():
+                                            continue  # Skip empty paragraphs
+                                        para_runs = self._strip_runs_whitespace(para_runs)
+
+                                        if para_idx > 0 and cell_runs_info:
+                                            cell_runs_info.append({
+                                                'text': '\n',
+                                                'start': pos,
+                                                'end': pos + 1,
+                                                'para_elem': para,
+                                                'is_para_boundary': True
+                                            })
+                                            cell_text_parts.append('\n')
+                                            pos += 1
+
+                                        for run in para_runs:
+                                            run_copy = dict(run)
+                                            run_copy['para_elem'] = para
+                                            run_len = len(run['text'])
+                                            run_copy['start'] = pos
+                                            run_copy['end'] = pos + run_len
+                                            cell_runs_info.append(run_copy)
+                                            pos += run_len
+
+                                        cell_text_parts.append(
+                                            ''.join(r['text'] for r in para_runs)
+                                        )
+
+                                    cell_text = ''.join(cell_text_parts)
+
                                 cell_pos = cell_text.find(single_cell['cell_violation'])
 
                                 if cell_pos != -1:
                                     # Apply replace to the single cell
                                     success_status = self._apply_replace(
-                                        cell_para,
+                                        first_para,
                                         single_cell['cell_violation'],
                                         single_cell['cell_revised'],
                                         item.violation_reason,
