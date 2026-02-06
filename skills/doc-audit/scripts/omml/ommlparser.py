@@ -94,9 +94,17 @@ class OMMLParser:
             if child.tag == qn("m:accPr"):
                 for child2 in child:
                     if child2.tag == qn("m:chr"):
-                        accent = ord(child2.attrib.get(qn("m:val")))
+                        val = child2.attrib.get(qn("m:val"))
+                        if val:
+                            try:
+                                accent = ord(val)
+                            except TypeError:
+                                pass
 
-        text += character_map[accent] + "{"
+        accent_cmd = character_map.get(accent)
+        if accent_cmd is None:
+            accent_cmd = character_map.get(770, "\\hat")
+        text += accent_cmd + "{"
         for child in root:
             if child.tag == qn("m:e"):
                 text += self.parse(child)
@@ -233,13 +241,17 @@ class OMMLParser:
         if start_bracket:
             if start_bracket in start_bracket_replacements:
                 start = start_bracket_replacements[start_bracket] + " "
-            else:
+            elif start_bracket in bracket_map:
                 start = bracket_map[start_bracket] + " "
+            else:
+                start = "\\left(" + " "
         if end_bracket:
             if end_bracket in end_bracket_replacements:
                 end = " " + end_bracket_replacements[end_bracket]
-            else:
+            elif end_bracket in bracket_map:
                 end = " " + bracket_map[end_bracket]
+            else:
+                end = " " + "\\right)"
         # If there is no end bracket and this tag contains an m:eqArr tag as a
         # child, we assume that the eqArr should be translated to a cases environment
         # instead of an eqnarray* environment.
