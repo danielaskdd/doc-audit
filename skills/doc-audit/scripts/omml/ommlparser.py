@@ -7,6 +7,34 @@ class OMMLParser:
     """
     Parser class for reading OMML and converting it into LaTeX.
     """
+    FUNCTION_MAP = {
+        "sin": "\\sin",
+        "cos": "\\cos",
+        "tan": "\\tan",
+        "cot": "\\cot",
+        "sec": "\\sec",
+        "csc": "\\csc",
+        "sinh": "\\sinh",
+        "cosh": "\\cosh",
+        "tanh": "\\tanh",
+        "coth": "\\coth",
+        "sech": "\\operatorname{sech}",
+        "csch": "\\operatorname{csch}",
+        "log": "\\log",
+        "ln": "\\ln",
+        "min": "\\min",
+        "max": "\\max",
+        "lim": "\\lim",
+    }
+
+    def _normalize_func_name(self, content: str) -> str:
+        if not content:
+            return content
+        if content.startswith("\\"):
+            return content
+        key = content.strip()
+        mapped = self.FUNCTION_MAP.get(key)
+        return mapped if mapped else content
 
     def parse(self, root: Element) -> str:
         """
@@ -318,25 +346,6 @@ class OMMLParser:
         return text[:-2] + "\\\\ "  # Remove the last ' & '
 
     def parse_func(self, root: Element) -> str:
-        function_map = {
-            "sin": "\\sin",
-            "cos": "\\cos",
-            "tan": "\\tan",
-            "cot": "\\cot",
-            "sec": "\\sec",
-            "csc": "\\csc",
-            "sinh": "\\sinh",
-            "cosh": "\\cosh",
-            "tanh": "\\tanh",
-            "coth": "\\coth",
-            "sech": "\\operatorname{sech}",
-            "csch": "\\operatorname{csch}",
-            "log": "\\log",
-            "ln": "\\ln",
-            "min": "\\min",
-            "max": "\\max",
-            "lim": "\\lim",
-        }
         subscript = ""
         superscript = ""
         text = ""
@@ -364,9 +373,9 @@ class OMMLParser:
                 text += self.parse(child)
         if func_name in ["lim", "max", "min"]:
             return f"\\{func_name}\\limits_{{{subscript}}}^{{{superscript}}}{{{text}}}"
-        if func_name not in function_map:
+        if func_name not in self.FUNCTION_MAP:
             return f"{{{func_name}}}^{{{superscript}}}_{{{subscript}}}{{{text}}}"
-        return function_map[func_name] + f"_{{{subscript}}}^{{{superscript}}}{{{text}}}"
+        return self.FUNCTION_MAP[func_name] + f"_{{{subscript}}}^{{{superscript}}}{{{text}}}"
 
     def parse_s_sup(self, root: Element) -> str:
         content = ""
@@ -376,6 +385,7 @@ class OMMLParser:
                 content = self.parse(child)
             if child.tag == qn("m:sup"):
                 exp_content = self.parse(child)
+        content = self._normalize_func_name(content)
         return f"{{{content}}}^{{{exp_content}}}"
 
     def parse_s_sub(self, root: Element) -> str:
@@ -386,6 +396,7 @@ class OMMLParser:
                 content = self.parse(child)
             if child.tag == qn("m:sub"):
                 sub_content = self.parse(child)
+        content = self._normalize_func_name(content)
         return f"{{{content}}}_{{{sub_content}}}"
 
     def parse_s_sub_sup(self, root: Element) -> str:
@@ -399,6 +410,7 @@ class OMMLParser:
                 sub_content = self.parse(child)
             if child.tag == qn("m:sup"):
                 exp_content = self.parse(child)
+        content = self._normalize_func_name(content)
         return f"{{{content}}}_{{{sub_content}}}^{{{exp_content}}}"
 
     def parse_s_pre(self, root: Element) -> str:
