@@ -2597,10 +2597,11 @@ class AuditEditApplier:
         # Build cell_revised by applying diff operations to cell_violation
         # This handles cases where insertion/deletion changes text length
         cell_revised = cell_violation
-        
+
         # Apply diff operations that fall within the cell range
         violation_pos = 0
         revised_accumulator = ''
+        has_changes_in_cell = False
         
         for op, text in diff_ops:
             if op == 'equal':
@@ -2622,6 +2623,8 @@ class AuditEditApplier:
                 
                 # Skip deleted text if it falls within cell range
                 # (already handled by not including it in revised_accumulator)
+                if chunk_end > relative_start and chunk_start < relative_end:
+                    has_changes_in_cell = True
                 violation_pos += len(text)
             
             elif op == 'insert':
@@ -2629,8 +2632,9 @@ class AuditEditApplier:
                 # Check if insertion point is within cell range
                 if relative_start <= violation_pos <= relative_end:
                     revised_accumulator += text
+                    has_changes_in_cell = True
         
-        cell_revised = revised_accumulator if revised_accumulator else cell_violation
+        cell_revised = revised_accumulator if has_changes_in_cell else cell_violation
 
         # Fix: Decode cell_revised in table mode (same as cell_violation)
         # cell_revised is accumulated from escaped diff chunks and needs decoding
