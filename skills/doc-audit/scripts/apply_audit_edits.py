@@ -27,8 +27,8 @@ from utils import sanitize_xml_string
 # Constants
 # ============================================================
 
-# Set to a specific marker string to WATCH
-DEBUG_MARKER = ""
+# Set to a specific string from the origin content to WATCH for debuge
+DEBUG_MARKER = "组件架构采用DSP+FPGA，DSP选用国产的6416"
 
 NS = {
     'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
@@ -210,6 +210,97 @@ def strip_numbering_by_mode(text: str, mode: Optional[str]) -> Tuple[str, bool]:
     if mode == "lines":
         return strip_auto_numbering_lines(text)
     return text, False
+
+
+def strip_table_row_number_only(text: str) -> Tuple[str, bool]:
+    """
+    Replace only the first cell row number in table JSON text.
+
+    This function strips row numbering from the first cell in each row,
+    but does NOT strip auto-numbering inside other cells. This is needed
+    when cell content like "a) ..." is actual text rather than Word numbering.
+
+    Args:
+        text: Text that may start with table row numbering pattern like '["1", '
+
+    Returns:
+        Tuple of (processed_text, was_stripped):
+        - processed_text: Text with first cell row numbers stripped if found
+        - was_stripped: True if any numbering was stripped, False otherwise
+    """
+    stripped_text = text.strip()
+    if not stripped_text.startswith('['):
+        return text, False
+
+    was_modified = False
+
+    def process_row(row: list) -> list:
+        nonlocal was_modified
+        if not row:
+            return row
+
+        first_cell = row[0]
+        if isinstance(first_cell, str):
+            first_cell_stripped = first_cell.strip()
+            stripped_first, stripped_flag = strip_auto_numbering(first_cell_stripped)
+            if stripped_flag:
+                was_modified = True
+                row = list(row)
+                row[0] = stripped_first.strip()
+            elif re.fullmatch(r'\d+(?:[.\d)）]+)?', first_cell_stripped):
+                row = list(row)
+                row[0] = ""
+                was_modified = True
+
+        return row
+
+    rows = None
+    mode = None  # "single", "multi", "full"
+
+    try:
+        parsed = json.loads(stripped_text)
+        if isinstance(parsed, list):
+            if parsed and isinstance(parsed[0], list):
+                rows = parsed
+                mode = "full"
+            else:
+                rows = [parsed]
+                mode = "single"
+    except json.JSONDecodeError:
+        rows = None
+
+    if rows is None and stripped_text.startswith('["'):
+        try:
+            parsed = json.loads(f'[{stripped_text}]')
+            if isinstance(parsed, list) and (not parsed or isinstance(parsed[0], list)):
+                rows = parsed
+                mode = "multi"
+        except json.JSONDecodeError:
+            rows = None
+
+    if rows is None:
+        return text, False
+
+    new_rows = []
+    for row in rows:
+        if isinstance(row, list):
+            new_rows.append(process_row(row))
+        else:
+            new_rows.append(row)
+
+    if mode == "full":
+        row_string = ', '.join(json.dumps(row, ensure_ascii=False) for row in new_rows)
+        if was_modified:
+            return row_string, True
+        if stripped_text != row_string:
+            return row_string, True
+        return text, False
+
+    if not was_modified:
+        return text, False
+    if mode == "single":
+        return json.dumps(new_rows[0], ensure_ascii=False), True
+    return ', '.join(json.dumps(row, ensure_ascii=False) for row in new_rows), True
 
 def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
     """
@@ -5122,6 +5213,13 @@ class AuditEditApplier:
                         search_attempts.append((stripped_violation, strip_mode))
                     if '\\n' in violation_text:
                         search_attempts.append((violation_text.replace('\\n', '\n'), None))
+                    if self._is_table_mode(cross_runs) and violation_text.startswith('["'):
+                        stripped_row_only, was_row_stripped = strip_table_row_number_only(violation_text)
+                        if was_row_stripped:
+                            search_attempts.append((stripped_row_only, "table_row_number"))
+                        stripped_table_text, was_table_stripped = strip_table_row_numbering(violation_text)
+                        if was_table_stripped and stripped_table_text != stripped_row_only:
+                            search_attempts.append((stripped_table_text, "table_row"))
 
                     for search_text, strip_mode in search_attempts:
                         if self._is_table_mode(cross_runs):
@@ -5156,7 +5254,12 @@ class AuditEditApplier:
                             if strip_mode:
                                 numbering_stripped = True
                                 if item.fix_action == 'replace':
-                                    stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
+                                    if strip_mode == "table_row_number":
+                                        stripped_revised, revised_has_numbering = strip_table_row_number_only(revised_text)
+                                    elif strip_mode == "table_row":
+                                        stripped_revised, revised_has_numbering = strip_table_row_numbering(revised_text)
+                                    else:
+                                        stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
                                     if revised_has_numbering:
                                         revised_text = stripped_revised
 
@@ -5176,15 +5279,18 @@ class AuditEditApplier:
                 
                 # Try with original violation_text first, then with row numbering stripped
                 search_attempts = [
-                    (violation_text, False),  # Original text, not stripped
+                    (violation_text, None),  # Original text, not stripped
                 ]
+
+                stripped_row_only, was_row_stripped = strip_table_row_number_only(violation_text)
+                if was_row_stripped:
+                    search_attempts.append((stripped_row_only, "table_row_number"))
+
+                stripped_table_text, was_table_stripped = strip_table_row_numbering(violation_text)
+                if was_table_stripped and stripped_table_text != stripped_row_only:
+                    search_attempts.append((stripped_table_text, "table_row"))
                 
-                # If violation_text starts with row number, add stripped version
-                stripped_table_text, was_stripped = strip_table_row_numbering(violation_text)
-                if was_stripped:
-                    search_attempts.append((stripped_table_text, True))
-                
-                for search_text, is_stripped in search_attempts:
+                for search_text, strip_mode in search_attempts:
                     for table_idx, table_elem in enumerate(tables_in_range):
                         # Get the first and last paragraph in this table
                         table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
@@ -5286,13 +5392,16 @@ class AuditEditApplier:
                                 violation_text = matched_text_override or search_text
                                 
                                 # For replace operations, also strip row numbering from revised_text
-                                if is_stripped and item.fix_action == 'replace':
-                                    stripped_revised, revised_was_stripped = strip_table_row_numbering(revised_text)
+                                if strip_mode and item.fix_action == 'replace':
+                                    if strip_mode == "table_row_number":
+                                        stripped_revised, revised_was_stripped = strip_table_row_number_only(revised_text)
+                                    else:
+                                        stripped_revised, revised_was_stripped = strip_table_row_numbering(revised_text)
                                     if revised_was_stripped:
                                         revised_text = stripped_revised
                                 
                                 if self.verbose:
-                                    if is_stripped:
+                                    if strip_mode:
                                         print(f"  [Success] Found in table after stripping row numbering")
                                     else:
                                         print(f"  [Success] Found in table (JSON format)")
