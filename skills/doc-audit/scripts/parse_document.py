@@ -1209,6 +1209,10 @@ def extract_paragraph_content(element, ns) -> str:
 
     def append_from(node) -> None:
         tag = node.tag.split('}')[-1]
+        # Skip deleted content (w:del) and moved-from content (w:moveFrom) in tracked changes
+        # to maintain consistency with w:delText handling
+        if tag in ('del', 'moveFrom'):
+            return
         if tag == 'r':
             parts.append(extract_text_from_run(node, ns))
             return
