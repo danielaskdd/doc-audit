@@ -14,7 +14,7 @@ import difflib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Generator
+from typing import List, Dict, Tuple, Optional, Generator, Iterator
 
 from docx import Document
 from docx.opc.part import Part
@@ -60,6 +60,10 @@ AUTO_NUMBERING_PATTERN = re.compile(
 TABLE_ROW_NUMBERING_PATTERN = re.compile(
     r'^\["\d+",\s*'
 )
+
+# Table tag pattern for detecting mixed body/table content from parse_document.py
+# Matches: <table> and </table> tags that wrap table JSON content
+TABLE_TAG_PATTERN = re.compile(r'</?table>')
 
 # Drawing pattern for detecting inline image placeholders
 # Matches: <drawing id="1" name="图片 1" />
@@ -432,6 +436,37 @@ def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
     return ', '.join(json.dumps(row, ensure_ascii=False) for row in new_rows), True
 
 
+def extract_longest_segment(text: str) -> Optional[str]:
+    """
+    Split text by <table>/</table> tags and return the longest non-empty segment.
+
+    When violation_text from the LLM contains mixed body text and table content
+    (e.g., "Heading text\\n<table>JSON data</table>"), this function extracts
+    the longest segment for use as the search target in manual (comment) operations.
+
+    Args:
+        text: Text that may contain <table>/</table> tags
+
+    Returns:
+        The longest non-empty stripped segment, or None if no table tags found
+        or all segments are empty after stripping.
+
+    Examples:
+        "Title\\n<table>[[...long JSON...]]</table>" -> '[[...long JSON...]]'
+        "<table>JSON</table>\\nBody text here" -> 'Body text here' (if longer)
+        "No table tags" -> None
+        "<table></table>" -> None
+    """
+    if '<table>' not in text and '</table>' not in text:
+        return None
+
+    segments = TABLE_TAG_PATTERN.split(text)
+    clean = [s.strip() for s in segments if s.strip()]
+    if not clean:
+        return None
+    return max(clean, key=len)
+
+
 def normalize_table_json(text: str) -> str:
     """
     Normalize table JSON by removing duplicate brackets at boundaries.
@@ -454,9 +489,9 @@ def normalize_table_json(text: str) -> str:
         '[["cell1", "cell2"]]' -> '["cell1", "cell2"]'
         '["cell1", "cell2"]' -> '["cell1", "cell2"]' (no change)
     """
-    if not text.startswith('["'):
+    if not text.startswith('["') and not text.startswith('[["'):
         return text
-    
+
     result = text
     # Remove leading duplicate bracket
     if result.startswith('[["'):
@@ -942,7 +977,7 @@ class AuditEditApplier:
                 norm_to_orig.append(orig_idx)
             para_chars = []
 
-        def iter_original_with_escaped_indices(original_text: str) -> List[Tuple[str, int]]:
+        def iter_original_with_escaped_indices(original_text: str) -> Iterator[Tuple[str, int]]:
             """
             Yield (char, escaped_index_start) for original_text.
 
@@ -5222,6 +5257,22 @@ class AuditEditApplier:
             
             item_author = self._author_for_item(item)
 
+            # Handle mixed body/table content (violation_text contains <table> tags)
+            has_table_tag = '<table>' in violation_text or '</table>' in violation_text
+            if has_table_tag:
+                if item.fix_action in ('delete', 'replace'):
+                    reason = "Mixed body/table content is invalid"
+                    self._apply_fallback_comment(anchor_para, item, reason)
+                    if self.verbose:
+                        print(f"  [Mixed content] {reason}")
+                    return EditResult(success=True, item=item, error_message=reason, warning=True)
+                else:  # manual
+                    longest = extract_longest_segment(violation_text)
+                    if longest:
+                        if self.verbose:
+                            print(f"  [Mixed content] Extracted longest segment for comment: '{format_text_preview(longest)}'")
+                        violation_text = longest
+
             # 2. Search for text from anchor paragraph using ORIGINAL text (before revisions)
             # Store match results to pass to apply methods (avoid double matching)
             # IMPORTANT: Search is restricted to uuid -> uuid_end range to prevent
@@ -5354,7 +5405,7 @@ class AuditEditApplier:
                             break
             
             # Fallback 3: Try table search if violation_text looks like JSON array
-            if target_para is None and violation_text.startswith('["'):
+            if target_para is None and (violation_text.startswith('["') or violation_text.startswith('[["')):
                 # Normalize to remove duplicate brackets at boundaries (LLM artifacts)
                 violation_text = normalize_table_json(violation_text)
                 if item.fix_action == 'replace':
@@ -5505,7 +5556,7 @@ class AuditEditApplier:
             
             # Fallback 2.5: Try non-JSON table search (raw text mode)
             # For plain text violation_text that may be in table cells with multiple paragraphs
-            if target_para is None and not violation_text.startswith('["'):
+            if target_para is None and not violation_text.startswith('["') and not violation_text.startswith('[["'):
                 # Find all tables in range
                 tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
                 
