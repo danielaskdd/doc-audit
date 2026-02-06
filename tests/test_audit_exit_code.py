@@ -93,9 +93,9 @@ def test_exit_code_on_block_failure():
         
         if result.returncode == 0:
             print("  ❌ FAIL: Script exited with code 0 despite failures")
-            return False
         else:
             print("  ✅ PASS: Script exited with non-zero code as expected")
+        assert result.returncode != 0
         
         print("\nTest Case 2: Dry-run mode (expecting exit code 0)")
         result = subprocess.run(
@@ -115,23 +115,14 @@ def test_exit_code_on_block_failure():
         
         if result.returncode != 0:
             print("  ❌ FAIL: Dry-run should exit with code 0")
-            return False
         else:
             print("  ✅ PASS: Dry-run exited with code 0")
-        
-        return True
+        assert result.returncode == 0
 
 
 if __name__ == "__main__":
     print("Testing run_audit.py exit code behavior")
     print("=" * 60)
-    
-    success = test_exit_code_on_block_failure()
-    
+    test_exit_code_on_block_failure()
     print("\n" + "=" * 60)
-    if success:
-        print("✅ All tests passed!")
-        sys.exit(0)
-    else:
-        print("❌ Some tests failed")
-        sys.exit(1)
+    print("✅ All tests passed!")
