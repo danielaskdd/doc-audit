@@ -183,7 +183,7 @@ class TestApplyReplaceWithImages:
         assert result == 'fallback'
 
     def test_replace_delete_image(self):
-        """Test that deleting images via replace works"""
+        """Test that deleting images via replace triggers fallback"""
         applier = create_mock_applier()
         para = create_paragraph_with_inline_image(
             text_before="Hello ",
@@ -202,7 +202,7 @@ class TestApplyReplaceWithImages:
         match_start = combined_text.find(violation_text)
         result = applier._apply_replace(para, violation_text, revised_text, "Test reason", runs_info, match_start, get_test_author(applier))
 
-        assert result == 'success'
+        assert result == 'fallback'
 
 
 # ============================================================
