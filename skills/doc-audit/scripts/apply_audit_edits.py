@@ -4788,9 +4788,11 @@ class AuditEditApplier:
 
         if start_key is not None and end_key is None:
             # No valid end run to anchor range - fallback to reference-only comment
-            fallback_para = (first_run_info.get('host_para_elem') or
-                             first_run_info.get('para_elem') or
-                             para_elem)
+            fallback_para = first_run_info.get('host_para_elem')
+            if fallback_para is None:
+                fallback_para = first_run_info.get('para_elem')
+            if fallback_para is None:
+                fallback_para = para_elem
             if fallback_para is None:
                 print("  [Warning] Reference-only fallback failed: no anchor paragraph")
                 return 'fallback'
@@ -4817,9 +4819,11 @@ class AuditEditApplier:
                     candidate = run_info
                     break
             if candidate is None:
-                fallback_para = (first_run_info.get('host_para_elem') or
-                                 first_run_info.get('para_elem') or
-                                 para_elem)
+                fallback_para = first_run_info.get('host_para_elem')
+                if fallback_para is None:
+                    fallback_para = first_run_info.get('para_elem')
+                if fallback_para is None:
+                    fallback_para = para_elem
                 if fallback_para is None:
                     print("  [Warning] Reference-only fallback failed: no anchor paragraph")
                     return 'fallback'
@@ -4904,7 +4908,7 @@ class AuditEditApplier:
             start_idx = self._para_order.get(id(start_host_para))
             end_idx = self._para_order.get(id(reference_para))
             if start_idx is not None and end_idx is not None and end_idx < start_idx:
-                fallback_para = start_host_para or para_elem
+                fallback_para = start_host_para if start_host_para is not None else para_elem
                 if fallback_para is None:
                     print("  [Warning] Reference-only fallback failed: no anchor paragraph")
                     return 'fallback'
