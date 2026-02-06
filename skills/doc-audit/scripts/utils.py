@@ -424,12 +424,12 @@ AUDIT_RESULT_SCHEMA = {
                     },
                     "fix_action": {
                         "type": "string",
-                        "enum": ["delete", "replace", "manual"],
-                        "description": "Action type: delete removes the text, replace substitutes it, manual requires human review"
+                        "enum": ["replace", "manual"],
+                        "description": "Action type: replace substitutes text (including deletion-via-replace), manual requires human review"
                     },
                     "revised_text": {
                         "type": "string",
-                        "description": "For replace: complete replacement text. For delete: empty string. For manual: additional guidance for human reviewer"
+                        "description": "For replace: complete replacement text (including deletion-via-replace). For manual: additional guidance for human reviewer"
                     }
                 },
                 "required": ["rule_id", "violation_text", "violation_reason", "fix_action", "revised_text"]
@@ -501,7 +501,7 @@ GLOBAL_VERIFY_SCHEMA = {
                     "violation_reason": {"type": "string"},
                     "fix_action": {
                         "type": "string",
-                        "enum": ["delete", "replace", "manual"]
+                        "enum": ["replace", "manual"]
                     },
                     "revised_text": {"type": "string"}
                 },

@@ -394,6 +394,71 @@ def test_multi_cell_same_row_replace(tmp_path):
         raise
 
 
+def test_single_cell_replace_to_empty(tmp_path):
+    """Test replacing a single cell with empty content via cross-cell match."""
+    print("\n" + "=" * 60)
+    print("TEST: Single Cell Replace to Empty")
+    print("=" * 60)
+
+    docx_path = tmp_path / 'test_single_cell_replace_empty.docx'
+    create_multi_cell_table_document(docx_path)
+
+    para_ids = _get_para_ids(docx_path)
+
+    jsonl_path = tmp_path / 'test_single_cell_replace_empty.jsonl'
+
+    uuid_start = para_ids.get('Data1')
+    uuid_end = para_ids.get('Data2')
+
+    if not uuid_start or not uuid_end:
+        print("ERROR: Could not find paragraph IDs")
+        assert False, "Could not find required paragraph IDs"
+
+    with open(jsonl_path, 'w', encoding='utf-8') as f:
+        f.write('{"type": "meta", "source_file": "' + str(docx_path) + '", "source_hash": "skip"}\n')
+
+        edit_item = {
+            'uuid': uuid_start,
+            'uuid_end': uuid_end,
+            'violation_text': '"Data1", "Data2"',
+            'violation_reason': 'Single-cell delete via replace test',
+            'fix_action': 'replace',
+            'revised_text': '"", "Data2"',
+            'category': 'test',
+            'rule_id': 'TEST005',
+            'heading': 'Test'
+        }
+        f.write(json.dumps(edit_item, ensure_ascii=False) + '\n')
+
+    try:
+        applier = AuditEditApplier(
+            str(jsonl_path),
+            skip_hash=True,
+            verbose=True
+        )
+        results = applier.apply()
+        applier.save()
+
+        assert len(results) == 1, f"Expected 1 result, got {len(results)}"
+        assert results[0].success, (
+            f"Single-cell replace failed: {results[0].error_message if results else 'No results'}"
+        )
+
+        edited_doc = Document(str(applier.output_path))
+        table = edited_doc.tables[0]
+        assert table.rows[0].cells[1].text == "", "Expected Data1 cell to be empty"
+        assert table.rows[0].cells[2].text == "Data2", "Expected Data2 cell to remain"
+
+        print("\n✓ Single-cell replace to empty succeeded")
+        print(f"  Output: {applier.output_path}")
+
+    except Exception as e:
+        print(f"\n✗ Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
 def test_cell_separator_delete_fallback(tmp_path):
     """
     Test that attempting to delete a cell separator (\", \") falls back to comment.

@@ -32,7 +32,7 @@ Instructions:
    - The rule ID that was violated
    - The violation text with enough surrounding context for unique string matching
    - Why it's a violation
-   - The fix action: "delete", "replace", or "manual"
+   - The fix action: "replace" or "manual"
    - The revised text based on fix_action
 
 violation_text guidelines:
@@ -56,13 +56,17 @@ violation_text guidelines:
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
 
 fix_action guidelines:
-- "delete": Use when the problematic text should be completely removed
-- "replace": Use when the text can be corrected with a specific replacement
+- "replace": Use when text should be corrected OR removed. For deletions, use replace-with-context strategy (see below).
 - "manual": Use when the fix requires human judgment or complex restructuring
 
+Deletion via replace strategy (MANDATORY):
+- Never use "delete".
+- When content should be removed, expand violation_text to include enough prefix/suffix context so the match is unique, and set fix_action to "replace".
+- revised_text must equal violation_text after removing the target content.
+- If deleting a table cell, violation_text must be the full row content (JSON row format), and revised_text should keep the row structure while setting the deleted cell to an empty string.
+
 revised_text guidelines:
-- For "delete": Set to empty string ""
-- For "replace": Provide the complete replacement text that can directly substitute violation_text
+- For "replace": Provide the complete replacement text that can directly substitute violation_text (including deletion scenarios handled by replacement)
 - For "manual": Provide guidance for the human reviewer
 
 If the violation_text is truncated due to excessive length or fails to achieve an exact match with the source material, the fix_action must be set to "manual"
@@ -75,7 +79,7 @@ Return your analysis as a JSON object with this structure:
       "rule_id": "<exact_id_of_violated_rule>",
       "violation_text": "the specific problematic text with sufficient context",
       "violation_reason": "explanation of why this violates the rule written in {output_language}",
-      "fix_action": "delete|replace|manual",
+      "fix_action": "replace|manual",
       "revised_text": "corrected text in original language if fix_action is 'replace', otherwise guidance for human reviewer written in {output_language}"
     }}
   ]
