@@ -69,6 +69,56 @@ def extract_text_from_run_table(run_elem, qn_func) -> str:
     
     return text
 
+
+def extract_paragraph_content_table(para_elem, qn_func) -> str:
+    """
+    Extract text and equations from a table cell paragraph in document order.
+
+    Handles w:r (text runs), m:oMath (inline equations), and m:oMathPara
+    (block equations). Recurses into container elements (e.g., w:hyperlink,
+    w:ins, w:sdt, w:fldSimple, w:smartTag) to avoid dropping content.
+
+    Args:
+        para_elem: lxml paragraph element (w:p)
+        qn_func: qn function for namespace handling
+
+    Returns:
+        Text string with equations wrapped in <equation> tags
+    """
+    parts = []
+
+    def append_from(node) -> None:
+        tag = node.tag.split('}')[-1]
+        # Skip deleted content (w:del) and moved-from content (w:moveFrom) in tracked changes
+        # to maintain consistency with w:delText handling
+        if tag in ('del', 'moveFrom'):
+            return
+        if tag == 'r':
+            parts.append(extract_text_from_run_table(node, qn_func))
+            return
+        if tag == 'oMath':
+            from omml import convert_omml_to_latex
+            latex = convert_omml_to_latex(node)
+            if latex:
+                parts.append(f'<equation>{latex}</equation>')
+            return
+        if tag == 'oMathPara':
+            from omml import convert_omml_to_latex
+            for omath in node:
+                if omath.tag.split('}')[-1] == 'oMath':
+                    latex = convert_omml_to_latex(omath)
+                    if latex:
+                        parts.append(f'<equation>{latex}</equation>')
+            return
+        for child in node:
+            append_from(child)
+
+    for child in para_elem:
+        append_from(child)
+
+    return ''.join(parts)
+
+
 class TableExtractor:
     """
     Extract table content handling merged cells correctly.
@@ -199,11 +249,8 @@ class TableExtractor:
                                     cell_para_id = para_id_attr  # First paraId
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
-                            # Get text content with format preservation (superscript/subscript)
-                            para_text = ''
-                            for run in para_elem.findall('.//'+qn('w:r')):
-                                # Use new function to extract text with format preservation
-                                para_text += extract_text_from_run_table(run, qn)
+                            # Get text content with format preservation (superscript/subscript/equations)
+                            para_text = extract_paragraph_content_table(para_elem, qn)
                             
                             # Get numbering label
                             label = numbering_resolver.get_label(para_elem)
@@ -230,10 +277,8 @@ class TableExtractor:
                                     cell_para_id = para_id_attr  # First paraId
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
-                            # Use new function to extract text with format preservation
-                            para_text = ''
-                            for run in para_elem.findall('.//'+qn('w:r')):
-                                para_text += extract_text_from_run_table(run, qn)
+                            # Extract text with format preservation (superscript/subscript/equations)
+                            para_text = extract_paragraph_content_table(para_elem, qn)
                             
                             if para_text:
                                 para_texts.append(para_text.strip())
