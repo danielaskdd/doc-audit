@@ -2572,7 +2572,7 @@ class AuditEditApplier:
         m_omath_tag = f'{{{m_ns}}}oMath'
         m_omathpara_tag = f'{{{m_ns}}}oMathPara'
 
-        def append_equation(omath_elem) -> None:
+        def append_equation(omath_elem, host_run=None, host_rPr=None) -> None:
             """Append a synthetic run entry for an OMML equation."""
             nonlocal pos
             try:
@@ -2587,8 +2587,8 @@ class AuditEditApplier:
                 'text': eq_text,
                 'start': pos,
                 'end': pos + len(eq_text),
-                'elem': None,
-                'rPr': None,
+                'elem': host_run,
+                'rPr': host_rPr,
                 'is_equation': True
             })
             pos += len(eq_text)
@@ -2676,13 +2676,13 @@ class AuditEditApplier:
                 elif elem.tag == m_omath_tag:
                     # Flush any accumulated text before the equation
                     flush_text_buffer()
-                    append_equation(elem)
+                    append_equation(elem, run_elem, rPr)
                 elif elem.tag == m_omathpara_tag:
                     # Flush any accumulated text before the equation block
                     flush_text_buffer()
                     for omath in elem:
                         if omath.tag == m_omath_tag:
-                            append_equation(omath)
+                            append_equation(omath, run_elem, rPr)
 
             # Flush any remaining text after all elements
             flush_text_buffer()
@@ -2728,7 +2728,7 @@ class AuditEditApplier:
                 affected.append(info)
         return affected
 
-    def _filter_real_runs(self, runs: List[Dict]) -> List[Dict]:
+    def _filter_real_runs(self, runs: List[Dict], include_equations: bool = False) -> List[Dict]:
         """
         Filter out synthetic boundary runs (JSON boundaries, paragraph boundaries).
 
@@ -2738,6 +2738,7 @@ class AuditEditApplier:
 
         Args:
             runs: List of run info dicts
+            include_equations: If True, keep synthetic equation runs for comment anchoring
 
         Returns:
             List of runs that have actual document elements
@@ -2746,7 +2747,7 @@ class AuditEditApplier:
                 if not r.get('is_json_boundary', False)
                 and not r.get('is_json_escape', False)
                 and not r.get('is_para_boundary', False)
-                and not r.get('is_equation', False)]
+                and (include_equations or not r.get('is_equation', False))]
 
     def _get_run_original_text(self, run: Dict) -> str:
         """
@@ -3661,6 +3662,7 @@ class AuditEditApplier:
         Returns:
             'success': Deletion applied successfully
             'fallback': Should fallback to comment annotation
+            'equation_fallback': Equation-only content cannot be edited
             'conflict': Text overlaps with previous rule modification
         """
         # Use original text position directly
@@ -3674,6 +3676,8 @@ class AuditEditApplier:
         # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
+            if any(r.get('is_equation', False) for r in affected):
+                return 'equation_fallback'
             return 'fallback'
 
         # Check if text overlaps with previous modifications
@@ -3814,6 +3818,7 @@ class AuditEditApplier:
         Returns:
             'success': Replace applied (may be partial)
             'fallback': Should fallback to comment annotation
+            'equation_fallback': Equation-only content cannot be edited
             'conflict': Modifying text overlaps with previous rule modification
         """
         # Use original text position directly
@@ -3827,6 +3832,8 @@ class AuditEditApplier:
         # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
+            if any(r.get('is_equation', False) for r in affected):
+                return 'equation_fallback'
             return 'fallback'
 
         # Check if we need markup-aware diff (detect <sup>/<sub> tags)
@@ -4271,7 +4278,7 @@ class AuditEditApplier:
             return 'fallback'
 
         # Filter out all synthetic boundary markers (JSON and paragraph boundaries)
-        real_runs = self._filter_real_runs(affected)
+        real_runs = self._filter_real_runs(affected, include_equations=True)
 
         if not real_runs:
             return 'fallback'
@@ -4355,9 +4362,11 @@ class AuditEditApplier:
             # Clamp match_end to avoid splitting beyond the adjusted end run
             match_end = min(match_end, last_run_info.get('end', match_end))
 
-        first_run = first_run_info['elem']
-        last_run = last_run_info['elem']
+        first_run = first_run_info.get('elem')
+        last_run = last_run_info.get('elem')
         rPr_xml = self._get_rPr_xml(first_run_info.get('rPr'))
+        no_split_start = first_run_info.get('is_equation', False)
+        no_split_end = last_run_info.get('is_equation', False)
 
         # Host paragraph anchors (for vMerge continue cases where runs are reused)
         start_host_para = first_run_info.get('host_para_elem')
@@ -4373,6 +4382,13 @@ class AuditEditApplier:
         if has_host_mismatch:
             start_use_host = True
             end_use_host = True
+
+        if first_run is None:
+            start_use_host = True
+            no_split_start = True
+        if last_run is None:
+            end_use_host = True
+            no_split_end = True
 
         if start_use_host and start_host_para is None:
             start_host_para = first_run_info.get('para_elem', para_elem)
@@ -4482,6 +4498,16 @@ class AuditEditApplier:
             if parent is not None:
                 idx = list(parent).index(start_revision)
                 parent.insert(idx, range_start)
+        elif no_split_start:
+            # Start is in a non-text run (equation): insert range start before the run
+            parent = first_run.getparent() if first_run is not None else None
+            if parent is None:
+                return 'fallback'
+            try:
+                idx = list(parent).index(first_run)
+            except ValueError:
+                return 'fallback'
+            parent.insert(idx, range_start)
         else:
             # Start is in normal run: may need to split
             parent = first_run.getparent()
@@ -4531,6 +4557,17 @@ class AuditEditApplier:
                 idx = list(parent).index(end_revision)
                 parent.insert(idx + 1, range_end)
                 parent.insert(idx + 2, comment_ref)
+        elif no_split_end:
+            # End is in a non-text run (equation): insert range end after the run
+            parent = last_run.getparent() if last_run is not None else None
+            if parent is None:
+                return 'fallback'
+            try:
+                idx = list(parent).index(last_run)
+            except ValueError:
+                return 'fallback'
+            parent.insert(idx + 1, range_end)
+            parent.insert(idx + 2, comment_ref)
         else:
             # End is in normal run: may need to split
             parent = last_run.getparent()
@@ -5710,6 +5747,35 @@ class AuditEditApplier:
                 if manual_status == 'success':
                     if self.verbose:
                         print(f"  [Cross-cell] Applied comment instead")
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=reason,
+                        warning=True
+                    )
+                else:
+                    # Manual comment also failed - use fallback comment
+                    self._apply_fallback_comment(target_para, item, reason)
+                    return EditResult(
+                        success=True,
+                        item=item,
+                        error_message=f"{reason} (comment also failed)",
+                        warning=True
+                    )
+            elif success_status == 'equation_fallback':
+                # Equation-only content cannot be edited - fallback to manual comment
+                reason = "Equation-only content cannot be edited - fallback to comment"
+                manual_status = self._apply_manual(
+                    target_para, violation_text,
+                    item.violation_reason, revised_text,
+                    matched_runs_info, matched_start,
+                    item_author,
+                    is_cross_paragraph,
+                    fallback_reason=reason
+                )
+                if manual_status == 'success':
+                    if self.verbose:
+                        print(f"  [Equation-only] Applied comment instead")
                     return EditResult(
                         success=True,
                         item=item,
