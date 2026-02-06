@@ -5445,7 +5445,7 @@ class AuditEditApplier:
                     if target_para is None:
                         reason = ""
                         if boundary_error == 'boundary_crossed':
-                            reason = "Violation text not found(C)."  # Table/body boundary crossed
+                            reason = "Violation text not found(C)"  # Table/body boundary crossed
                         else:
                             reason = f"Boundary error: {boundary_error}"
 
@@ -5504,9 +5504,9 @@ class AuditEditApplier:
                     total_segments = tables_count + body_count
                     
                     if total_segments == 1:
-                        reason = "Violation text not found(S)."  # Single segment
+                        reason = "Violation text not found(S)"  # Single segment
                     else:
-                        reason = f"Violation text not found(M)."  # Multiple segments
+                        reason = f"Violation text not found(M)"  # Multiple segments
                     
                     # For manual fix_action, text not found is expected (not an error)
                     if item.fix_action == 'manual':
@@ -5891,8 +5891,7 @@ class AuditEditApplier:
             elif success_status == 'cross_paragraph_fallback':
                 # Cross-paragraph delete/replace not supported - fallback to manual comment
                 reason = (
-                    "Cross-paragraph delete/replace not supported (Phase 1 limitation) "
-                    "- fallback to comment"
+                    "Cross-paragraph delete/replace not supported"
                 )
                 # Apply manual comment instead
                 manual_status = self._apply_manual(
@@ -5923,7 +5922,7 @@ class AuditEditApplier:
                     )
             elif success_status == 'cross_row_fallback':
                 # Cross-row delete/replace not supported - Word doesn't support cross-row comments
-                reason = "Fallback to comment: cross-row track change not supported (Word limitation)"
+                reason = "Cross-row edit not supported"
                 # Use fallback comment (non-selected) since cross-row comments are not supported
                 self._apply_fallback_comment(target_para, item, reason)
                 if self.verbose:
@@ -5936,7 +5935,7 @@ class AuditEditApplier:
                 )
             elif success_status == 'cross_cell_fallback':
                 # Cross-cell delete/replace not supported - fallback to manual comment
-                reason = "Cross-cell track change."
+                reason = "Cross-cell edit not supported"
                 # Apply manual comment instead (same row comment is supported)
                 manual_status = self._apply_manual(
                     target_para, violation_text,
@@ -5966,7 +5965,7 @@ class AuditEditApplier:
                     )
             elif success_status == 'equation_fallback':
                 # Equation-only content cannot be edited - fallback to manual comment
-                reason = "Equation-only content cannot be edited - fallback to comment"
+                reason = "Equation cannot be edited"
                 manual_status = self._apply_manual(
                     target_para, violation_text,
                     item.violation_reason, revised_text,
@@ -5995,7 +5994,7 @@ class AuditEditApplier:
                     )
             elif success_status == 'fallback':
                 # Fallback to comment annotation - mark as warning for all fix_actions
-                reason = "Text not found in current document state"
+                reason = "No editable runs found"
                 if item.fix_action == 'manual':
                     self._apply_error_comment(target_para, item)
                 else:
