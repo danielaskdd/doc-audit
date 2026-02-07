@@ -552,6 +552,59 @@ class TestCellParagraphBoundaryHandling:
         )
         assert status == 'success'
 
+    def test_replace_multi_para_cell_soft_break_deletion(self):
+        """Deleting a soft break should not merge paragraphs in a cell."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["A\nB", "C"]],
+            ["AAA", "BBB"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["A\\nB\\nC"]'
+
+        violation_text = '["A\\nB\\nC"]'
+        revised_text = '["AB\\nC"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+        para_elems = body.findall('.//w:tc//w:p', NSMAP)
+        assert len(para_elems) == 2
+
 
 # ============================================================
 # Tests: Real Document Table (tests/test.docx)

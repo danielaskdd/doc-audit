@@ -2686,7 +2686,12 @@ class AuditEditApplier:
             return fallback_status
 
         # 2. Detect deleted paragraph boundaries
-        boundary_positions = [idx for idx, ch in enumerate(violation_text) if ch == '\n']
+        # Only treat the \n between paragraph segments as real boundaries.
+        # Soft breaks (<w:br/>) within a paragraph should not trigger paragraph merges.
+        boundary_positions = []
+        for i in range(len(para_segments) - 1):
+            boundary_pos = para_segments[i]['seg_end']
+            boundary_positions.append(boundary_pos)
         boundary_pos_to_idx = {pos: i for i, pos in enumerate(boundary_positions)}
         deleted_boundary_indices = set()
         orig_pos = 0
