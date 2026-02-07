@@ -2044,6 +2044,41 @@ class AuditEditApplier:
             groups[key]['runs'].append(run)
         return [groups[k] for k in order]
 
+    def _build_para_segments_from_groups(
+        self,
+        para_groups: List[Dict],
+        match_start: int,
+        match_end: int
+    ) -> List[Dict]:
+        """
+        Build paragraph segments from grouped runs.
+
+        Args:
+            para_groups: Output of _group_runs_by_paragraph
+            match_start: Absolute start offset of the match in combined_text
+            match_end: Absolute end offset of the match in combined_text
+
+        Returns:
+            List of segment dicts for _apply_diff_per_paragraph
+        """
+        para_segments = []
+        for group in para_groups:
+            runs = group['runs']
+            if not runs:
+                continue
+            para_start = min(r['start'] for r in runs)
+            para_end = max(r['end'] for r in runs)
+            overlap_start = max(match_start, para_start)
+            overlap_end = min(match_end, para_end)
+            if overlap_start < overlap_end:
+                para_segments.append({
+                    'para_elem': group['para_elem'],
+                    'seg_start': overlap_start - match_start,
+                    'seg_end': overlap_end - match_start,
+                    'match_pos_in_para': overlap_start - para_start,
+                })
+        return para_segments
+
     def _init_para_order(self):
         """Initialize paragraph order cache for document-order comparisons."""
         if self.body_elem is None:
@@ -4292,20 +4327,11 @@ class AuditEditApplier:
             return 'cross_paragraph_fallback'
 
         # Build paragraph ranges within combined_text
-        para_segments = []
-        for group in para_groups:
-            runs = group['runs']
-            para_start = min(r['start'] for r in runs)
-            para_end = max(r['end'] for r in runs)
-            overlap_start = max(match_start, para_start)
-            overlap_end = min(match_end, para_end)
-            if overlap_start < overlap_end:
-                para_segments.append({
-                    'para_elem': group['para_elem'],
-                    'seg_start': overlap_start - match_start,
-                    'seg_end': overlap_end - match_start,
-                    'match_pos_in_para': overlap_start - para_start,
-                })
+        para_segments = self._build_para_segments_from_groups(
+            para_groups,
+            match_start,
+            match_end
+        )
 
         if not para_segments:
             return 'cross_paragraph_fallback'
