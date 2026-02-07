@@ -1721,8 +1721,14 @@ def main():
     use_vertex = is_vertex_ai_mode()
 
     if args.dry_run:
-        provider_name = "dry-run"
-        model_name = "dry-run"
+        if args.provider == "gemini":
+            use_gemini = True
+        elif args.provider == "openai":
+            use_gemini = False
+        elif "gemini" in model_name.lower():
+            use_gemini = True
+        else:
+            use_gemini = False
     # Validate credentials when provider is explicitly specified
     elif args.provider == "gemini":
         if not HAS_GEMINI:
@@ -1852,7 +1858,7 @@ def main():
     thinking_budget = None
     reasoning_effort = None
     
-    if not args.dry_run and use_gemini:
+    if use_gemini:
         # CLI takes precedence - if CLI provides one type, ignore env for the other type
         if args.thinking_level is not None:
             # CLI --thinking-level provided, use it exclusively
@@ -1890,7 +1896,7 @@ def main():
             print(f"Thinking: {thinking_level.upper()}")
         elif thinking_budget is not None:
             print(f"Thinking: Budget {thinking_budget} tokens")
-    elif not args.dry_run:
+    else:
         # For OpenAI, only resolve reasoning_effort
         reasoning_effort = args.reasoning_effort or os.getenv("OPENAI_REASONING_EFFORT")
         
