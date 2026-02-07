@@ -1720,8 +1720,17 @@ def main():
     # Check if Vertex AI mode is enabled
     use_vertex = is_vertex_ai_mode()
 
+    if args.dry_run:
+        if args.provider == "gemini":
+            use_gemini = True
+        elif args.provider == "openai":
+            use_gemini = False
+        elif "gemini" in model_name.lower():
+            use_gemini = True
+        else:
+            use_gemini = False
     # Validate credentials when provider is explicitly specified
-    if args.provider == "gemini":
+    elif args.provider == "gemini":
         if not HAS_GEMINI:
             print("Error: google-genai library not installed", file=sys.stderr)
             print("Install with: pip install google-genai", file=sys.stderr)
@@ -1835,7 +1844,10 @@ def main():
         client = create_openai_client(use_async=True)
 
     # Determine and print LLM provider name
-    provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
+    if args.dry_run:
+        provider_name = "dry-run"
+    else:
+        provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
     
     # Display LLM configuration
     print(f"\nLLM: {provider_name} / {model_name}")

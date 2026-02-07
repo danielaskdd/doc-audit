@@ -18,6 +18,7 @@ from _apply_audit_edits_helpers import (  # noqa: E402
     create_mock_applier,
     create_mock_body_with_paragraphs,
     create_table_with_cells, create_multi_row_table,
+    create_table_with_cells_with_br,
 )
 
 
@@ -396,6 +397,268 @@ class TestCrossCellBoundary:
         ]
 
         assert applier._check_cross_cell_boundary(runs_info) is True
+
+
+class TestMultiCellExtraction:
+    """Tests for multi-cell diff extraction behavior."""
+
+    def test_extract_insert_at_cell_right_boundary(self):
+        """
+        Insertion at a cell's right boundary should stay in that cell.
+
+        Regression case:
+        - violation: ["A", "B"]
+        - revised:   ["A!", "B"]
+        """
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells([['A'], ['B']], ['AAA', 'BBB'])
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["A", "B"]'
+
+        violation_text = '["A", "B"]'
+        revised_text = '["A!", "B"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        result = applier._try_extract_multi_cell_edits(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]['cell_violation'] == 'A'
+        assert result[0]['cell_revised'] == 'A!'
+
+
+class TestCellParagraphBoundaryHandling:
+    """Tests for separating paragraph boundaries from in-paragraph line breaks."""
+
+    def test_replace_multi_para_cell_with_br(self):
+        """Cell with w:br inside paragraph and multiple paragraphs should replace."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["Line1\nLine2", "Para2"]],
+            ["AAA", "BBB"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["Line1\\nLine2\\nPara2"]'
+
+        violation_text = '["Line1\\nLine2\\nPara2"]'
+        revised_text = '["Line1\\nLine2\\nPara2 (updated)"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+    def test_replace_single_para_cell_with_br(self):
+        """Single paragraph cell with w:br should replace successfully."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["Alpha\nBeta"]],
+            ["AAA"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'AAA'
+        )
+
+        assert boundary_error is None
+        assert combined_text == '["Alpha\\nBeta"]'
+
+        violation_text = '["Alpha\\nBeta"]'
+        revised_text = '["Alpha\\nBeta!"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+    def test_replace_multi_para_cell_soft_break_deletion(self):
+        """Deleting a soft break should not merge paragraphs in a cell."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["A\nB", "C"]],
+            ["AAA", "BBB"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["A\\nB\\nC"]'
+
+        violation_text = '["A\\nB\\nC"]'
+        revised_text = '["AB\\nC"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+        para_elems = body.findall('.//w:tc//w:p', NSMAP)
+        assert len(para_elems) == 2
+
+    def test_replace_multi_para_cell_preserves_leading_space(self):
+        """Leading spaces at paragraph edges should be preserved in replacements."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells(
+            [["  Beta", "Gamma"]],
+            ["AAA", "BBB"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["Beta\\nGamma"]'
+
+        violation_text = '["Beta\\nGamma"]'
+        revised_text = '["Beta!\\nGamma"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+        para_aaa = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        assert para_aaa is not None
+        para_text = ''.join(para_aaa.itertext())
+        assert para_text.startswith('  ')
 
 
 # ============================================================
@@ -792,6 +1055,38 @@ class TestApplyMethodsWithEscapedText:
             if ins_elem.text:
                 assert '\\' not in ins_elem.text, \
                     f"Inserted text should not have backslashes: {ins_elem.text}"
+
+    def test_apply_replace_preserves_inserted_leading_space(self):
+        """Inserted leading space should be preserved with xml:space='preserve'."""
+        p = create_paragraph_xml('FPGALASH是否存在')
+        applier = create_mock_applier()
+
+        run_elem = p.find('.//w:r', namespaces={'w': NS['w']})
+        runs_info = [{
+            'text': 'FPGALASH是否存在',
+            'start': 0,
+            'end': len('FPGALASH是否存在'),
+            'elem': run_elem,
+            'rPr': None,
+            'para_elem': p
+        }]
+
+        result = applier._apply_replace(
+            p,
+            'FPGALASH是否存在',
+            'FPGA FLASH是否存在',
+            'test reason',
+            runs_info,
+            0,
+            'test-author'
+        )
+
+        assert result == 'success'
+
+        ins_t = p.find('.//w:ins//w:t', namespaces={'w': NS['w']})
+        assert ins_t is not None
+        assert ins_t.text == ' F'
+        assert ins_t.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve'
 
     def test_apply_manual_with_escaped_quote(self):
         """Test _apply_manual correctly splits runs with quoted content"""

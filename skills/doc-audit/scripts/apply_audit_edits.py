@@ -2044,6 +2044,41 @@ class AuditEditApplier:
             groups[key]['runs'].append(run)
         return [groups[k] for k in order]
 
+    def _build_para_segments_from_groups(
+        self,
+        para_groups: List[Dict],
+        match_start: int,
+        match_end: int
+    ) -> List[Dict]:
+        """
+        Build paragraph segments from grouped runs.
+
+        Args:
+            para_groups: Output of _group_runs_by_paragraph
+            match_start: Absolute start offset of the match in combined_text
+            match_end: Absolute end offset of the match in combined_text
+
+        Returns:
+            List of segment dicts for _apply_diff_per_paragraph
+        """
+        para_segments = []
+        for group in para_groups:
+            runs = group['runs']
+            if not runs:
+                continue
+            para_start = min(r['start'] for r in runs)
+            para_end = max(r['end'] for r in runs)
+            overlap_start = max(match_start, para_start)
+            overlap_end = min(match_end, para_end)
+            if overlap_start < overlap_end:
+                para_segments.append({
+                    'para_elem': group['para_elem'],
+                    'seg_start': overlap_start - match_start,
+                    'seg_end': overlap_end - match_start,
+                    'match_pos_in_para': overlap_start - para_start,
+                })
+        return para_segments
+
     def _init_para_order(self):
         """Initialize paragraph order cache for document-order comparisons."""
         if self.body_elem is None:
@@ -2305,7 +2340,9 @@ class AuditEditApplier:
         # Calculate diff to find changed positions
         diff_ops = self._calculate_diff(violation_text, revised_text)
         
-        # Track positions of all changes (delete/insert operations)
+        # Track positions of all changes (delete/insert operations).
+        # Keep order aligned with diff_ops so we can map insertions reliably
+        # even when they land on a cell's right boundary.
         change_positions = []
         current_pos = 0
         
@@ -2417,10 +2454,14 @@ class AuditEditApplier:
             else:
                 cell_violation = violation_text[relative_start:relative_end]
 
-            # Build cell_revised by applying diff operations within cell range
+            # Build cell_revised by applying diff operations within cell range.
+            # Use change_indices to decide insert ownership. This prevents
+            # dropping inserts at exact cell right boundary (e.g., "A" -> "A!").
             violation_pos = 0
             revised_accumulator = ''
             has_changes_in_cell = False  # Track whether any changes affect this cell
+            change_cursor = 0
+            cell_change_indices = set(change_indices)
             
             for op, text in diff_ops:
                 if op == 'equal':
@@ -2444,14 +2485,15 @@ class AuditEditApplier:
                         has_changes_in_cell = True
                     
                     violation_pos += len(text)
+                    change_cursor += 1
                 
                 elif op == 'insert':
-                    # Check if insertion point is within cell range (exclude right boundary)
-                    # Insertions at exact cell boundary (violation_pos == relative_end) are 
-                    # ambiguous and should trigger cross-cell fallback
-                    if relative_start <= violation_pos < relative_end:
+                    # Change-to-cell ownership is already resolved above.
+                    # Respect that mapping to avoid boundary insertion loss.
+                    if change_cursor in cell_change_indices:
                         revised_accumulator += text
                         has_changes_in_cell = True
+                    change_cursor += 1
             
             # Use accumulator if there were changes (even if empty), otherwise keep original
             cell_revised = revised_accumulator if has_changes_in_cell else cell_violation
@@ -2463,7 +2505,7 @@ class AuditEditApplier:
                 _cell_revised = cell_revised
                 cell_revised = self._decode_json_escaped(cell_revised)
                 if _cell_revised != cell_revised:
-                    print(f"  [Multi-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+                    print(f"  [Multi-cell] Decoded revised_text json: {format_text_preview(_cell_revised, 60)}")
 
             result_edits.append({
                 'cell_violation': cell_violation,
@@ -2473,6 +2515,261 @@ class AuditEditApplier:
             })
         
         return result_edits if result_edits else None
+
+    def _apply_replace_in_cell_paragraphs(
+        self,
+        cell_violation: str,
+        cell_revised: str,
+        cell_runs: List[Dict],
+        violation_reason: str,
+        author: str,
+        skip_comment: bool = False
+    ) -> str:
+        """Apply replace within a table cell that may contain multiple paragraphs.
+
+        Follows the body cross-paragraph pattern: segments per paragraph,
+        calls _apply_replace separately for each changed paragraph.
+
+        Returns: 'success', 'cross_cell_fallback', 'conflict'
+        """
+        # 1. Collect unique paragraphs, sort by document order
+        cell_paras = set()
+        for run in cell_runs:
+            para = run.get('para_elem')
+            if para is not None:
+                cell_paras.add(para)
+
+        if not cell_paras:
+            return 'cross_cell_fallback'
+
+        if len(cell_paras) == 1:
+            # Single paragraph — direct apply (existing simple path)
+            para = next(iter(cell_paras))
+            runs_info, text = self._collect_runs_info_original(para)
+            pos = text.find(cell_violation)
+            if pos == -1:
+                return 'cross_cell_fallback'
+            return self._apply_replace(
+                para, cell_violation, cell_revised,
+                violation_reason, runs_info, pos, author,
+                skip_comment=skip_comment
+            )
+
+        # 2. Multiple paragraphs — sort, filter empty
+        para_list = []
+        for para in cell_paras:
+            first_run_pos = None
+            for run in cell_runs:
+                if run.get('para_elem') is para:
+                    first_run_pos = run.get('start', 0)
+                    break
+            para_list.append((first_run_pos or 0, para))
+        para_list.sort(key=lambda x: x[0])
+
+        # Build non-empty paragraph list (matching _collect_runs_info_in_table behavior)
+        non_empty_paras = []
+        for _, para in para_list:
+            _, p_text = self._collect_runs_info_original(para)
+            if p_text.strip():
+                non_empty_paras.append(para)
+
+        # 3. Build paragraph texts using real paragraph content.
+        # This preserves in-paragraph line breaks (w:br -> "\n") and
+        # avoids treating them as paragraph delimiters.
+        para_texts = []
+        for para in non_empty_paras:
+            para_runs, _ = self._collect_runs_info_original(para)
+            para_runs = self._strip_runs_whitespace(para_runs)
+            para_texts.append(''.join(r.get('text', '') for r in para_runs))
+
+        # Validate that the cell violation matches the reconstructed paragraphs.
+        # Paragraph delimiters are represented by a single "\n" between paragraphs.
+        expected_cell_text = '\n'.join(para_texts)
+        if cell_violation != expected_cell_text:
+            return 'cross_cell_fallback'
+
+        # 4. Build para_segments from actual paragraph lengths
+        para_segments = []
+        offset = 0
+        for i, para in enumerate(non_empty_paras):
+            part_len = len(para_texts[i])
+            para_segments.append({
+                'para_elem': para,
+                'seg_start': offset,
+                'seg_end': offset + part_len,
+                'match_pos_in_para': None,  # use find()
+            })
+            offset += part_len + 1  # +1 for \n
+
+        return self._apply_diff_per_paragraph(
+            para_segments, cell_violation, cell_revised,
+            violation_reason, author,
+            skip_comment=skip_comment,
+            fallback_status='cross_cell_fallback',
+            strip_runs=True,
+        )
+
+    @staticmethod
+    def _extract_revised_segment(diff_ops: List, seg_start: int, seg_end: int) -> str:
+        """Extract revised text corresponding to original range [seg_start, seg_end) from diff ops.
+
+        Each diff op is a tuple of (op, text, markup_or_none). 'equal' and 'delete'
+        consume positions in the original text; 'insert' adds text at the current
+        original position without consuming it.
+        """
+        orig_pos = 0
+        parts = []
+        for op_tuple in diff_ops:
+            op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
+            if op == 'equal':
+                op_start = orig_pos
+                op_end = orig_pos + len(text)
+                if op_end > seg_start and op_start < seg_end:
+                    take_start = max(seg_start, op_start) - op_start
+                    take_end = min(seg_end, op_end) - op_start
+                    parts.append(text[take_start:take_end])
+                orig_pos += len(text)
+            elif op == 'delete':
+                orig_pos += len(text)
+            elif op == 'insert':
+                if seg_start <= orig_pos <= seg_end:
+                    parts.append(text)
+        return ''.join(parts)
+
+    def _apply_diff_per_paragraph(
+        self,
+        para_segments: List[Dict],
+        violation_text: str,
+        revised_text: str,
+        violation_reason: str,
+        author: str,
+        skip_comment: bool = False,
+        fallback_status: str = 'cross_paragraph_fallback',
+        strip_runs: bool = False,
+    ) -> str:
+        """Apply diff-based replace across multiple paragraphs.
+
+        Shared logic for both body cross-paragraph and table cell multi-paragraph edits.
+
+        Args:
+            para_segments: List of dicts with keys:
+                - 'para_elem': the paragraph lxml element
+                - 'seg_start': start offset in violation_text
+                - 'seg_end': end offset in violation_text
+                - 'match_pos_in_para': int offset within paragraph DOM, or None to use find()
+            violation_text: Original text being replaced
+            revised_text: Replacement text
+            violation_reason: Reason for the change (used in comments)
+            author: Track change author string
+            skip_comment: If True, skip adding comment annotation
+            fallback_status: Status string to return on non-conflict failures
+            strip_runs: If True, strip leading/trailing whitespace from paragraph runs
+                (matches table_extractor behavior for cell text)
+
+        Returns:
+            'success', 'conflict', or fallback_status
+        """
+        # 1. Compute diff ops
+        has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or
+                      '<sup>' in revised_text or '<sub>' in revised_text)
+        if has_markup:
+            diff_ops = self._calculate_markup_aware_diff(violation_text, revised_text)
+        else:
+            plain_diff = self._calculate_diff(violation_text, revised_text)
+            diff_ops = [(op, text, None) for op, text in plain_diff]
+
+        # Check for special element modification (drawing/equation)
+        should_reject, reject_reason = self._check_special_element_modification(violation_text, diff_ops, has_markup)
+        if should_reject:
+            if self.verbose:
+                print(f"  [Fallback] {reject_reason}")
+            return fallback_status
+
+        # 2. Detect deleted paragraph boundaries
+        # Only treat the \n between paragraph segments as real boundaries.
+        # Soft breaks (<w:br/>) within a paragraph should not trigger paragraph merges.
+        boundary_positions = []
+        for i in range(len(para_segments) - 1):
+            boundary_pos = para_segments[i]['seg_end']
+            boundary_positions.append(boundary_pos)
+        boundary_pos_to_idx = {pos: i for i, pos in enumerate(boundary_positions)}
+        deleted_boundary_indices = set()
+        orig_pos = 0
+        for op_tuple in diff_ops:
+            op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
+            if op == 'delete' and '\n' in text:
+                for i, ch in enumerate(text):
+                    if ch == '\n':
+                        bpos = orig_pos + i
+                        if bpos in boundary_pos_to_idx:
+                            deleted_boundary_indices.add(boundary_pos_to_idx[bpos])
+            if op in ('equal', 'delete'):
+                orig_pos += len(text)
+
+        # 3. Per-paragraph apply
+        any_applied = False
+        for seg in para_segments:
+            para_elem = seg['para_elem']
+            seg_start = seg['seg_start']
+            seg_end = seg['seg_end']
+            orig_segment = violation_text[seg_start:seg_end]
+            revised_segment = self._extract_revised_segment(diff_ops, seg_start, seg_end)
+
+            if orig_segment == revised_segment:
+                continue
+
+            para_runs, para_text = self._collect_runs_info_original(para_elem)
+
+            match_pos = seg.get('match_pos_in_para')
+            if strip_runs:
+                combined_text = ''.join(r.get('text', '') for r in para_runs)
+                lead = len(combined_text) - len(combined_text.lstrip())
+                stripped_text = combined_text.strip()
+                if match_pos is None:
+                    match_pos = stripped_text.find(orig_segment)
+                if match_pos == -1:
+                    return fallback_status
+                match_pos += lead
+            else:
+                if match_pos is None:
+                    match_pos = para_text.find(orig_segment)
+                if match_pos == -1:
+                    return fallback_status
+
+            status = self._apply_replace(
+                para_elem, orig_segment, revised_segment,
+                violation_reason, para_runs, match_pos, author,
+                skip_comment=skip_comment
+            )
+
+            if status == 'conflict':
+                return 'conflict'
+            if status != 'success':
+                return fallback_status
+            any_applied = True
+
+        # 4. Merge paragraphs where boundary was deleted
+        if deleted_boundary_indices:
+            para_elems = [seg['para_elem'] for seg in para_segments]
+            for b_idx in sorted(deleted_boundary_indices, reverse=True):
+                if b_idx < 0 or b_idx + 1 >= len(para_elems):
+                    continue
+                prev_para = para_elems[b_idx]
+                next_para = para_elems[b_idx + 1]
+                for child in list(next_para):
+                    if child.tag == f'{{{NS["w"]}}}pPr':
+                        continue
+                    next_para.remove(child)
+                    prev_para.append(child)
+                parent = next_para.getparent()
+                if parent is not None:
+                    try:
+                        parent.remove(next_para)
+                    except ValueError:
+                        pass
+                para_elems.pop(b_idx + 1)
+
+        return 'success' if any_applied else 'success'
 
     def _try_extract_single_cell_edit(self, violation_text: str, revised_text: str,
                                        affected_runs: List[Dict], match_start: int) -> Optional[Dict]:
@@ -2643,7 +2940,7 @@ class AuditEditApplier:
             _cell_revised = cell_revised
             cell_revised = self._decode_json_escaped(cell_revised)
             if _cell_revised != cell_revised:
-                print("  [Single-cell] Decoded cell_revised to avoid JSON artifacts: {format_text_preview(_cell_revised, 60)}")
+                print(f"  [Single-cell] Decoded revised_text json: {format_text_preview(_cell_revised, 60)}")
 
         return {
             'cell_violation': cell_violation,
@@ -3753,7 +4050,12 @@ class AuditEditApplier:
         if len(segments) == 1 and segments[0][1] is None:
             # Simple case: no formatting, return single run
             run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
-            return etree.fromstring(run_xml)
+            run = etree.fromstring(run_xml)
+            t_elem = run.find(f'{{{NS["w"]}}}t')
+            if t_elem is not None:
+                # Preserve leading/trailing spaces in inserted/replaced text.
+                t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            return run
         
         # Complex case: need multiple runs with different formatting
         # Parse base rPr to potentially modify it
@@ -3802,6 +4104,8 @@ class AuditEditApplier:
             run.append(run_rPr)
             
             t_elem = etree.SubElement(run, f'{{{NS["w"]}}}t')
+            # Preserve leading/trailing spaces in inserted/replaced text.
+            t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             t_elem.text = segment_text
             
             container.append(run)
@@ -4000,11 +4304,8 @@ class AuditEditApplier:
         """
         Apply replace across multiple paragraphs with diff-level edits.
 
-        Strategy:
-        - Compute diff between violation_text and revised_text
-        - Apply per-paragraph replace only on changed segments
-        - If diff deletes paragraph boundary ('\\n'), merge paragraphs by removing
-          the boundary and appending following paragraph content to the previous one
+        Performs pre-checks (affected runs, table mode, overlap) then delegates
+        to _apply_diff_per_paragraph for diff computation and per-paragraph apply.
         """
         match_start = orig_match_start
         match_end = match_start + len(violation_text)
@@ -4025,145 +4326,27 @@ class AuditEditApplier:
         if self._check_overlap_with_revisions(real_runs):
             return 'conflict'
 
-        # Compute diff ops
-        has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or
-                      '<sup>' in revised_text or '<sub>' in revised_text)
-        if has_markup:
-            diff_ops = self._calculate_markup_aware_diff(violation_text, revised_text)
-        else:
-            plain_diff = self._calculate_diff(violation_text, revised_text)
-            diff_ops = [(op, text, None) for op, text in plain_diff]
-
-        # Check for special element modification (drawing/equation)
-        should_reject, reject_reason = self._check_special_element_modification(violation_text, diff_ops, has_markup)
-        if should_reject:
-            if self.verbose:
-                print(f"  [Fallback] {reject_reason}")
-            return 'cross_paragraph_fallback'
-
-        # Detect deleted paragraph boundaries
-        boundary_positions = [idx for idx, ch in enumerate(violation_text) if ch == '\n']
-        boundary_pos_to_idx = {pos: i for i, pos in enumerate(boundary_positions)}
-        deleted_boundary_indices = set()
-        orig_pos = 0
-        for op_tuple in diff_ops:
-            op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
-            if op == 'delete' and '\n' in text:
-                for i, ch in enumerate(text):
-                    if ch == '\n':
-                        bpos = orig_pos + i
-                        if bpos in boundary_pos_to_idx:
-                            deleted_boundary_indices.add(boundary_pos_to_idx[bpos])
-            if op in ('equal', 'delete'):
-                orig_pos += len(text)
-
-        # Build combined text for the match range
-        combined_text = ''.join(r.get('text', '') for r in orig_runs_info)
-        match_text = combined_text[match_start:match_end]
-
         # Build paragraph groups in order
         para_groups = self._group_runs_by_paragraph(real_runs)
         if not para_groups:
             return 'cross_paragraph_fallback'
 
         # Build paragraph ranges within combined_text
-        para_ranges = []
-        for group in para_groups:
-            runs = group['runs']
-            para_start = min(r['start'] for r in runs)
-            para_end = max(r['end'] for r in runs)
-            overlap_start = max(match_start, para_start)
-            overlap_end = min(match_end, para_end)
-            if overlap_start < overlap_end:
-                para_ranges.append({
-                    'para_elem': group['para_elem'],
-                    'overlap_start': overlap_start,
-                    'overlap_end': overlap_end,
-                    'para_start': para_start
-                })
+        para_segments = self._build_para_segments_from_groups(
+            para_groups,
+            match_start,
+            match_end
+        )
 
-        if not para_ranges:
+        if not para_segments:
             return 'cross_paragraph_fallback'
 
-        # Helper: extract revised segment for an original range
-        def extract_revised_segment(seg_start: int, seg_end: int) -> str:
-            orig_pos = 0
-            parts = []
-            for op_tuple in diff_ops:
-                op, text, _ = op_tuple if len(op_tuple) == 3 else (*op_tuple, None)
-                if op == 'equal':
-                    op_start = orig_pos
-                    op_end = orig_pos + len(text)
-                    # overlap with [seg_start, seg_end)
-                    if op_end > seg_start and op_start < seg_end:
-                        take_start = max(seg_start, op_start) - op_start
-                        take_end = min(seg_end, op_end) - op_start
-                        parts.append(text[take_start:take_end])
-                    orig_pos += len(text)
-                elif op == 'delete':
-                    orig_pos += len(text)
-                elif op == 'insert':
-                    # insert occurs at current orig_pos
-                    if seg_start <= orig_pos <= seg_end:
-                        parts.append(text)
-            return ''.join(parts)
-
-        # Apply per-paragraph replace
-        any_applied = False
-        for pr in para_ranges:
-            para_elem = pr['para_elem']
-            seg_start = pr['overlap_start'] - match_start
-            seg_end = pr['overlap_end'] - match_start
-            orig_segment = match_text[seg_start:seg_end]
-            revised_segment = extract_revised_segment(seg_start, seg_end)
-
-            if orig_segment == revised_segment:
-                continue
-
-            para_runs_info, _ = self._collect_runs_info_original(para_elem)
-            match_start_in_para = pr['overlap_start'] - pr['para_start']
-            status = self._apply_replace(
-                para_elem,
-                orig_segment,
-                revised_segment,
-                violation_reason,
-                para_runs_info,
-                match_start_in_para,
-                author
-            )
-
-            if status == 'conflict':
-                return 'conflict'
-            if status not in ('success',):
-                return 'cross_paragraph_fallback'
-            any_applied = True
-
-        # Merge paragraphs if boundary deleted
-        if deleted_boundary_indices:
-            # Collect paragraph elements in order
-            para_elems = [pr['para_elem'] for pr in para_ranges]
-            # Merge from right to left to avoid index shifts
-            for b_idx in sorted(deleted_boundary_indices, reverse=True):
-                if b_idx < 0 or b_idx + 1 >= len(para_elems):
-                    continue
-                prev_para = para_elems[b_idx]
-                next_para = para_elems[b_idx + 1]
-                # Move children (except pPr) from next to prev
-                for child in list(next_para):
-                    if child.tag == f'{{{NS["w"]}}}pPr':
-                        continue
-                    next_para.remove(child)
-                    prev_para.append(child)
-                parent = next_para.getparent()
-                if parent is not None:
-                    try:
-                        parent.remove(next_para)
-                    except ValueError:
-                        pass
-                # Remove from list to keep indices consistent
-                para_elems.pop(b_idx + 1)
-
-        return 'success' if any_applied else 'success'
+        return self._apply_diff_per_paragraph(
+            para_segments, violation_text, revised_text,
+            violation_reason, author,
+            fallback_status='cross_paragraph_fallback',
+            strip_runs=False,
+        )
     
     # ==================== Delete Operation ====================
 
@@ -5991,34 +6174,17 @@ class AuditEditApplier:
                         
                         if single_cell:
                             # Successfully extracted single-cell edit - all changes in one cell
-                            cell_para = None
-                            for run in single_cell['cell_runs']:
-                                if run.get('para_elem') is not None:
-                                    cell_para = run['para_elem']
-                                    break
-                            
-                            if cell_para is not None:
-                                # Collect runs for this single cell only
-                                cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
-                                cell_pos = cell_text.find(single_cell['cell_violation'])
-
-                                if cell_pos != -1:
-                                    # Apply replace to the single cell
-                                    success_status = self._apply_replace(
-                                        cell_para,
-                                        single_cell['cell_violation'],
-                                        single_cell['cell_revised'],
-                                        item.violation_reason,
-                                        cell_runs_info,
-                                        cell_pos,
-                                        item_author
-                                    )
-                                    
-                                    if self.verbose and success_status == 'success':
-                                        print(f"  [Single-cell] All changes in one cell, applied track change")
-                                else:
-                                    success_status = 'cross_cell_fallback'
-                            else:
+                            success_status = self._apply_replace_in_cell_paragraphs(
+                                single_cell['cell_violation'],
+                                single_cell['cell_revised'],
+                                single_cell['cell_runs'],
+                                item.violation_reason,
+                                item_author,
+                                skip_comment=False
+                            )
+                            if self.verbose and success_status == 'success':
+                                print(f"  [Single-cell] All changes in one cell, applied track change")
+                            elif success_status not in ('success', 'conflict'):
                                 success_status = 'cross_cell_fallback'
                         else:
                             # Try multi-cell extraction - changes distributed across cells
@@ -6036,92 +6202,35 @@ class AuditEditApplier:
                                 first_success_para = None
                                 
                                 for cell_edit in multi_cells:
-                                    # Collect all paragraphs in this cell (handle multi-paragraph cells)
-                                    cell_paras = set()
-                                    for run in cell_edit['cell_runs']:
-                                        para = run.get('para_elem')
-                                        if para is not None:
-                                            cell_paras.add(para)
-                                    
-                                    if not cell_paras:
-                                        failed_cells.append((cell_edit, None, "No paragraph found"))
-                                        continue  # Continue processing next cell
-                                    
-                                    # Build combined runs/text from all paragraphs in this cell
-                                    cell_runs_info = []
-                                    cell_text_parts = []
-                                    pos = 0
-                                    
-                                    # Sort paragraphs by document order (use first run's start position as key)
-                                    para_list = []
-                                    for para in cell_paras:
-                                        # Find first run from this paragraph to get its position
-                                        first_run_pos = None
-                                        for run in cell_edit['cell_runs']:
-                                            if run.get('para_elem') is para:
-                                                first_run_pos = run.get('start', 0)
-                                                break
-                                        para_list.append((first_run_pos or 0, para))
-                                    para_list.sort(key=lambda x: x[0])
-                                    
-                                    first_para = None
-                                    for para_idx, (_, para) in enumerate(para_list):
-                                        if first_para is None:
-                                            first_para = para
-                                        
-                                        # Collect runs for this paragraph
-                                        para_runs, para_text = self._collect_runs_info_original(para)
-                                        
-                                        # Add paragraph boundary (not for first paragraph)
-                                        if para_idx > 0 and cell_runs_info:
-                                            cell_runs_info.append({
-                                                'text': '\n',
-                                                'start': pos,
-                                                'end': pos + 1,
-                                                'para_elem': para,
-                                                'is_para_boundary': True
-                                            })
-                                            cell_text_parts.append('\n')
-                                            pos += 1
-                                        
-                                        # Add paragraph runs with adjusted positions
-                                        for run in para_runs:
-                                            run_copy = dict(run)
-                                            run_copy['para_elem'] = para
-                                            run_copy['start'] = run['start'] + pos
-                                            run_copy['end'] = run['end'] + pos
-                                            cell_runs_info.append(run_copy)
-                                        
-                                        cell_text_parts.append(para_text)
-                                        pos += len(para_text)
-                                    
-                                    cell_text = ''.join(cell_text_parts)
-                                    cell_pos = cell_text.find(cell_edit['cell_violation'])
-                                    
-                                    if cell_pos == -1:
-                                        failed_cells.append((cell_edit, first_para, "Text not found in cell"))
-                                        continue  # Continue processing next cell
-                                    
-                                    # Apply replace to this cell WITHOUT comment (skip_comment=True)
-                                    cell_status = self._apply_replace(
-                                        first_para,
+                                    cell_status = self._apply_replace_in_cell_paragraphs(
                                         cell_edit['cell_violation'],
                                         cell_edit['cell_revised'],
+                                        cell_edit['cell_runs'],
                                         item.violation_reason,
-                                        cell_runs_info,
-                                        cell_pos,
                                         item_author,
-                                        skip_comment=True  # Skip comment for individual cells
+                                        skip_comment=True
                                     )
-                                    
+
                                     if cell_status != 'success':
+                                        # Get first paragraph for error tracking
+                                        first_para = None
+                                        for run in cell_edit['cell_runs']:
+                                            para = run.get('para_elem')
+                                            if para is not None:
+                                                first_para = para
+                                                break
                                         failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
                                         continue  # Continue processing next cell
-                                    
+
                                     # Success - track for overall comment
                                     success_count += 1
                                     if first_success_para is None:
-                                        first_success_para = first_para
+                                        # Get first paragraph for comment placement
+                                        for run in cell_edit['cell_runs']:
+                                            para = run.get('para_elem')
+                                            if para is not None:
+                                                first_success_para = para
+                                                break
                                 
                                 # Handle results based on success/failure counts
                                 if success_count > 0:
