@@ -2305,7 +2305,9 @@ class AuditEditApplier:
         # Calculate diff to find changed positions
         diff_ops = self._calculate_diff(violation_text, revised_text)
         
-        # Track positions of all changes (delete/insert operations)
+        # Track positions of all changes (delete/insert operations).
+        # Keep order aligned with diff_ops so we can map insertions reliably
+        # even when they land on a cell's right boundary.
         change_positions = []
         current_pos = 0
         
@@ -2417,10 +2419,14 @@ class AuditEditApplier:
             else:
                 cell_violation = violation_text[relative_start:relative_end]
 
-            # Build cell_revised by applying diff operations within cell range
+            # Build cell_revised by applying diff operations within cell range.
+            # Use change_indices to decide insert ownership. This prevents
+            # dropping inserts at exact cell right boundary (e.g., "A" -> "A!").
             violation_pos = 0
             revised_accumulator = ''
             has_changes_in_cell = False  # Track whether any changes affect this cell
+            change_cursor = 0
+            cell_change_indices = set(change_indices)
             
             for op, text in diff_ops:
                 if op == 'equal':
@@ -2444,14 +2450,15 @@ class AuditEditApplier:
                         has_changes_in_cell = True
                     
                     violation_pos += len(text)
+                    change_cursor += 1
                 
                 elif op == 'insert':
-                    # Check if insertion point is within cell range (exclude right boundary)
-                    # Insertions at exact cell boundary (violation_pos == relative_end) are 
-                    # ambiguous and should trigger cross-cell fallback
-                    if relative_start <= violation_pos < relative_end:
+                    # Change-to-cell ownership is already resolved above.
+                    # Respect that mapping to avoid boundary insertion loss.
+                    if change_cursor in cell_change_indices:
                         revised_accumulator += text
                         has_changes_in_cell = True
+                    change_cursor += 1
             
             # Use accumulator if there were changes (even if empty), otherwise keep original
             cell_revised = revised_accumulator if has_changes_in_cell else cell_violation
@@ -3994,7 +4001,12 @@ class AuditEditApplier:
         if len(segments) == 1 and segments[0][1] is None:
             # Simple case: no formatting, return single run
             run_xml = f'<w:r xmlns:w="{NS["w"]}">{rPr_xml}<w:t>{self._escape_xml(text)}</w:t></w:r>'
-            return etree.fromstring(run_xml)
+            run = etree.fromstring(run_xml)
+            t_elem = run.find(f'{{{NS["w"]}}}t')
+            if t_elem is not None:
+                # Preserve leading/trailing spaces in inserted/replaced text.
+                t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            return run
         
         # Complex case: need multiple runs with different formatting
         # Parse base rPr to potentially modify it
@@ -4043,6 +4055,8 @@ class AuditEditApplier:
             run.append(run_rPr)
             
             t_elem = etree.SubElement(run, f'{{{NS["w"]}}}t')
+            # Preserve leading/trailing spaces in inserted/replaced text.
+            t_elem.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             t_elem.text = segment_text
             
             container.append(run)

@@ -398,6 +398,57 @@ class TestCrossCellBoundary:
         assert applier._check_cross_cell_boundary(runs_info) is True
 
 
+class TestMultiCellExtraction:
+    """Tests for multi-cell diff extraction behavior."""
+
+    def test_extract_insert_at_cell_right_boundary(self):
+        """
+        Insertion at a cell's right boundary should stay in that cell.
+
+        Regression case:
+        - violation: ["A", "B"]
+        - revised:   ["A!", "B"]
+        """
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells([['A'], ['B']], ['AAA', 'BBB'])
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["A", "B"]'
+
+        violation_text = '["A", "B"]'
+        revised_text = '["A!", "B"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        result = applier._try_extract_multi_cell_edits(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]['cell_violation'] == 'A'
+        assert result[0]['cell_revised'] == 'A!'
+
+
 # ============================================================
 # Tests: Real Document Table (tests/test.docx)
 # ============================================================
@@ -792,6 +843,38 @@ class TestApplyMethodsWithEscapedText:
             if ins_elem.text:
                 assert '\\' not in ins_elem.text, \
                     f"Inserted text should not have backslashes: {ins_elem.text}"
+
+    def test_apply_replace_preserves_inserted_leading_space(self):
+        """Inserted leading space should be preserved with xml:space='preserve'."""
+        p = create_paragraph_xml('FPGALASH是否存在')
+        applier = create_mock_applier()
+
+        run_elem = p.find('.//w:r', namespaces={'w': NS['w']})
+        runs_info = [{
+            'text': 'FPGALASH是否存在',
+            'start': 0,
+            'end': len('FPGALASH是否存在'),
+            'elem': run_elem,
+            'rPr': None,
+            'para_elem': p
+        }]
+
+        result = applier._apply_replace(
+            p,
+            'FPGALASH是否存在',
+            'FPGA FLASH是否存在',
+            'test reason',
+            runs_info,
+            0,
+            'test-author'
+        )
+
+        assert result == 'success'
+
+        ins_t = p.find('.//w:ins//w:t', namespaces={'w': NS['w']})
+        assert ins_t is not None
+        assert ins_t.text == ' F'
+        assert ins_t.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve'
 
     def test_apply_manual_with_escaped_quote(self):
         """Test _apply_manual correctly splits runs with quoted content"""
