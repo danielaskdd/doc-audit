@@ -2538,17 +2538,26 @@ class AuditEditApplier:
             if p_text.strip():
                 non_empty_paras.append(para)
 
-        # 3. Split by \n, validate paragraph count matches
-        v_parts = cell_violation.split('\n')
+        # 3. Build paragraph texts using real paragraph content.
+        # This preserves in-paragraph line breaks (w:br -> "\n") and
+        # avoids treating them as paragraph delimiters.
+        para_texts = []
+        for para in non_empty_paras:
+            para_runs, _ = self._collect_runs_info_original(para)
+            para_runs = self._strip_runs_whitespace(para_runs)
+            para_texts.append(''.join(r.get('text', '') for r in para_runs))
 
-        if len(v_parts) != len(non_empty_paras):
+        # Validate that the cell violation matches the reconstructed paragraphs.
+        # Paragraph delimiters are represented by a single "\n" between paragraphs.
+        expected_cell_text = '\n'.join(para_texts)
+        if cell_violation != expected_cell_text:
             return 'cross_cell_fallback'
 
-        # 4. Build para_segments from \n split ranges
+        # 4. Build para_segments from actual paragraph lengths
         para_segments = []
         offset = 0
         for i, para in enumerate(non_empty_paras):
-            part_len = len(v_parts[i])
+            part_len = len(para_texts[i])
             para_segments.append({
                 'para_elem': para,
                 'seg_start': offset,

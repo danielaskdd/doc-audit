@@ -18,6 +18,7 @@ from _apply_audit_edits_helpers import (  # noqa: E402
     create_mock_applier,
     create_mock_body_with_paragraphs,
     create_table_with_cells, create_multi_row_table,
+    create_table_with_cells_with_br,
 )
 
 
@@ -447,6 +448,109 @@ class TestMultiCellExtraction:
         assert len(result) == 1
         assert result[0]['cell_violation'] == 'A'
         assert result[0]['cell_revised'] == 'A!'
+
+
+class TestCellParagraphBoundaryHandling:
+    """Tests for separating paragraph boundaries from in-paragraph line breaks."""
+
+    def test_replace_multi_para_cell_with_br(self):
+        """Cell with w:br inside paragraph and multiple paragraphs should replace."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["Line1\nLine2", "Para2"]],
+            ["AAA", "BBB"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'BBB'
+        )
+
+        assert boundary_error is None
+        assert is_cross_para is True
+        assert combined_text == '["Line1\\nLine2\\nPara2"]'
+
+        violation_text = '["Line1\\nLine2\\nPara2"]'
+        revised_text = '["Line1\\nLine2\\nPara2 (updated)"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
+
+    def test_replace_single_para_cell_with_br(self):
+        """Single paragraph cell with w:br should replace successfully."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells_with_br(
+            [["Alpha\nBeta"]],
+            ["AAA"]
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        start_para = body.find('.//w:p[@w14:paraId="AAA"]', NSMAP)
+        runs_info, combined_text, is_cross_para, boundary_error = applier._collect_runs_info_across_paragraphs(
+            start_para, 'AAA'
+        )
+
+        assert boundary_error is None
+        assert combined_text == '["Alpha\\nBeta"]'
+
+        violation_text = '["Alpha\\nBeta"]'
+        revised_text = '["Alpha\\nBeta!"]'
+        match_start = combined_text.find(violation_text)
+        assert match_start != -1
+
+        affected = applier._find_affected_runs(
+            runs_info,
+            match_start,
+            match_start + len(violation_text),
+        )
+
+        single_cell = applier._try_extract_single_cell_edit(
+            violation_text,
+            revised_text,
+            affected,
+            match_start,
+        )
+        assert single_cell is not None
+
+        status = applier._apply_replace_in_cell_paragraphs(
+            single_cell['cell_violation'],
+            single_cell['cell_revised'],
+            single_cell['cell_runs'],
+            "Reason",
+            "Test",
+            skip_comment=True
+        )
+        assert status == 'success'
 
 
 # ============================================================

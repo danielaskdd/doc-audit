@@ -57,6 +57,32 @@ def create_paragraph_xml(text_content: str, para_id: str = "12345678") -> etree.
     return p
 
 
+def create_paragraph_with_br(text_content: str, para_id: str = "12345678") -> etree.Element:
+    """
+    Create a paragraph element with soft line breaks represented by <w:br/>.
+
+    Args:
+        text_content: Text with "\n" indicating soft line breaks
+        para_id: w14:paraId attribute value
+
+    Returns:
+        lxml Element representing <w:p>
+    """
+    p = etree.Element(f'{{{NS["w"]}}}p', nsmap=NSMAP)
+    p.set(f'{{{NS["w14"]}}}paraId', para_id)
+
+    parts = text_content.split('\n')
+    r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+    for idx, part in enumerate(parts):
+        if part:
+            t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+            t.text = part
+        if idx < len(parts) - 1:
+            etree.SubElement(r, f'{{{NS["w"]}}}br')
+
+    return p
+
+
 def create_paragraph_with_inline_image(
     text_before: str,
     img_id: str,
@@ -320,6 +346,36 @@ def create_table_with_cells(cell_contents: list, row_para_ids: list = None) -> e
             r = etree.SubElement(p, f'{{{NS["w"]}}}r')
             t = etree.SubElement(r, f'{{{NS["w"]}}}t')
             t.text = para_text
+    return tbl
+
+
+def create_table_with_cells_with_br(cell_contents: list, row_para_ids: list = None) -> etree.Element:
+    """
+    Create a single-row table with given cell contents using <w:br/> for soft breaks.
+
+    cell_contents: list of cells, where each cell is a list of paragraph strings.
+                   Each paragraph string may include "\n" for soft line breaks.
+    row_para_ids: optional list (or nested list) of paraIds assigned in order
+                  of paragraphs as they are created left-to-right.
+    """
+    tbl = etree.Element(f'{{{NS["w"]}}}tbl', nsmap=NSMAP)
+
+    tr = etree.SubElement(tbl, f'{{{NS["w"]}}}tr')
+    para_iter = iter(_flatten_para_ids(row_para_ids))
+
+    for cell in cell_contents:
+        tc = etree.SubElement(tr, f'{{{NS["w"]}}}tc')
+        for para_text in cell:
+            try:
+                para_id = next(para_iter)
+            except StopIteration:
+                para_id = None
+            if para_id:
+                p = create_paragraph_with_br(para_text, para_id=para_id)
+            else:
+                p = create_paragraph_with_br(para_text)
+            tc.append(p)
+
     return tbl
 
 
