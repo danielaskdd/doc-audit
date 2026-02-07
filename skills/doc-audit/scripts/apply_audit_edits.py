@@ -2474,6 +2474,110 @@ class AuditEditApplier:
         
         return result_edits if result_edits else None
 
+    def _apply_replace_in_cell_paragraphs(
+        self,
+        cell_violation: str,
+        cell_revised: str,
+        cell_runs: List[Dict],
+        violation_reason: str,
+        author: str,
+        skip_comment: bool = False
+    ) -> str:
+        """Apply replace within a table cell that may contain multiple paragraphs.
+
+        Follows the body cross-paragraph pattern: segments per paragraph,
+        calls _apply_replace separately for each changed paragraph.
+
+        Returns: 'success', 'cross_cell_fallback', 'conflict'
+        """
+        # 1. Collect unique paragraphs, sort by document order
+        cell_paras = set()
+        for run in cell_runs:
+            para = run.get('para_elem')
+            if para is not None:
+                cell_paras.add(para)
+
+        if not cell_paras:
+            return 'cross_cell_fallback'
+
+        if len(cell_paras) == 1:
+            # Single paragraph — direct apply (existing simple path)
+            para = next(iter(cell_paras))
+            runs_info, text = self._collect_runs_info_original(para)
+            pos = text.find(cell_violation)
+            if pos == -1:
+                return 'cross_cell_fallback'
+            return self._apply_replace(
+                para, cell_violation, cell_revised,
+                violation_reason, runs_info, pos, author,
+                skip_comment=skip_comment
+            )
+
+        # 2. Multiple paragraphs — sort, filter empty
+        para_list = []
+        for para in cell_paras:
+            first_run_pos = None
+            for run in cell_runs:
+                if run.get('para_elem') is para:
+                    first_run_pos = run.get('start', 0)
+                    break
+            para_list.append((first_run_pos or 0, para))
+        para_list.sort(key=lambda x: x[0])
+
+        # Build non-empty paragraph list (matching _collect_runs_info_in_table behavior)
+        non_empty_paras = []
+        for _, para in para_list:
+            _, p_text = self._collect_runs_info_original(para)
+            if p_text.strip():
+                non_empty_paras.append(para)
+
+        # 3. Split by \n, validate paragraph count
+        v_parts = cell_violation.split('\n')
+        r_parts = cell_revised.split('\n')
+
+        if len(v_parts) != len(r_parts) or len(v_parts) != len(non_empty_paras):
+            return 'cross_cell_fallback'
+
+        # 4. Find changed paragraphs
+        changed = [(i, v, r) for i, (v, r) in enumerate(zip(v_parts, r_parts)) if v != r]
+
+        if not changed:
+            return 'cross_cell_fallback'  # No actual change
+
+        if len(changed) > 1:
+            # Multiple paragraphs changed — too complex, fallback
+            return 'cross_cell_fallback'
+
+        # 5. Apply to the single changed paragraph
+        idx, para_v, para_r = changed[0]
+        target_para = non_empty_paras[idx]
+        para_runs, _ = self._collect_runs_info_original(target_para)
+        para_runs = self._strip_runs_whitespace(para_runs)
+
+        # Rebuild positions after stripping
+        pos = 0
+        for run in para_runs:
+            run['start'] = pos
+            run['end'] = pos + len(run['text'])
+            pos += len(run['text'])
+
+        para_text = ''.join(r['text'] for r in para_runs)
+        para_pos = para_text.find(para_v)
+
+        if para_pos == -1:
+            return 'cross_cell_fallback'
+
+        status = self._apply_replace(
+            target_para, para_v, para_r,
+            violation_reason, para_runs, para_pos, author,
+            skip_comment=skip_comment
+        )
+
+        if self.verbose and status == 'success':
+            print(f"  [Cell multi-para] Narrowed to paragraph {idx}, applied track change")
+
+        return status
+
     def _try_extract_single_cell_edit(self, violation_text: str, revised_text: str,
                                        affected_runs: List[Dict], match_start: int) -> Optional[Dict]:
         """
@@ -5991,93 +6095,17 @@ class AuditEditApplier:
                         
                         if single_cell:
                             # Successfully extracted single-cell edit - all changes in one cell
-                            # Collect all unique paragraphs in this cell
-                            cell_paras = set()
-                            for run in single_cell['cell_runs']:
-                                para = run.get('para_elem')
-                                if para is not None:
-                                    cell_paras.add(para)
-
-                            if cell_paras:
-                                if len(cell_paras) == 1:
-                                    # Single paragraph - original simple path
-                                    cell_para = next(iter(cell_paras))
-                                    cell_runs_info, cell_text = self._collect_runs_info_original(cell_para)
-                                    first_para = cell_para
-                                else:
-                                    # Multiple paragraphs - collect runs from all, with \n boundaries
-                                    para_list = []
-                                    for para in cell_paras:
-                                        first_run_pos = None
-                                        for run in single_cell['cell_runs']:
-                                            if run.get('para_elem') is para:
-                                                first_run_pos = run.get('start', 0)
-                                                break
-                                        para_list.append((first_run_pos or 0, para))
-                                    para_list.sort(key=lambda x: x[0])
-
-                                    cell_runs_info = []
-                                    cell_text_parts = []
-                                    pos = 0
-                                    first_para = None
-
-                                    for para_idx, (_, para) in enumerate(para_list):
-                                        if first_para is None:
-                                            first_para = para
-
-                                        para_runs, para_text = self._collect_runs_info_original(para)
-
-                                        # Strip paragraph whitespace to match table collection
-                                        # (_collect_runs_info_in_table strips each paragraph)
-                                        if not para_text.strip():
-                                            continue  # Skip empty paragraphs
-                                        para_runs = self._strip_runs_whitespace(para_runs)
-
-                                        if para_idx > 0 and cell_runs_info:
-                                            cell_runs_info.append({
-                                                'text': '\n',
-                                                'start': pos,
-                                                'end': pos + 1,
-                                                'para_elem': para,
-                                                'is_para_boundary': True
-                                            })
-                                            cell_text_parts.append('\n')
-                                            pos += 1
-
-                                        for run in para_runs:
-                                            run_copy = dict(run)
-                                            run_copy['para_elem'] = para
-                                            run_len = len(run['text'])
-                                            run_copy['start'] = pos
-                                            run_copy['end'] = pos + run_len
-                                            cell_runs_info.append(run_copy)
-                                            pos += run_len
-
-                                        cell_text_parts.append(
-                                            ''.join(r['text'] for r in para_runs)
-                                        )
-
-                                    cell_text = ''.join(cell_text_parts)
-
-                                cell_pos = cell_text.find(single_cell['cell_violation'])
-
-                                if cell_pos != -1:
-                                    # Apply replace to the single cell
-                                    success_status = self._apply_replace(
-                                        first_para,
-                                        single_cell['cell_violation'],
-                                        single_cell['cell_revised'],
-                                        item.violation_reason,
-                                        cell_runs_info,
-                                        cell_pos,
-                                        item_author
-                                    )
-                                    
-                                    if self.verbose and success_status == 'success':
-                                        print(f"  [Single-cell] All changes in one cell, applied track change")
-                                else:
-                                    success_status = 'cross_cell_fallback'
-                            else:
+                            success_status = self._apply_replace_in_cell_paragraphs(
+                                single_cell['cell_violation'],
+                                single_cell['cell_revised'],
+                                single_cell['cell_runs'],
+                                item.violation_reason,
+                                item_author,
+                                skip_comment=False
+                            )
+                            if self.verbose and success_status == 'success':
+                                print(f"  [Single-cell] All changes in one cell, applied track change")
+                            elif success_status not in ('success', 'conflict'):
                                 success_status = 'cross_cell_fallback'
                         else:
                             # Try multi-cell extraction - changes distributed across cells
@@ -6095,92 +6123,35 @@ class AuditEditApplier:
                                 first_success_para = None
                                 
                                 for cell_edit in multi_cells:
-                                    # Collect all paragraphs in this cell (handle multi-paragraph cells)
-                                    cell_paras = set()
-                                    for run in cell_edit['cell_runs']:
-                                        para = run.get('para_elem')
-                                        if para is not None:
-                                            cell_paras.add(para)
-                                    
-                                    if not cell_paras:
-                                        failed_cells.append((cell_edit, None, "No paragraph found"))
-                                        continue  # Continue processing next cell
-                                    
-                                    # Build combined runs/text from all paragraphs in this cell
-                                    cell_runs_info = []
-                                    cell_text_parts = []
-                                    pos = 0
-                                    
-                                    # Sort paragraphs by document order (use first run's start position as key)
-                                    para_list = []
-                                    for para in cell_paras:
-                                        # Find first run from this paragraph to get its position
-                                        first_run_pos = None
-                                        for run in cell_edit['cell_runs']:
-                                            if run.get('para_elem') is para:
-                                                first_run_pos = run.get('start', 0)
-                                                break
-                                        para_list.append((first_run_pos or 0, para))
-                                    para_list.sort(key=lambda x: x[0])
-                                    
-                                    first_para = None
-                                    for para_idx, (_, para) in enumerate(para_list):
-                                        if first_para is None:
-                                            first_para = para
-                                        
-                                        # Collect runs for this paragraph
-                                        para_runs, para_text = self._collect_runs_info_original(para)
-                                        
-                                        # Add paragraph boundary (not for first paragraph)
-                                        if para_idx > 0 and cell_runs_info:
-                                            cell_runs_info.append({
-                                                'text': '\n',
-                                                'start': pos,
-                                                'end': pos + 1,
-                                                'para_elem': para,
-                                                'is_para_boundary': True
-                                            })
-                                            cell_text_parts.append('\n')
-                                            pos += 1
-                                        
-                                        # Add paragraph runs with adjusted positions
-                                        for run in para_runs:
-                                            run_copy = dict(run)
-                                            run_copy['para_elem'] = para
-                                            run_copy['start'] = run['start'] + pos
-                                            run_copy['end'] = run['end'] + pos
-                                            cell_runs_info.append(run_copy)
-                                        
-                                        cell_text_parts.append(para_text)
-                                        pos += len(para_text)
-                                    
-                                    cell_text = ''.join(cell_text_parts)
-                                    cell_pos = cell_text.find(cell_edit['cell_violation'])
-                                    
-                                    if cell_pos == -1:
-                                        failed_cells.append((cell_edit, first_para, "Text not found in cell"))
-                                        continue  # Continue processing next cell
-                                    
-                                    # Apply replace to this cell WITHOUT comment (skip_comment=True)
-                                    cell_status = self._apply_replace(
-                                        first_para,
+                                    cell_status = self._apply_replace_in_cell_paragraphs(
                                         cell_edit['cell_violation'],
                                         cell_edit['cell_revised'],
+                                        cell_edit['cell_runs'],
                                         item.violation_reason,
-                                        cell_runs_info,
-                                        cell_pos,
                                         item_author,
-                                        skip_comment=True  # Skip comment for individual cells
+                                        skip_comment=True
                                     )
-                                    
+
                                     if cell_status != 'success':
+                                        # Get first paragraph for error tracking
+                                        first_para = None
+                                        for run in cell_edit['cell_runs']:
+                                            para = run.get('para_elem')
+                                            if para is not None:
+                                                first_para = para
+                                                break
                                         failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
                                         continue  # Continue processing next cell
-                                    
+
                                     # Success - track for overall comment
                                     success_count += 1
                                     if first_success_para is None:
-                                        first_success_para = first_para
+                                        # Get first paragraph for comment placement
+                                        for run in cell_edit['cell_runs']:
+                                            para = run.get('para_elem')
+                                            if para is not None:
+                                                first_success_para = para
+                                                break
                                 
                                 # Handle results based on success/failure counts
                                 if success_count > 0:
