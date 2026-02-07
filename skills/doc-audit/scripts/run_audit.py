@@ -1720,8 +1720,11 @@ def main():
     # Check if Vertex AI mode is enabled
     use_vertex = is_vertex_ai_mode()
 
+    if args.dry_run:
+        provider_name = "dry-run"
+        model_name = "dry-run"
     # Validate credentials when provider is explicitly specified
-    if args.provider == "gemini":
+    elif args.provider == "gemini":
         if not HAS_GEMINI:
             print("Error: google-genai library not installed", file=sys.stderr)
             print("Install with: pip install google-genai", file=sys.stderr)
@@ -1835,7 +1838,10 @@ def main():
         client = create_openai_client(use_async=True)
 
     # Determine and print LLM provider name
-    provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
+    if args.dry_run:
+        provider_name = "dry-run"
+    else:
+        provider_name = get_gemini_provider_name() if use_gemini else get_openai_provider_name()
     
     # Display LLM configuration
     print(f"\nLLM: {provider_name} / {model_name}")
@@ -1846,7 +1852,7 @@ def main():
     thinking_budget = None
     reasoning_effort = None
     
-    if use_gemini:
+    if not args.dry_run and use_gemini:
         # CLI takes precedence - if CLI provides one type, ignore env for the other type
         if args.thinking_level is not None:
             # CLI --thinking-level provided, use it exclusively
@@ -1884,7 +1890,7 @@ def main():
             print(f"Thinking: {thinking_level.upper()}")
         elif thinking_budget is not None:
             print(f"Thinking: Budget {thinking_budget} tokens")
-    else:
+    elif not args.dry_run:
         # For OpenAI, only resolve reasoning_effort
         reasoning_effort = args.reasoning_effort or os.getenv("OPENAI_REASONING_EFFORT")
         
