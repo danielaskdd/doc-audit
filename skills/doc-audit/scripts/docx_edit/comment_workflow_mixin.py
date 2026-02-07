@@ -1,4 +1,28 @@
-from .common import *
+from .common import (
+    NS,
+    EditItem,
+    EditResult,
+    COMMENTS_CONTENT_TYPE,
+    extract_longest_segment,
+    format_text_preview,
+    build_numbering_variants,
+    strip_numbering_by_mode,
+    strip_table_row_number_only,
+    strip_table_row_numbering,
+    normalize_table_json,
+    DEBUG_MARKER
+)
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+
+from docx import Document
+from docx.opc.packuri import PackURI
+from docx.opc.part import Part
+from lxml import etree
+
+from utils import sanitize_xml_string
 
 
 class CommentWorkflowMixin:

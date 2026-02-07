@@ -1,4 +1,10 @@
-from .common import *
+from typing import List, Dict, Tuple, Optional
+from .common import (
+    NS,
+    EditItem,
+    format_text_preview,
+)
+from lxml import etree
 
 
 class TableEditMixin:

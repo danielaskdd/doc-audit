@@ -1,4 +1,9 @@
-from .common import *
+import json
+import difflib
+from typing import List, Dict, Tuple, Optional
+from lxml import etree
+
+from .common import NS, DRAWING_PATTERN, EQUATION_PATTERN, format_text_preview
 
 
 class RevisionMixin:

@@ -1,4 +1,12 @@
-from .common import *
+from .common import (
+    NS, EditItem, EditResult, json_escape, build_numbering_variants, DEBUG_MARKER
+)
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Generator, Iterator
+import json
+import hashlib
+from docx import Document
+from lxml import etree
 
 
 class NavigationMixin:

@@ -4,24 +4,11 @@ ABOUTME: Applies audit results to Word documents with track changes and comments
 ABOUTME: Reads JSONL export from audit report and modifies the source document
 """
 
-import argparse
-import copy
-import hashlib
 import json
-import sys
 import re
-import difflib
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Generator, Iterator
+from typing import List, Tuple, Optional
 
-from docx import Document
-from docx.opc.part import Part
-from docx.opc.packuri import PackURI
-from lxml import etree
-
-from utils import sanitize_xml_string
 
 # ============================================================
 # Constants

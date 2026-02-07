@@ -4,16 +4,16 @@ ABOUTME: Applies audit results to Word documents with track changes and comments
 ABOUTME: Reads JSONL export from audit report and modifies the source document
 """
 
+import argparse
+import sys
+
 from docx_edit.common import (
-    NS,
-    DRAWING_PATTERN,
     EditItem,
     EditResult,
+    NS,
+    extract_longest_segment,
     format_text_preview,
-    strip_auto_numbering,
     strip_table_row_numbering,
-    argparse,
-    sys,
 )
 from docx_edit.navigation_mixin import NavigationMixin
 from docx_edit.table_edit_mixin import TableEditMixin
@@ -30,6 +30,16 @@ class AuditEditApplier(
     CommentWorkflowMixin,
 ):
     """Composite applier assembled from focused mixins for easier maintenance."""
+
+
+__all__ = [
+    "AuditEditApplier",
+    "EditItem",
+    "EditResult",
+    "NS",
+    "extract_longest_segment",
+    "strip_table_row_numbering",
+]
 
 
 def main() -> int:

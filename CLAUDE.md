@@ -33,9 +33,20 @@ doc-audit/
 │       │   ├── parse_document.py       # DOCX parsing with numbering
 │       │   ├── run_audit.py            # LLM audit execution
 │       │   ├── generate_report.py      # HTML/Excel report generation
-│       │   ├── apply_audit_edits.py    # Track changes integration
+│       │   ├── apply_audit_edits.py    # Track changes entry point
 │       │   ├── numbering_resolver.py   # Word numbering resolution
-│       │   └── table_extractor.py      # Table extraction utilities
+│       │   ├── table_extractor.py      # Table extraction utilities
+│       │   ├── docx_edit/              # DOCX editing package (used by apply_audit_edits)
+│       │   │   ├── common.py           # Shared constants, XML helpers, data classes
+│       │   │   ├── navigation_mixin.py # Paragraph lookup and range navigation
+│       │   │   ├── revision_mixin.py   # Track-changes revision markup
+│       │   │   ├── table_edit_mixin.py # Table cell editing operations
+│       │   │   ├── comment_workflow_mixin.py  # Comment insertion workflow
+│       │   │   └── workflow_mixin.py   # High-level edit orchestration
+│       │   └── omml/                   # Office Math ML utilities
+│       │       ├── ommlparser.py       # OMML-to-text parser
+│       │       ├── cleaners.py         # Math text cleanup routines
+│       │       └── utils.py            # Shared OMML helpers
 │       └── assets/
 │           ├── default_rules.json      # Default audit rules
 │           └── report_template.html    # Jinja2 HTML template
@@ -244,6 +255,8 @@ parse_document.py ──→ _blocks.jsonl ──┐             │
 Helper modules (imported by main scripts):
 - `numbering_resolver.py` - Resolves Word numbering definitions to labels
 - `table_extractor.py` - Extracts tables with structure preservation
+- `docx_edit/` - Modular DOCX editing package (mixins composed into `DocxEditor` class)
+- `omml/` - Office Math Markup Language parsing and text conversion
 
 ## Important Conventions
 
