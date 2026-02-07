@@ -2720,21 +2720,21 @@ class AuditEditApplier:
 
             para_runs, para_text = self._collect_runs_info_original(para_elem)
 
-            if strip_runs:
-                para_runs = self._strip_runs_whitespace(para_runs)
-                # Rebuild positions after stripping
-                pos = 0
-                for run in para_runs:
-                    run['start'] = pos
-                    run['end'] = pos + len(run['text'])
-                    pos += len(run['text'])
-                para_text = ''.join(r['text'] for r in para_runs)
-
             match_pos = seg.get('match_pos_in_para')
-            if match_pos is None:
-                match_pos = para_text.find(orig_segment)
-            if match_pos == -1:
-                return fallback_status
+            if strip_runs:
+                combined_text = ''.join(r.get('text', '') for r in para_runs)
+                lead = len(combined_text) - len(combined_text.lstrip())
+                stripped_text = combined_text.strip()
+                if match_pos is None:
+                    match_pos = stripped_text.find(orig_segment)
+                if match_pos == -1:
+                    return fallback_status
+                match_pos += lead
+            else:
+                if match_pos is None:
+                    match_pos = para_text.find(orig_segment)
+                if match_pos == -1:
+                    return fallback_status
 
             status = self._apply_replace(
                 para_elem, orig_segment, revised_segment,
