@@ -47,9 +47,10 @@ violation_text guidelines:
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
 4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
 5. If an entire section is in violation, select the first paragraph as the violation_text.
-6. For violation_text in table content of JSON format:
-    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
-    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revised_text field should be aligned at the row level, consistent with violation_text.
+6. Handling violation_text in JSON-formatted Tables:
+    - Report at the cell level (plain text) if the content is long enough for a unique match.
+    - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
+    - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
 7. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 8. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
@@ -138,11 +139,11 @@ evidence field guidelines:
 3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags    
-4. If the evidence content is excessively long (e.g., spanning multiple sentences or entire session), extract the most relevant part that directly supports the extracted value.
-5. For evidence content in table content of JSON format:
-    - Report evidence at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the evidence to encompass the entire row in JSON format.
-    - Report evidence at row level with JSON format if cell-level is not feasible. The evidence should start from the first cell in the row, i.e., starting with '['.
-6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in evidence.
+4. If the evidence content spanning multiple sentences or paragraphs, extract all content without using ellipses to replace any part of the original text.
+5. Handling evidence in JSON-formatted Tables:
+    - Report at the cell level (plain text) if the content is long enough for a unique match.
+    - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
+    - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
 
 Return JSON only with this structure:
 {{
@@ -221,9 +222,10 @@ violation_text guidelines:
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
 4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
-5. For violation_text in table content of JSON format:
-    - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
-    - Report violation_text at row level with JSON format if cell-level is not feasible. The violation_text should start from the first cell in the row, i.e., starting with '['.
+5. Handling violation_text in JSON-formatted Tables:
+    - Report at the cell level (plain text) if the content is long enough for a unique match.
+    - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
+    - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
 6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 7. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
