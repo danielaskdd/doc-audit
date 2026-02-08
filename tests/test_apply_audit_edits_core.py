@@ -1350,3 +1350,115 @@ class TestMainExitCodeBehavior:
 # ============================================================
 # Tests: _collect_runs_info_across_paragraphs
 # ============================================================
+
+
+def _create_body_with_conflict_runs(text_before: str, between: str, text_after: str) -> etree.Element:
+    """Create body with one paragraph where both target matches are in revision runs."""
+    body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+    p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+    p.set(f'{{{NS["w14"]}}}paraId', "AAA")
+
+    r1 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+    t1 = etree.SubElement(r1, f'{{{NS["w"]}}}t')
+    t1.text = text_before
+
+    del1 = etree.SubElement(p, f'{{{NS["w"]}}}del')
+    del1.set(f'{{{NS["w"]}}}id', "1")
+    del1.set(f'{{{NS["w"]}}}author', "Test")
+    del1_run = etree.SubElement(del1, f'{{{NS["w"]}}}r')
+    del1_t = etree.SubElement(del1_run, f'{{{NS["w"]}}}delText')
+    del1_t.text = "foo"
+
+    r2 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+    t2 = etree.SubElement(r2, f'{{{NS["w"]}}}t')
+    t2.text = between
+
+    del2 = etree.SubElement(p, f'{{{NS["w"]}}}del')
+    del2.set(f'{{{NS["w"]}}}id', "2")
+    del2.set(f'{{{NS["w"]}}}author', "Test")
+    del2_run = etree.SubElement(del2, f'{{{NS["w"]}}}r')
+    del2_t = etree.SubElement(del2_run, f'{{{NS["w"]}}}delText')
+    del2_t.text = "foo"
+
+    r3 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+    t3 = etree.SubElement(r3, f'{{{NS["w"]}}}t')
+    t3.text = text_after
+    return body
+
+
+class TestProcessItemConflictRetry:
+    """Tests for conflict retry behavior in _process_item."""
+
+    def test_replace_conflict_retries_next_match_and_succeeds(self):
+        """If first match conflicts, should retry next match and apply edit."""
+        applier = create_mock_applier()
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p.set(f'{{{NS["w14"]}}}paraId', "AAA")
+
+        r1 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t1 = etree.SubElement(r1, f'{{{NS["w"]}}}t')
+        t1.text = "prefix "
+
+        del_elem = etree.SubElement(p, f'{{{NS["w"]}}}del')
+        del_elem.set(f'{{{NS["w"]}}}id', "1")
+        del_elem.set(f'{{{NS["w"]}}}author', "Test")
+        del_run = etree.SubElement(del_elem, f'{{{NS["w"]}}}r')
+        del_t = etree.SubElement(del_run, f'{{{NS["w"]}}}delText')
+        del_t.text = "foo"
+
+        r2 = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t2 = etree.SubElement(r2, f'{{{NS["w"]}}}t')
+        t2.text = " middle foo suffix"
+
+        applier.body_elem = body
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            violation_text="foo",
+            fix_action="replace",
+            revised_text="bar",
+        )
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is False
+        assert result.error_message is None
+        assert not any(
+            c["text"].startswith("[FALLBACK]Multiple changes overlap.")
+            for c in applier.comments
+        )
+
+    def test_conflict_fallback_comment_uses_last_matched_text(self):
+        """When all matches conflict, fallback comment should use last matched text."""
+        applier = create_mock_applier()
+        applier.body_elem = _create_body_with_conflict_runs(
+            text_before="prefix ",
+            between=" middle ",
+            text_after=" suffix",
+        )
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            violation_text=" foo ",
+            fix_action="delete",
+            revised_text="",
+        )
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message == "Multiple changes overlap."
+
+        conflict_comments = [
+            c for c in applier.comments
+            if c["text"].startswith("[FALLBACK]Multiple changes overlap.")
+        ]
+        assert len(conflict_comments) == 1
+
+        where_part = conflict_comments[0]["text"].split("{WHERE}", 1)[1].split("{SUGGEST}", 1)[0]
+        assert where_part == "foo "

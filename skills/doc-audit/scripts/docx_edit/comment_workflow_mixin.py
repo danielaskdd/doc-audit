@@ -1258,267 +1258,337 @@ class CommentWorkflowMixin:
                         return EditResult(False, item, reason)
             
             # 3. Apply operation based on fix_action
-            # Pass matched_runs_info and matched_start to avoid double matching
-            success_status = None
-            
-            if item.fix_action == 'delete':
-                # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
-                if is_cross_paragraph:
-                    # Get affected runs in the matched range
-                    match_end = matched_start + len(violation_text)
-                    affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
+            # Pass matched_runs_info and matched_start to avoid double matching.
+            # For delete/replace: if current match conflicts with existing revisions,
+            # retry with the next match in the remaining block content.
+            def _filter_non_boundary_runs(runs: List[Dict]) -> List[Dict]:
+                return [
+                    r for r in runs
+                    if not r.get('is_para_boundary', False)
+                    and not r.get('is_json_boundary', False)
+                    and not r.get('is_json_escape', False)
+                ]
 
-                    # Filter out boundary markers (paragraph and JSON boundaries)
-                    real_runs = [r for r in affected
-                                 if not r.get('is_para_boundary', False)
-                                 and not r.get('is_json_boundary', False)
-                                 and not r.get('is_json_escape', False)]
+            def _resolve_target_para_for_match(current_runs: List[Dict], current_start: int,
+                                               fallback_para):
+                match_end = current_start + len(violation_text)
+                affected = self._find_affected_runs(current_runs, current_start, match_end)
+                real_runs = _filter_non_boundary_runs(affected)
+                for run in real_runs:
+                    para = run.get('para_elem')
+                    if para is not None:
+                        return para
+                return fallback_para
 
-                    # Check if actual match spans multiple paragraphs
-                    para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
+            def _apply_delete_or_replace(action: str, current_start: int, current_target_para):
+                current_status = None
+                current_para = current_target_para
 
-                    # Check if match spans multiple table rows
-                    if self._check_cross_row_boundary(real_runs):
-                        # Multi-row delete: use cell-by-cell deletion
-                        if self.verbose:
-                            print(f"  [Multi-row] Applying cell-by-cell deletion")
-                        success_status = self._apply_delete_multi_cell(
-                            real_runs, violation_text,
-                            item.violation_reason, item_author, matched_start,
-                            item
-                        )
-                    # Check if match spans multiple table cells (within same row)
-                    elif self._check_cross_cell_boundary(real_runs):
-                        # Multi-cell delete: use cell-by-cell deletion
-                        if self.verbose:
-                            print(f"  [Multi-cell] Applying cell-by-cell deletion")
-                        success_status = self._apply_delete_multi_cell(
-                            real_runs, violation_text,
-                            item.violation_reason, item_author, matched_start,
-                            item
-                        )
-                    elif len(para_elems) > 1:
-                        # Actually spans multiple paragraphs
-                        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+                if action == 'delete':
+                    # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
+                    if is_cross_paragraph:
+                        # Get affected runs in the matched range
+                        match_end = current_start + len(violation_text)
+                        affected = self._find_affected_runs(matched_runs_info, current_start, match_end)
+
+                        # Filter out boundary markers (paragraph and JSON boundaries)
+                        real_runs = _filter_non_boundary_runs(affected)
+
+                        # Check if actual match spans multiple paragraphs
+                        para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
+
+                        # Check if match spans multiple table rows
+                        if self._check_cross_row_boundary(real_runs):
+                            # Multi-row delete: use cell-by-cell deletion
                             if self.verbose:
-                                print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
-                            success_status = 'cross_paragraph_fallback'
-                        else:
+                                print(f"  [Multi-row] Applying cell-by-cell deletion")
+                            current_status = self._apply_delete_multi_cell(
+                                real_runs, violation_text,
+                                item.violation_reason, item_author, current_start,
+                                item
+                            )
+                        # Check if match spans multiple table cells (within same row)
+                        elif self._check_cross_cell_boundary(real_runs):
+                            # Multi-cell delete: use cell-by-cell deletion
                             if self.verbose:
-                                print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, applying cross-paragraph delete")
-                            success_status = self._apply_delete_cross_paragraph(
-                                matched_runs_info, matched_start, violation_text,
-                                item.violation_reason, item_author
+                                print(f"  [Multi-cell] Applying cell-by-cell deletion")
+                            current_status = self._apply_delete_multi_cell(
+                                real_runs, violation_text,
+                                item.violation_reason, item_author, current_start,
+                                item
                             )
-                    else:
-                        # All content is in single paragraph - safe to delete
-                        if real_runs:
-                            target_para = real_runs[0].get('para_elem', target_para)
-                        success_status = self._apply_delete(
-                            target_para, violation_text,
-                            item.violation_reason,
-                            matched_runs_info, matched_start,
-                            item_author
-                        )
-                else:
-                    success_status = self._apply_delete(
-                        target_para, violation_text,
-                        item.violation_reason,
-                        matched_runs_info, matched_start,
-                        item_author
-                    )
-            elif item.fix_action == 'replace':
-                # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
-                if is_cross_paragraph:
-                    # Get affected runs in the matched range
-                    match_end = matched_start + len(violation_text)
-                    affected = self._find_affected_runs(matched_runs_info, matched_start, match_end)
-
-                    # Filter out boundary markers (paragraph and JSON boundaries)
-                    real_runs = [r for r in affected
-                                 if not r.get('is_para_boundary', False)
-                                 and not r.get('is_json_boundary', False)
-                                 and not r.get('is_json_escape', False)]
-
-                    # Check if actual match spans multiple paragraphs
-                    para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
-
-                    # Check if match spans multiple table rows
-                    is_cross_row = self._check_cross_row_boundary(real_runs)
-
-                    # Detect JSON cell boundaries even if only one cell has text runs.
-                    # This handles cases where empty cells (e.g., stripped row numbers)
-                    # produce boundary markers but no runs with cell_elem.
-                    has_cell_boundary = any(r.get('is_cell_boundary') for r in affected)
-                    is_cross_cell = self._check_cross_cell_boundary(real_runs) or has_cell_boundary or is_cross_row
-
-                    if is_cross_row and self.verbose:
-                        print(f"  [Cross-row] replace spans multiple rows, trying cell-by-cell extraction...")
-                    if self.verbose and has_cell_boundary and not self._check_cross_cell_boundary(real_runs):
-                        print(f"  [Cross-cell] Boundary markers detected (empty cells), forcing cell extraction")
-
-                    if success_status is None and is_cross_cell:
-                        # Try to extract single-cell edit first
-                        if self.verbose:
-                            print(f"  [Cross-cell] Detected cross-cell match, trying cell-by-cell extraction...")
-                        
-                        single_cell = self._try_extract_single_cell_edit(
-                            violation_text, revised_text, affected, matched_start
-                        )
-                        
-                        if single_cell:
-                            # Successfully extracted single-cell edit - all changes in one cell
-                            success_status = self._apply_replace_in_cell_paragraphs(
-                                single_cell['cell_violation'],
-                                single_cell['cell_revised'],
-                                single_cell['cell_runs'],
-                                item.violation_reason,
-                                item_author,
-                                skip_comment=False
-                            )
-                            if self.verbose and success_status == 'success':
-                                print(f"  [Single-cell] All changes in one cell, applied track change")
-                            elif success_status not in ('success', 'conflict'):
-                                success_status = 'cross_cell_fallback'
-                        else:
-                            # Try multi-cell extraction - changes distributed across cells
-                            multi_cells = self._try_extract_multi_cell_edits(
-                                violation_text, revised_text, affected, matched_start
-                            )
-                            
-                            if multi_cells:
-                                # Successfully extracted multi-cell edits - each change within its own cell
+                        elif len(para_elems) > 1:
+                            # Actually spans multiple paragraphs
+                            if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
                                 if self.verbose:
-                                    print(f"  [Multi-cell] Found {len(multi_cells)} cells with changes, applying track changes...")
-                                
-                                success_count = 0
-                                failed_cells = []  # List of (cell_edit, cell_para, error_reason)
-                                first_success_para = None
-                                
-                                for cell_edit in multi_cells:
-                                    cell_status = self._apply_replace_in_cell_paragraphs(
-                                        cell_edit['cell_violation'],
-                                        cell_edit['cell_revised'],
-                                        cell_edit['cell_runs'],
-                                        item.violation_reason,
-                                        item_author,
-                                        skip_comment=True
-                                    )
-
-                                    if cell_status != 'success':
-                                        # Get first paragraph for error tracking
-                                        first_para = None
-                                        for run in cell_edit['cell_runs']:
-                                            para = run.get('para_elem')
-                                            if para is not None:
-                                                first_para = para
-                                                break
-                                        failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
-                                        continue  # Continue processing next cell
-
-                                    # Success - track for overall comment
-                                    success_count += 1
-                                    if first_success_para is None:
-                                        # Get first paragraph for comment placement
-                                        for run in cell_edit['cell_runs']:
-                                            para = run.get('para_elem')
-                                            if para is not None:
-                                                first_success_para = para
-                                                break
-                                
-                                # Handle results based on success/failure counts
-                                if success_count > 0:
-                                    # At least one cell succeeded - add overall comment
-                                    if first_success_para is not None:
-                                        comment_id = self.next_comment_id
-                                        self.next_comment_id += 1
-                                        
-                                        # Insert commentReference at end of first successful paragraph
-                                        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                                            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                                            <w:commentReference w:id="{comment_id}"/>
-                                        </w:r>'''
-                                        first_success_para.append(etree.fromstring(ref_xml))
-                                        
-                                        # Record comment with -R suffix author
-                                        self.comments.append({
-                                            'id': comment_id,
-                                            'text': item.violation_reason,
-                                            'author': f"{item_author}-R"
-                                        })
-                                    
-                                    # Add individual comments for failed cells
-                                    for cell_edit, cell_para, error_reason in failed_cells:
-                                        if cell_para is not None:
-                                            self._apply_cell_fallback_comment(
-                                                cell_para,
-                                                cell_edit['cell_violation'],
-                                                cell_edit['cell_revised'],
-                                                error_reason,
-                                                item
-                                            )
-                                    
-                                    success_status = 'success'
-                                    if self.verbose:
-                                        if failed_cells:
-                                            print(f"  [Multi-cell] Partial success: {success_count}/{len(multi_cells)} cells processed, {len(failed_cells)} failed")
-                                        else:
-                                            print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
-                                else:
-                                    # All cells failed - fallback to overall comment
-                                    success_status = 'cross_cell_fallback'
+                                    print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
+                                current_status = 'cross_paragraph_fallback'
                             else:
-                                # Changes cross cell boundaries - fallback to comment
                                 if self.verbose:
-                                    print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
-                                success_status = 'cross_cell_fallback'
-                        if success_status is None and is_cross_row:
-                            # Cell extraction failed for cross-row content
-                            if self.verbose:
-                                print(f"  [Cross-row] Cell extraction failed, fallback to comment")
-                            success_status = 'cross_row_fallback'
-                    elif len(para_elems) > 1:
-                        # Actually spans multiple paragraphs
-                        if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
-                            if self.verbose:
-                                print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
-                            # Debug: log snippet from marker on cross-paragraph fallback
-                            try:
-                                if DEBUG_MARKER:
-                                    combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
-                                    marker_idx = combined_text.find(DEBUG_MARKER)
-                                    if marker_idx != -1:
-                                        snippet_len = len(DEBUG_MARKER) + 60
-                                        snippet = combined_text[marker_idx:marker_idx + snippet_len]
-                                        print(f"  [DEBUG] Cross-paragraph content from marker: {repr(snippet)}")
-                            except Exception:
-                                # Debug logging should never break apply flow
-                                pass
-                            success_status = 'cross_paragraph_fallback'
+                                    print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, applying cross-paragraph delete")
+                                current_status = self._apply_delete_cross_paragraph(
+                                    matched_runs_info, current_start, violation_text,
+                                    item.violation_reason, item_author
+                                )
                         else:
-                            if self.verbose:
-                                print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, applying cross-paragraph replace")
-                            success_status = self._apply_replace_cross_paragraph(
-                                matched_runs_info, matched_start, violation_text,
-                                revised_text, item.violation_reason, item_author
+                            # All content is in single paragraph - safe to delete
+                            if real_runs:
+                                current_para = real_runs[0].get('para_elem', current_para)
+                            current_status = self._apply_delete(
+                                current_para, violation_text,
+                                item.violation_reason,
+                                matched_runs_info, current_start,
+                                item_author
                             )
                     else:
-                        # All content is in single paragraph - safe to replace
-                        if real_runs:
-                            target_para = real_runs[0].get('para_elem', target_para)
-                        success_status = self._apply_replace(
-                            target_para, violation_text, revised_text,
+                        current_para = _resolve_target_para_for_match(
+                            matched_runs_info, current_start, current_para
+                        )
+                        current_status = self._apply_delete(
+                            current_para, violation_text,
                             item.violation_reason,
-                            matched_runs_info, matched_start,
+                            matched_runs_info, current_start,
                             item_author
                         )
                 else:
-                    success_status = self._apply_replace(
-                        target_para, violation_text, revised_text,
-                        item.violation_reason,
-                        matched_runs_info, matched_start,
-                        item_author
+                    # replace
+                    # Check for cross-paragraph: only fallback if ACTUAL match spans multiple paragraphs
+                    if is_cross_paragraph:
+                        # Get affected runs in the matched range
+                        match_end = current_start + len(violation_text)
+                        affected = self._find_affected_runs(matched_runs_info, current_start, match_end)
+
+                        # Filter out boundary markers (paragraph and JSON boundaries)
+                        real_runs = _filter_non_boundary_runs(affected)
+
+                        # Check if actual match spans multiple paragraphs
+                        para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
+
+                        # Check if match spans multiple table rows
+                        is_cross_row = self._check_cross_row_boundary(real_runs)
+
+                        # Detect JSON cell boundaries even if only one cell has text runs.
+                        # This handles cases where empty cells (e.g., stripped row numbers)
+                        # produce boundary markers but no runs with cell_elem.
+                        has_cell_boundary = any(r.get('is_cell_boundary') for r in affected)
+                        is_cross_cell = self._check_cross_cell_boundary(real_runs) or has_cell_boundary or is_cross_row
+
+                        if is_cross_row and self.verbose:
+                            print(f"  [Cross-row] replace spans multiple rows, trying cell-by-cell extraction...")
+                        if self.verbose and has_cell_boundary and not self._check_cross_cell_boundary(real_runs):
+                            print(f"  [Cross-cell] Boundary markers detected (empty cells), forcing cell extraction")
+
+                        if current_status is None and is_cross_cell:
+                            # Try to extract single-cell edit first
+                            if self.verbose:
+                                print(f"  [Cross-cell] Detected cross-cell match, trying cell-by-cell extraction...")
+
+                            single_cell = self._try_extract_single_cell_edit(
+                                violation_text, revised_text, affected, current_start
+                            )
+
+                            if single_cell:
+                                # Successfully extracted single-cell edit - all changes in one cell
+                                current_status = self._apply_replace_in_cell_paragraphs(
+                                    single_cell['cell_violation'],
+                                    single_cell['cell_revised'],
+                                    single_cell['cell_runs'],
+                                    item.violation_reason,
+                                    item_author,
+                                    skip_comment=False
+                                )
+                                if self.verbose and current_status == 'success':
+                                    print(f"  [Single-cell] All changes in one cell, applied track change")
+                                elif current_status not in ('success', 'conflict'):
+                                    current_status = 'cross_cell_fallback'
+                            else:
+                                # Try multi-cell extraction - changes distributed across cells
+                                multi_cells = self._try_extract_multi_cell_edits(
+                                    violation_text, revised_text, affected, current_start
+                                )
+
+                                if multi_cells:
+                                    # Successfully extracted multi-cell edits - each change within its own cell
+                                    if self.verbose:
+                                        print(f"  [Multi-cell] Found {len(multi_cells)} cells with changes, applying track changes...")
+
+                                    success_count = 0
+                                    failed_cells = []  # List of (cell_edit, cell_para, error_reason)
+                                    first_success_para = None
+
+                                    for cell_edit in multi_cells:
+                                        cell_status = self._apply_replace_in_cell_paragraphs(
+                                            cell_edit['cell_violation'],
+                                            cell_edit['cell_revised'],
+                                            cell_edit['cell_runs'],
+                                            item.violation_reason,
+                                            item_author,
+                                            skip_comment=True
+                                        )
+
+                                        if cell_status != 'success':
+                                            # Get first paragraph for error tracking
+                                            first_para = None
+                                            for run in cell_edit['cell_runs']:
+                                                para = run.get('para_elem')
+                                                if para is not None:
+                                                    first_para = para
+                                                    break
+                                            failed_cells.append((cell_edit, first_para, f"Apply failed: {cell_status}"))
+                                            continue  # Continue processing next cell
+
+                                        # Success - track for overall comment
+                                        success_count += 1
+                                        if first_success_para is None:
+                                            # Get first paragraph for comment placement
+                                            for run in cell_edit['cell_runs']:
+                                                para = run.get('para_elem')
+                                                if para is not None:
+                                                    first_success_para = para
+                                                    break
+
+                                    # Handle results based on success/failure counts
+                                    if success_count > 0:
+                                        # At least one cell succeeded - add overall comment
+                                        if first_success_para is not None:
+                                            comment_id = self.next_comment_id
+                                            self.next_comment_id += 1
+
+                                            # Insert commentReference at end of first successful paragraph
+                                            ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+                                                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+                                                <w:commentReference w:id="{comment_id}"/>
+                                            </w:r>'''
+                                            first_success_para.append(etree.fromstring(ref_xml))
+
+                                            # Record comment with -R suffix author
+                                            self.comments.append({
+                                                'id': comment_id,
+                                                'text': item.violation_reason,
+                                                'author': f"{item_author}-R"
+                                            })
+
+                                        # Add individual comments for failed cells
+                                        for cell_edit, cell_para, error_reason in failed_cells:
+                                            if cell_para is not None:
+                                                self._apply_cell_fallback_comment(
+                                                    cell_para,
+                                                    cell_edit['cell_violation'],
+                                                    cell_edit['cell_revised'],
+                                                    error_reason,
+                                                    item
+                                                )
+
+                                        current_status = 'success'
+                                        if self.verbose:
+                                            if failed_cells:
+                                                print(f"  [Multi-cell] Partial success: {success_count}/{len(multi_cells)} cells processed, {len(failed_cells)} failed")
+                                            else:
+                                                print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
+                                    else:
+                                        # All cells failed - fallback to overall comment
+                                        current_status = 'cross_cell_fallback'
+                                else:
+                                    # Changes cross cell boundaries - fallback to comment
+                                    if self.verbose:
+                                        print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
+                                    current_status = 'cross_cell_fallback'
+                            if current_status is None and is_cross_row:
+                                # Cell extraction failed for cross-row content
+                                if self.verbose:
+                                    print(f"  [Cross-row] Cell extraction failed, fallback to comment")
+                                current_status = 'cross_row_fallback'
+                        elif len(para_elems) > 1:
+                            # Actually spans multiple paragraphs
+                            if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
+                                if self.verbose:
+                                    print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, fallback to comment")
+                                # Debug: log snippet from marker on cross-paragraph fallback
+                                try:
+                                    if DEBUG_MARKER:
+                                        combined_text = ''.join(r.get('text', '') for r in matched_runs_info)
+                                        marker_idx = combined_text.find(DEBUG_MARKER)
+                                        if marker_idx != -1:
+                                            snippet_len = len(DEBUG_MARKER) + 60
+                                            snippet = combined_text[marker_idx:marker_idx + snippet_len]
+                                            print(f"  [DEBUG] Cross-paragraph content from marker: {repr(snippet)}")
+                                except Exception:
+                                    # Debug logging should never break apply flow
+                                    pass
+                                current_status = 'cross_paragraph_fallback'
+                            else:
+                                if self.verbose:
+                                    print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, applying cross-paragraph replace")
+                                current_status = self._apply_replace_cross_paragraph(
+                                    matched_runs_info, current_start, violation_text,
+                                    revised_text, item.violation_reason, item_author
+                                )
+                        else:
+                            # All content is in single paragraph - safe to replace
+                            if real_runs:
+                                current_para = real_runs[0].get('para_elem', current_para)
+                            current_status = self._apply_replace(
+                                current_para, violation_text, revised_text,
+                                item.violation_reason,
+                                matched_runs_info, current_start,
+                                item_author
+                            )
+                    else:
+                        current_para = _resolve_target_para_for_match(
+                            matched_runs_info, current_start, current_para
+                        )
+                        current_status = self._apply_replace(
+                            current_para, violation_text, revised_text,
+                            item.violation_reason,
+                            matched_runs_info, current_start,
+                            item_author
+                        )
+
+                return current_status, current_para
+
+            success_status = None
+            last_conflict_text = violation_text
+
+            if item.fix_action in ('delete', 'replace'):
+                success_status, target_para = _apply_delete_or_replace(
+                    item.fix_action, matched_start, target_para
+                )
+
+                # Conflict recovery: try the next match in remaining block content.
+                if success_status == 'conflict' and violation_text:
+                    retry_runs_info = matched_runs_info
+                    retry_text = ''.join(r.get('text', '') for r in retry_runs_info)
+
+                    # Prefer full block range for retry search if available.
+                    block_runs, block_text, _, block_boundary_error = self._collect_runs_info_across_paragraphs(
+                        anchor_para, item.uuid_end
                     )
+                    if block_runs and block_boundary_error is None:
+                        retry_runs_info = block_runs
+                        retry_text = block_text
+
+                    search_from = matched_start
+                    while True:
+                        next_start = retry_text.find(violation_text, search_from + 1)
+                        if next_start == -1:
+                            break
+
+                        matched_runs_info = retry_runs_info
+                        matched_start = next_start
+                        search_from = next_start
+                        last_conflict_text = retry_text[next_start:next_start + len(violation_text)] or violation_text
+                        target_para = _resolve_target_para_for_match(
+                            matched_runs_info, matched_start, target_para
+                        )
+
+                        if self.verbose:
+                            print(f"  [Conflict] Retrying next match at offset {matched_start}")
+
+                        success_status, target_para = _apply_delete_or_replace(
+                            item.fix_action, matched_start, target_para
+                        )
+                        if success_status != 'conflict':
+                            break
             elif item.fix_action == 'manual':
                 success_status = self._apply_manual(
                     target_para, violation_text,
@@ -1540,7 +1610,21 @@ class CommentWorkflowMixin:
             elif success_status == 'conflict':
                 # Text overlaps with previous rule modification - mark as warning
                 reason = "Multiple changes overlap."
-                self._apply_fallback_comment(target_para, item, reason)
+                fallback_para = target_para if target_para is not None else anchor_para
+                conflict_item = item
+                if last_conflict_text and last_conflict_text != item.violation_text:
+                    conflict_item = EditItem(
+                        uuid=item.uuid,
+                        uuid_end=item.uuid_end,
+                        violation_text=last_conflict_text,
+                        violation_reason=item.violation_reason,
+                        fix_action=item.fix_action,
+                        revised_text=item.revised_text,
+                        category=item.category,
+                        rule_id=item.rule_id,
+                        heading=item.heading,
+                    )
+                self._apply_fallback_comment(fallback_para, conflict_item, reason)
                 if self.verbose:
                     print(f"  [Conflict] {reason}")
                 return EditResult(
