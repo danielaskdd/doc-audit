@@ -36,23 +36,23 @@ Instructions:
    - The revised text based on fix_action
 
 violation_text guidelines:
-- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
+1. The violation_text field is utilized for locating the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
     - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
-- Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
+2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
-    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
-- Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
+    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with superscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
+3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
-- Do not use ellipses to replace or omit any part of the original text
-- If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search
-- If an entire section is in violation, select the first paragraph as the violation_text
-- For violation_text in table content of JSON format
+4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
+5. If an entire section is in violation, select the first paragraph as the violation_text.
+6. For violation_text in table content of JSON format:
     - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
-    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
-- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
-    - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
+    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revised_text field should be aligned at the row level, consistent with violation_text.
+7. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
+8. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
+    - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
 
 fix_action guidelines:
@@ -106,11 +106,11 @@ Global Extraction Rules:
 {rules_text}
 
 Understanding the Rules:
-- Each rule defines a TOPIC (what kind of information to look for)
-- EXTRACTION describes the scope and types of data to capture
-- ENTITY is the main identifier that groups related fields together
-- FIELDS are specific attributes to extract for each entity instance
-- EVIDENCE is a verbatim text snippet that justifies each extracted value
+1. Each rule defines a TOPIC (what kind of information to look for)
+2. EXTRACTION describes the scope and types of data to capture
+3. ENTITY is the main identifier that groups related fields together
+4. FIELDS are specific attributes to extract for each entity instance
+5. EVIDENCE is a verbatim text snippet that justifies each extracted value
 
 Key Principles:
 1. One entity = one complete set of fields (even if some fields are empty)
@@ -127,6 +127,22 @@ Extraction Guidelines:
 6. For tabular data, extract one entity per row where applicable.
 7. If the same entity appears multiple times with different information, create separate entries.
 8. CRITICAL: The rule_id MUST exactly match the ID of the rule being extracted. If extracting for rule [G003], use "rule_id": "G003". Never default to G001.
+
+evidence field guidelines:
+1. The evidence field is utilized for locating the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
+    - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
+    - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
+2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
+    - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
+    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with superscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
+3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
+    - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
+    - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags    
+4. If the evidence content is excessively long (e.g., spanning multiple sentences or entire session), extract the most relevant part that directly supports the extracted value.
+5. For evidence content in table content of JSON format:
+    - Report evidence at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the evidence to encompass the entire row in JSON format.
+    - Report evidence at row level with JSON format if cell-level is not feasible. The evidence should start from the first cell in the row, i.e., starting with '['.
+6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in evidence.
 
 Return JSON only with this structure:
 {{
@@ -187,29 +203,30 @@ Types of inconsistencies to check (only for same entity):
 
 Instructions:
 1. Group items by entity name (similar names = same entity)
-2. Within each entity group, cross-reference all fields based on the verification criteria
-3. Report conflicts only when the SAME entity shows inconsistent information; An empty value should not be treated as an inconsistency unless specifically required by the verification criteria
-4. Use the uuid and uuid_end from the INPUT items when reporting violations
-5. violation_text MUST be a verbatim evidence quote from the input items
-6. Mark fix_action as "manual" since resolution requires human judgment
+2. Within each entity group, cross-reference all fields based on the verification criteria, report conflicts according to the Verification Criteria
+3. An empty value in any field of entity should not be treated as an inconsistency unless specifically required by the verification criteria
+4. Use the uuid and uuid_end from the INPUT items when reporting violations.
+5. Mark fix_action as "manual" since all conflict resolution requires human judgment
+6. CRITICAL: Generate a separate violation entry for each item that has conflicting information
+    - Example: If attribute inconsistencies occur across multiple 'After-Sales Service Department' entities, create a separate violation record per Item/UUID. Ensure that each violation_text is populated using the evidence associated with that specific Item.
 
 violation_text guidelines:
-- The violation_text field is used to locate the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match
+1. The violation_text field is utilized for locating the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
     - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
-- Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
+2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
-    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with supscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
-- Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
+    - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with superscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
+3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
-- Do not use ellipses to replace or omit any part of the original text
-- If the violating content is excessively long (e.g., spanning multiple sentences), extract only conflicting content, ensuring it is sufficient to uniquely locate via string search
-- For violation_text in table content of JSON format
+4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
+5. For violation_text in table content of JSON format:
     - Report violation_text at cell level without JSON format if cell content is long enough for unique matching. If the cell content is too brief (e.g., just numbers or short phrases), expand the violation_text to encompass the entire row in JSON format.
-    - Report violation_text at row level with JSON format if cell-level is not feasible, violation_text should start from the first cell in the row, i.e., starting with '['; The revise_text field should be aligned at the row level, consistent with violation_text.
-- Exclude chapter/heading numbers, list markers, and bullet points from the violation_text
-    - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`    
+    - Report violation_text at row level with JSON format if cell-level is not feasible. The violation_text should start from the first cell in the row, i.e., starting with '['.
+6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
+7. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
+    - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
 
 Return JSON only:
