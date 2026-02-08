@@ -12,7 +12,7 @@ from .common import NS
 from utils import sanitize_xml_string
 
 
-class WorkflowMixin:
+class EditMixin:
     def _init_change_id(self):
         """Initialize next track change ID by scanning existing changes"""
         max_id = -1
