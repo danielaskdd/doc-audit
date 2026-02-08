@@ -45,15 +45,14 @@ violation_text guidelines:
 3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
-4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
-5. If an entire section is in violation, select the first paragraph as the violation_text.
+4. The violation_text should be extended to a full sentence rather than a short fragment, ensuring reliable uniquely locatable via string search. 
+5. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 6. Handling violation_text in JSON-formatted Tables:
     - Report at the cell level (plain text) if the content is long enough for a unique match.
     - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
     - If violation_text spans multiple rows, include consecutive rows separated by comma for full context.
-7. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
-8. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
+7. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
 
@@ -223,13 +222,13 @@ violation_text guidelines:
 3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
     - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
     - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags
-4. If the violating content is excessively long (e.g., spanning multiple sentences), extract only the leading portion, ensuring it is sufficient to uniquely locate via string search.
-5. Handling violation_text in JSON-formatted Tables:
+4. The violation_text should be extended to a full sentence rather than a short fragment, ensuring reliable uniquely locatable via string search. 
+5. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
+6. Handling violation_text in JSON-formatted Tables:
     - Report at the cell level (plain text) if the content is long enough for a unique match.
     - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
     - If violation_text spans multiple rows, include consecutive rows separated by comma for full context.
-6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 7. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
     - Example 2: For the candidate violation text `表16 软件配置项目表"`, the leading table number should be removed. The corrected violation_text should be `软件配置项目表`
