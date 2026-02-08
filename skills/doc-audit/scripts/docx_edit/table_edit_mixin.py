@@ -1,3 +1,8 @@
+"""
+This mixin class implements table-specific edit handling,.
+Handling how table cells are edited, including extraction and application for single-cell and multi-cell scenarios.
+"""
+
 from typing import List, Dict, Tuple, Optional
 from .common import (
     NS,

@@ -1,3 +1,7 @@
+"""
+This mixin class implements delete/replace main workflows (cross-paragraph and single-paragraph) and revision ID management.
+"""
+
 import copy
 import re
 from typing import List, Dict, Tuple, Optional

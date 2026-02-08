@@ -1,3 +1,8 @@
+"""
+This mixin class implements Word DOM traversal, paragraph/table range lookup, and run collection & matching.
+Handling how content is located in Word XML.
+"""
+
 from .common import (
     NS, EditItem, EditResult, json_escape, build_numbering_variants, DEBUG_MARKER
 )

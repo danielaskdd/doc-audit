@@ -1,3 +1,8 @@
+"""
+This mixin class handling how revision XML is generated.
+Implementing track-changes low-level algorithms: diff computation, `w:del`/`w:ins` XML construction.
+"""
+
 import json
 import difflib
 from typing import List, Dict, Tuple, Optional

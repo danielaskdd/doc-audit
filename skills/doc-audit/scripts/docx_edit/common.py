@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 """
-ABOUTME: Applies audit results to Word documents with track changes and comments
-ABOUTME: Reads JSONL export from audit report and modifies the source document
+Helper functions and data classes for docx editing, handling shared constants, data classes, and text normalization utilities.
 """
 
 import json
@@ -488,8 +486,3 @@ def normalize_table_json(text: str) -> str:
         result = result[:-1]
     
     return result
-
-# ============================================================
-# Main Class: AuditEditApplier
-# ============================================================
-

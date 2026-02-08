@@ -1,3 +1,8 @@
+"""
+This mixin class implements the overall apply/save flow and omment insertion, manual-action handling, per-item processing.
+Handling how a single edit item is processed end-to-end.
+"""
+
 from .common import (
     NS,
     EditItem,
