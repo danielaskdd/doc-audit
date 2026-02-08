@@ -1129,7 +1129,9 @@ async def run_global_verification_async(
     thinking_level: str = None,
     thinking_budget: int = None,
     reasoning_effort: str = None,
-    max_tokens: int = DEFAULT_GLOBAL_AUDIT_MAX_TOKENS
+    max_tokens: int = DEFAULT_GLOBAL_AUDIT_MAX_TOKENS,
+    workers: int = MAX_PARALLEL_WORKERS,
+    rate_limit: float = 0.05
 ) -> list:
     """
     Verify global consistency per rule bucket.
@@ -1138,25 +1140,17 @@ async def run_global_verification_async(
         List of violation dicts
     """
     # Print header
-    print(f"\nGlobal verification: {len(global_rules)} rules")
+    print(f"\nGlobal verification: {len(global_rules)} rules in parallel with {workers} workers")
     print("-" * 50)
 
     violations = []
-    for idx, rule in enumerate(global_rules):
-        rule_id = rule.get("id", "")
-        topic = rule.get("topic", "Unknown")[:30]
-        items = rule_buckets.get(rule_id, [])
+    semaphore = asyncio.Semaphore(workers)
 
-        if not items:
-            print(f"[Verify {rule_id}] {topic} (0 items)... skipped")
-            continue
-
-        system_prompt = build_global_verify_system_prompt(rule)
-        chunks = chunk_items_by_token_limit(rule, items, max_tokens)
-
-        rule_violations = []
-        for chunk in chunks:
-            result = await global_verify_with_retry(
+    async def verify_chunk(rule: dict, chunk: list, system_prompt: str, rule_idx: int) -> dict:
+        async with semaphore:
+            if rate_limit > 0:
+                await asyncio.sleep(rate_limit)
+            return await global_verify_with_retry(
                 rule=rule,
                 items=chunk,
                 system_prompt=system_prompt,
@@ -1164,21 +1158,55 @@ async def run_global_verification_async(
                 client=client,
                 use_gemini=use_gemini,
                 max_retries=max_retries,
-                rule_idx=idx,
+                rule_idx=rule_idx,
                 total_rules=len(global_rules),
                 thinking_level=thinking_level,
                 thinking_budget=thinking_budget,
                 reasoning_effort=reasoning_effort
             )
+
+    async def verify_rule(idx: int, rule: dict) -> tuple:
+        rule_id = rule.get("id", "")
+        topic = rule.get("topic", "Unknown")[:30]
+        items = rule_buckets.get(rule_id, [])
+
+        if not items:
+            return rule_id, topic, 0, 0, []
+
+        system_prompt = build_global_verify_system_prompt(rule)
+        chunks = chunk_items_by_token_limit(rule, items, max_tokens)
+
+        chunk_tasks = [
+            verify_chunk(rule, chunk, system_prompt, idx)
+            for chunk in chunks
+        ]
+        chunk_results = await asyncio.gather(*chunk_tasks)
+
+        rule_violations = []
+        for result in chunk_results:
             for v in result.get("violations", []):
                 if not v.get("rule_id"):
                     v["rule_id"] = rule_id
                 rule_violations.append(v)
 
-        # Progress output for this rule
-        chunk_str = "chunk" if len(chunks) == 1 else "chunks"
-        viol_str = "violation" if len(rule_violations) == 1 else "violations"
-        print(f"[Verify {rule_id}] {topic} ({len(items)} items, {len(chunks)} {chunk_str})... {len(rule_violations)} {viol_str}")
+        return rule_id, topic, len(items), len(chunks), rule_violations
+
+    rule_tasks = [
+        verify_rule(idx, rule)
+        for idx, rule in enumerate(global_rules)
+    ]
+
+    for coro in asyncio.as_completed(rule_tasks):
+        rule_id, topic, item_count, chunk_count, rule_violations = await coro
+        if item_count == 0:
+            print(f"[Verify {rule_id}] {topic} (0 items)... skipped")
+        else:
+            chunk_str = "chunk" if chunk_count == 1 else "chunks"
+            viol_str = "violation" if len(rule_violations) == 1 else "violations"
+            print(
+                f"[Verify {rule_id}] {topic} ({item_count} items, {chunk_count} {chunk_str})... "
+                f"{len(rule_violations)} {viol_str}"
+            )
 
         violations.extend(rule_violations)
 
@@ -1532,7 +1560,9 @@ async def run_full_audit_async(
             thinking_level=thinking_level,
             thinking_budget=thinking_budget,
             reasoning_effort=reasoning_effort,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            workers=args.workers,
+            rate_limit=args.rate_limit
         )
 
         global_violations_count = len(global_violations)
