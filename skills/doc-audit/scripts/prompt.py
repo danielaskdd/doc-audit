@@ -37,7 +37,7 @@ Instructions:
 
 violation_text guidelines:
 1. The violation_text field is utilized for locating the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
-    - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
+    - Example 1: Keep `A burger contains:\nSoft buns and juicy meat` as is, do not convert to `A burger contains: Soft buns and juicy meat`; Do not drop the line break even if you think it's a formatting issue.
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
 2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
@@ -51,6 +51,7 @@ violation_text guidelines:
     - Report at the cell level (plain text) if the content is long enough for a unique match.
     - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
+    - If violation_text spans multiple rows, include consecutive rows separated by comma for full context.
 7. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 8. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
@@ -131,19 +132,20 @@ Extraction Guidelines:
 
 evidence field guidelines:
 1. The evidence field is utilized for locating the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
-    - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
+    - Example 1: Keep `A burger contains:\nSoft buns and juicy meat` as is, do not convert to `A burger contains: Soft buns and juicy meat`; Do not drop the line break even if you think it's a formatting issue.
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
 2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
     - Example 2: Keep math equation `65×12×10<sup>-6</sup>/h = 7.8×10<sup>-4</sup>/h` with superscript as is, **do not** convert it to markdown format like`65×12×10^-6/h = 7.8×10^-4/h`
 3. Preserve equation formatting by keeping all `<equation>` tags intact; content inside is LaTeX format. Do not simplify them to plain text.
-    - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`
-    - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags    
-4. If the evidence content spanning multiple sentences or paragraphs, extract all content without using ellipses to replace any part of the original text.
+    - Example: Keep `<equation>\\frac{{1}}{{2}}mv^2</equation>` as is, do not convert to `1/2 mv²`.
+    - Example: Keep `<equation>E = mc^2</equation>` as is, do not strip the equation tags.
+4. If the evidence content spanning multiple sentences or paragraphs, extract all content without using ellipses to replace or omit any part of the original text.
 5. Handling evidence in JSON-formatted Tables:
     - Report at the cell level (plain text) if the content is long enough for a unique match.
     - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
+    - If evidence spans multiple rows, include consecutive rows separated by comma for full context.
 
 Return JSON only with this structure:
 {{
@@ -213,7 +215,7 @@ Instructions:
 
 violation_text guidelines:
 1. The violation_text field is utilized for locating the original text. It must be a direct verbatim quote from the evidence. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
-    - Example 1: Keep `Line 1\nLine 2` as is, do not convert to `Line 1 Line 2`
+    - Example 1: Keep `A burger contains:\nSoft buns and juicy meat` as is, do not convert to `A burger contains: Soft buns and juicy meat`; Do not drop the line break even if you think it's a formatting issue.
     - Example 2: Keep `Word1\tWord2` as is, do not convert to `Word1 Word2`
 2. Preserve the subscript and superscript formatting by keeping all `<sub>` and `<sup>` tags intact; do not simplify them to markdown format or plain text.
     - Example 1: Keep chemical equation `H<sub>2</sub>O` with subscript as is, **do not** convert it to markdown format like `H_2O`
@@ -226,6 +228,7 @@ violation_text guidelines:
     - Report at the cell level (plain text) if the content is long enough for a unique match.
     - If the cell content is insufficient (e.g., numeric values or brief phrases), switch to row-level reporting in JSON format to provide necessary context.
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
+    - If violation_text spans multiple rows, include consecutive rows separated by comma for full context.
 6. CRITICAL: Do not use ellipses to replace or omit any part of the original text in violation_text.
 7. Exclude chapter/heading numbers, list markers, and bullet points from the violation_text.
     - Example 1: For the candidate violation text `(B) Component model is CT41-1210-X7R`, the leading index should be removed. The corrected violation_text should be `Component model is CT41-1210-X7R`
