@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple, Optional
 
 from lxml import etree
 
-from .common import NS
+from .common import NS, DRAWING_PATTERN, EQUATION_PATTERN
 from utils import sanitize_xml_string
 
 
@@ -684,6 +684,12 @@ class EditMixin:
 
         # Process diff operations
         violation_pos = 0  # Position within violation_text (plain text, no markup)
+        # Track position in original violation_text (with markup tags) for has_markup mode.
+        # This allows correct mapping back to orig_runs_info positions when <sup>/<sub> tags
+        # cause plain-text positions to diverge from combined_text positions.
+        violation_pos_orig = 0
+        # Track consumed standalone equation elements for cleanup after replacement
+        consumed_equation_elems = []
 
         for op_tuple in diff_ops:
             # Extract components - handle both 2-tuple and 3-tuple formats
@@ -693,19 +699,33 @@ class EditMixin:
                 op, text = op_tuple
                 vert_align = None
             if op == 'equal':
-                # When has_markup=True, position mapping between plain text (violation_pos)
-                # and combined_text (orig_runs_info positions) is incorrect due to <sup>/<sub> tags.
-                # Skip run preservation and just recreate the text.
-                if has_markup:
+                # Calculate the original-coordinate length of this segment
+                if vert_align == 'superscript':
+                    orig_text_len = 5 + len(text) + 6  # <sup>text</sup>
+                elif vert_align == 'subscript':
+                    orig_text_len = 5 + len(text) + 6  # <sub>text</sub>
+                else:
+                    orig_text_len = len(text)
+
+                # Use original-coordinate position for run lookup (works for both paths)
+                equal_start = match_start + violation_pos_orig
+                equal_end = equal_start + orig_text_len
+
+                # Check if this equal segment contains special element placeholders
+                has_special_elems = (EQUATION_PATTERN.search(text) is not None or
+                                     DRAWING_PATTERN.search(text) is not None)
+
+                if has_markup and not has_special_elems:
+                    # No equations: recreate text with proper formatting (original behavior)
                     # Decode if in table mode
                     equal_text = self._decode_json_escaped(text) if is_table_mode else text
-                    
+
                     # Wrap with markup if vert_align is specified
                     if vert_align == 'superscript':
                         equal_text = f'<sup>{equal_text}</sup>'
                     elif vert_align == 'subscript':
                         equal_text = f'<sub>{equal_text}</sub>'
-                    
+
                     # Create run with proper vertAlign formatting
                     run_or_container = self._create_run(equal_text, rPr_xml)
                     if run_or_container.tag == 'container':
@@ -713,23 +733,28 @@ class EditMixin:
                     else:
                         new_elements.append(run_or_container)
                 else:
-                    # No markup: preserve original elements (especially images)
-                    equal_start = match_start + violation_pos
-                    equal_end = equal_start + len(text)
+                    # Preserve original elements (images, equations)
                     equal_runs = self._find_affected_runs(orig_runs_info, equal_start, equal_end)
 
                     if equal_runs:
-                        # Check if this is a single image run that matches exactly
+                        # Check if this is a single special element run that matches exactly
                         if (len(equal_runs) == 1 and
                             equal_runs[0].get('is_drawing') and
                             equal_runs[0]['start'] == equal_start and
                             equal_runs[0]['end'] == equal_end):
                             # Copy original image element
                             new_elements.append(copy.deepcopy(equal_runs[0]['elem']))
+                        elif (len(equal_runs) == 1 and
+                              equal_runs[0].get('is_equation') and
+                              equal_runs[0]['start'] == equal_start and
+                              equal_runs[0]['end'] == equal_end):
+                            # Copy original equation element
+                            omath = equal_runs[0].get('omath_elem')
+                            if omath is not None:
+                                new_elements.append(copy.deepcopy(omath))
+                                consumed_equation_elems.append(equal_runs[0])
                         else:
-                            # Extract text from the equal portion
-                            # Handle partial runs at boundaries
-                            # Use original text for document mutations
+                            # Multiple runs or partial match - iterate
                             for eq_run in equal_runs:
                                 escaped_text = eq_run['text']
                                 orig_text = self._get_run_original_text(eq_run)
@@ -738,25 +763,44 @@ class EditMixin:
                                 escaped_start = max(0, equal_start - eq_run['start'])
                                 escaped_end = min(len(escaped_text), equal_end - eq_run['start'])
 
-                                # Translate to original space
-                                orig_start = self._translate_escaped_offset(eq_run, escaped_start)
-                                orig_end = self._translate_escaped_offset(eq_run, escaped_end)
-                                portion = orig_text[orig_start:orig_end]
-
                                 if eq_run.get('is_drawing'):
                                     # Image run - copy entire element if fully contained
                                     if escaped_start == 0 and escaped_end == len(escaped_text):
                                         new_elements.append(copy.deepcopy(eq_run['elem']))
-                                elif portion:
-                                    run_or_container = self._create_run(portion, rPr_xml)
-                                    if run_or_container.tag == 'container':
-                                        new_elements.extend(list(run_or_container))
-                                    else:
-                                        new_elements.append(run_or_container)
+                                elif eq_run.get('is_equation'):
+                                    # Equation run - copy entire m:oMath if fully contained
+                                    if escaped_start == 0 and escaped_end == len(escaped_text):
+                                        omath = eq_run.get('omath_elem')
+                                        if omath is not None:
+                                            new_elements.append(copy.deepcopy(omath))
+                                            consumed_equation_elems.append(eq_run)
+                                else:
+                                    # Text run
+                                    # Translate to original space
+                                    orig_start = self._translate_escaped_offset(eq_run, escaped_start)
+                                    orig_end = self._translate_escaped_offset(eq_run, escaped_end)
+                                    portion = orig_text[orig_start:orig_end]
+
+                                    if portion:
+                                        # For has_markup text runs, wrap with vert_align
+                                        if has_markup and vert_align == 'superscript':
+                                            portion = f'<sup>{portion}</sup>'
+                                        elif has_markup and vert_align == 'subscript':
+                                            portion = f'<sub>{portion}</sub>'
+                                        run_or_container = self._create_run(portion, rPr_xml)
+                                        if run_or_container.tag == 'container':
+                                            new_elements.extend(list(run_or_container))
+                                        else:
+                                            new_elements.append(run_or_container)
                     else:
                         # No runs found, create text directly
                         # Decode if in table mode and use _create_run to handle markup
                         equal_text = self._decode_json_escaped(text) if is_table_mode else text
+                        if has_markup:
+                            if vert_align == 'superscript':
+                                equal_text = f'<sup>{equal_text}</sup>'
+                            elif vert_align == 'subscript':
+                                equal_text = f'<sub>{equal_text}</sub>'
                         run_or_container = self._create_run(equal_text, rPr_xml)
                         if run_or_container.tag == 'container':
                             new_elements.extend(list(run_or_container))
@@ -764,6 +808,7 @@ class EditMixin:
                             new_elements.append(run_or_container)
 
                 violation_pos += len(text)
+                violation_pos_orig += orig_text_len
 
             elif op == 'delete':
                 # Decode if in table mode
@@ -809,6 +854,13 @@ class EditMixin:
                     new_elements.append(del_elem)
                 
                 violation_pos += len(text)
+                # Track original position for delete ops (same logic as equal)
+                if vert_align == 'superscript':
+                    violation_pos_orig += 5 + len(text) + 6
+                elif vert_align == 'subscript':
+                    violation_pos_orig += 5 + len(text) + 6
+                else:
+                    violation_pos_orig += len(text)
 
             elif op == 'insert':
                 # Decode if in table mode
@@ -873,6 +925,20 @@ class EditMixin:
 
         # Single DOM operation to replace all real runs (not boundary markers)
         self._replace_runs(para_elem, real_runs, new_elements)
+
+        # Remove original standalone equation elements that were deep-copied into new_elements.
+        # Without this, standalone m:oMath elements (not inside any w:r) would remain in the
+        # paragraph and get pushed to the end, since _filter_real_runs excludes them.
+        # For inline equations (inside a w:r), the host w:r is already removed by _replace_runs.
+        for eq_info in consumed_equation_elems:
+            omath = eq_info.get('omath_elem')
+            if omath is not None and omath.getparent() is not None:
+                # Only remove if the element is a direct child of the paragraph
+                # (standalone equation). If it was inside a w:r, the w:r removal
+                # already handled it.
+                if eq_info.get('elem') is None:
+                    # Standalone equation (no host run) - remove from paragraph
+                    omath.getparent().remove(omath)
 
         # Record comment with violation_reason as content (only if not skipped)
         # Use "-R" suffix to distinguish comment author from track change author

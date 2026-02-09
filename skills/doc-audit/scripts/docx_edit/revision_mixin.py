@@ -425,7 +425,8 @@ class RevisionMixin:
                 'end': pos + len(eq_text),
                 'elem': host_run,
                 'rPr': host_rPr,
-                'is_equation': True
+                'is_equation': True,
+                'omath_elem': omath_elem
             })
             pos += len(eq_text)
 
