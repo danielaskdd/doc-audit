@@ -50,7 +50,7 @@ doc-audit/
 │       └── assets/
 │           ├── default_rules.json      # Default audit rules
 │           └── report_template.html    # Jinja2 HTML template
-├── spec/                        # Agent Skills specification reference
+├── doc/                        # Supplement documentation for this project
 ├── tests/                       # Test files
 │   ├── test_apply_audit_edits.py
 │   └── test_fault_recovery.py
