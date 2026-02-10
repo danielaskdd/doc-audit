@@ -251,15 +251,16 @@ def _load_relationships(ctx: DrawingExtractionContext) -> None:
 
 
 def _extract_blip_relationship(drawing_elem) -> Optional[Tuple[str, str]]:
-    link_candidate = None
     for blip in drawing_elem.findall(".//a:blip", NS):
+        # Prefer explicit external links when both link/embed are present on one blip.
+        # Word may keep an embedded cache for linked pictures.
+        rel_link = blip.get(f"{{{NS['r']}}}link")
+        if rel_link:
+            return "link", rel_link
         rel_embed = blip.get(f"{{{NS['r']}}}embed")
         if rel_embed:
             return "embed", rel_embed
-        rel_link = blip.get(f"{{{NS['r']}}}link")
-        if rel_link and link_candidate is None:
-            link_candidate = ("link", rel_link)
-    return link_candidate
+    return None
 
 
 def _build_placeholder(attrs: Dict[str, str]) -> str:

@@ -132,6 +132,43 @@ def test_extract_external_link_no_download_and_url_path(tmp_path: Path):
     assert "img.wmf" not in files
 
 
+def test_extract_prefers_link_when_blip_has_both_link_and_embed(tmp_path: Path):
+    docx_path = tmp_path / "sample.docx"
+    output_path = tmp_path / "sample_blocks.jsonl"
+    _write_minimal_docx(docx_path)
+
+    ctx = create_drawing_context(str(docx_path), str(output_path))
+
+    both_xml = f"""
+<w:drawing xmlns:w="{NSMAP['w']}" xmlns:wp="{NSMAP['wp']}" xmlns:a="{NSMAP['a']}"
+           xmlns:pic="{NSMAP['pic']}" xmlns:r="{NSMAP['r']}">
+  <wp:inline>
+    <wp:docPr id="4" name="Linked With Cache"/>
+    <a:graphic>
+      <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic>
+          <pic:blipFill>
+            <a:blip r:embed="rIdImg" r:link="rIdExt"/>
+          </pic:blipFill>
+        </pic:pic>
+      </a:graphicData>
+    </a:graphic>
+  </wp:inline>
+</w:drawing>
+"""
+    drawing_elem = etree.fromstring(both_xml)
+    placeholder = extract_drawing_placeholder_from_element(
+        drawing_elem, context=ctx, include_extended_attrs=True
+    )
+
+    assert 'id="4"' in placeholder
+    assert 'name="Linked With Cache"' in placeholder
+    assert 'path="https://example.com/img.wmf"' in placeholder
+    assert 'format="wmf"' in placeholder
+    # Link must win, so embedded cache image should not be exported.
+    assert not (tmp_path / "sample_blocks.image" / "image1.png").exists()
+
+
 def test_drawing_without_blip_keeps_placeholder_only(tmp_path: Path):
     docx_path = tmp_path / "sample.docx"
     output_path = tmp_path / "sample_blocks.jsonl"
