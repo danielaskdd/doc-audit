@@ -3,6 +3,8 @@ This mixin class implements the overall apply/save flow and omment insertion, ma
 Handling how a single edit item is processed end-to-end.
 """
 
+from drawing_image_extractor import normalize_drawing_placeholders_in_text
+
 from .common import (
     NS,
     EditItem,
@@ -944,10 +946,16 @@ class MainWorkflowMixin:
         """Process a single edit item"""
         anchor_para = None
         try:
-            # Strip leading/trailing whitespace from search and replacement text
+            # Strip leading/trailing whitespace from search and replacement text, normalize drawing attribute
             # to prevent matching failures caused by whitespace in JSONL data
-            violation_text = item.violation_text.strip()
-            revised_text = item.revised_text.strip()
+            violation_text = normalize_drawing_placeholders_in_text(
+                item.violation_text.strip(),
+                include_extended_attrs=False,
+            )
+            revised_text = normalize_drawing_placeholders_in_text(
+                item.revised_text.strip(),
+                include_extended_attrs=False,
+            )
             
             # 1. Find anchor paragraph by ID
             anchor_para = self._find_para_node_by_id(item.uuid)

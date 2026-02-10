@@ -447,7 +447,9 @@ def test_equation_insert_split_by_markup():
     print("  ✓ Verified: Individual chunks don't match <equation>...</equation> pattern")
     
     # Now test the fixed code: it should rebuild the full insert text
-    DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
+    DRAWING_PATTERN = re.compile(
+        r'<drawing\b(?=[^>]*\bid="[^"]*")(?=[^>]*\bname="[^"]*")[^>]*/>'
+    )
     
     # This is the fix from apply_audit_edits.py lines 2042-2049
     full_insert_text = ''.join(
@@ -486,7 +488,9 @@ def test_equation_insert_without_markup_split():
     
     # Apply the fix logic
     EQUATION_PATTERN = re.compile(r'<equation>.*?</equation>', re.DOTALL)
-    DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
+    DRAWING_PATTERN = re.compile(
+        r'<drawing\b(?=[^>]*\bid="[^"]*")(?=[^>]*\bname="[^"]*")[^>]*/>'
+    )
     
     full_insert_text = ''.join(
         op_tuple[1] for op_tuple in diff_ops 
@@ -677,7 +681,9 @@ def test_drawing_complete_delete_split():
         ('equal', 'note', 'subscript'),
     ]
     
-    DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
+    DRAWING_PATTERN = re.compile(
+        r'<drawing\b(?=[^>]*\bid="[^"]*")(?=[^>]*\bname="[^"]*")[^>]*/>'
+    )
     
     # Find drawing in plain text
     match = DRAWING_PATTERN.search(plain_text)

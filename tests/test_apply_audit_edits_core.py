@@ -59,24 +59,24 @@ class TestCollectRunsInfoOriginal:
         assert len(img_runs) == 1
         assert img_runs[0]['text'] == expected_img_str
     
-    def test_anchor_image_ignored(self):
-        """Test that floating (anchor) images are ignored"""
+    def test_anchor_image_supported(self):
+        """Test that floating (anchor) images are extracted as drawing placeholders"""
         applier = create_mock_applier()
         para = create_paragraph_with_anchor_image(
             text_content="Text with floating image",
             img_id="1",
             img_name="Float Image"
         )
-        
+
         runs_info, combined_text = applier._collect_runs_info_original(para)
-        
-        # Should only contain text, no image placeholder
-        assert combined_text == "Text with floating image"
-        assert '<drawing' not in combined_text
-        
-        # No drawing runs
+
+        expected_img_str = '<drawing id="1" name="Float Image" />'
+        assert combined_text == f"Text with floating image{expected_img_str}"
+
+        # One drawing run
         img_runs = [r for r in runs_info if r.get('is_drawing')]
-        assert len(img_runs) == 0
+        assert len(img_runs) == 1
+        assert img_runs[0]['text'] == expected_img_str
     
     def test_track_changes_deleted_text(self):
         """Test paragraph with deleted text (should be included in original)"""
@@ -755,6 +755,7 @@ class TestDrawingPattern:
             '<drawing id="1" name="图片 1" />',
             '<drawing id="123" name="Image" />',
             '<drawing id="0" name="" />',
+            '<drawing id="8" name="Image 8" path="sample_blocks.image/image8.emf" format="emf" />',
         ]
         for case in valid_cases:
             assert DRAWING_PATTERN.fullmatch(case), f"Should match: {case}"

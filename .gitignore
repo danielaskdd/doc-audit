@@ -9,6 +9,7 @@ __pycache__/
 /*.xlsx
 /*.html
 /*.jsonl
+/*.image
 
 # AI Agents
 /.claude/

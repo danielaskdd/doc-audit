@@ -51,7 +51,9 @@
 
 ### 2.4 特殊内容保真
 
-- **图片**：`<drawing id="..." name="..." />`
+- **图片**：`<drawing id="..." name="..." path="..." format="..." />`
+  - 内嵌图片（`r:embed`）：导出到 `<blocks_stem>.image/`，`path` 写相对路径
+  - 外链图片（`r:link`）：不下载，`path` 写原始外链 URL
 - **公式**：OMML → LaTeX，包裹 `<equation>...</equation>`
 - **上下标**：`<sup>...</sup>` / `<sub>...</sub>`
 

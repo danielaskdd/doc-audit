@@ -51,7 +51,9 @@ The resulting `_blocks.jsonl` is the foundational input for the auditing system.
 
 ### 2.4 Fidelity for Special Content
 
-- **Images**: `<drawing id="..." name="..." />`
+- **Images**: `<drawing id="..." name="..." path="..." format="..." />`
+  - Embedded image (`r:embed`): exported to `<blocks_stem>.image/`, `path` stores relative file path
+  - Linked image (`r:link`): not downloaded, `path` stores original external URL
 - **Formulas**: OMML → LaTeX, wrapped in `<equation>...</equation>`
 - **Super/Subscripts**: `<sup>...</sup>` / `<sub>...</sub>`
 
