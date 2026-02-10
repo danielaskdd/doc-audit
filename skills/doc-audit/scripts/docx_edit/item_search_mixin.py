@@ -94,11 +94,12 @@ class ItemSearchMixin:
         violation_text: str,
         revised_text: str,
         reason: str,
+        use_fallback_reason: bool = True,
     ) -> bool:
         """
         Retry not-found items by stripping <sup>/<sub> tags on both sides.
 
-        On hit, convert to range comment via _apply_manual (with fallback_reason).
+        On hit, convert to range comment via _apply_manual.
         """
         if not reason.startswith("Violation text not found("):
             return False
@@ -136,7 +137,7 @@ class ItemSearchMixin:
                 pos,
                 item_author,
                 is_cross_paragraph=False,
-                fallback_reason=reason,
+                fallback_reason=reason if use_fallback_reason else None,
             )
             if status == 'success':
                 if self.verbose:
@@ -170,7 +171,7 @@ class ItemSearchMixin:
             pos,
             item_author,
             is_cross_paragraph=is_multi_para,
-            fallback_reason=reason,
+            fallback_reason=reason if use_fallback_reason else None,
         )
         if status == 'success':
             if self.verbose:
@@ -733,8 +734,20 @@ class ItemSearchMixin:
                         violation_text=violation_text,
                         revised_text=revised_text,
                         reason=reason,
+                        use_fallback_reason=item.fix_action != 'manual',
                     )
                     if retried:
+                        if item.fix_action == 'manual':
+                            return {
+                                'target_para': target_para,
+                                'matched_runs_info': matched_runs_info,
+                                'matched_start': matched_start,
+                                'violation_text': violation_text,
+                                'revised_text': revised_text,
+                                'numbering_stripped': numbering_stripped,
+                                'is_cross_paragraph': is_cross_paragraph,
+                                'early_result': EditResult(True, item),
+                            }
                         return {
                             'target_para': target_para,
                             'matched_runs_info': matched_runs_info,
@@ -799,8 +812,20 @@ class ItemSearchMixin:
                     violation_text=violation_text,
                     revised_text=revised_text,
                     reason=reason,
+                    use_fallback_reason=item.fix_action != 'manual',
                 )
                 if retried:
+                    if item.fix_action == 'manual':
+                        return {
+                            'target_para': target_para,
+                            'matched_runs_info': matched_runs_info,
+                            'matched_start': matched_start,
+                            'violation_text': violation_text,
+                            'revised_text': revised_text,
+                            'numbering_stripped': numbering_stripped,
+                            'is_cross_paragraph': is_cross_paragraph,
+                            'early_result': EditResult(True, item),
+                        }
                     return {
                         'target_para': target_para,
                         'matched_runs_info': matched_runs_info,

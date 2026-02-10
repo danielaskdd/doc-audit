@@ -967,11 +967,11 @@ class TestNotFoundMarkupRetry:
         result = applier._process_item(item)
 
         assert result.success is True
-        assert result.warning is True
-        assert result.error_message == "Violation text not found(S)"
+        assert result.warning is False
+        assert result.error_message is None
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
-        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(S)")
+        assert not applier.comments[0]['text'].startswith("[FALLBACK]")
 
     def test_not_found_m_replace_retries_to_range_comment(self):
         applier = create_mock_applier()
@@ -1015,11 +1015,11 @@ class TestNotFoundMarkupRetry:
         result = applier._process_item(item)
 
         assert result.success is True
-        assert result.warning is True
-        assert result.error_message == "Violation text not found(M)"
+        assert result.warning is False
+        assert result.error_message is None
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
-        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(M)")
+        assert not applier.comments[0]['text'].startswith("[FALLBACK]")
 
     @pytest.mark.parametrize(
         "reason_case,fix_action,violation_text,revised_text,expect_success,expect_warning",
