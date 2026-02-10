@@ -21,6 +21,7 @@ EditItem = apply_module.EditItem
 _common_module = importlib.import_module("docx_edit.common")
 DRAWING_PATTERN = _common_module.DRAWING_PATTERN
 strip_auto_numbering = _common_module.strip_auto_numbering
+strip_markup_tags = _common_module.strip_markup_tags
 EditResult = _common_module.EditResult
 
 # ============================================================

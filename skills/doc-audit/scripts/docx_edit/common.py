@@ -29,7 +29,7 @@ COMMENTS_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordproce
 COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
 
 # Auto-numbering pattern for detecting and stripping list prefixes
-# Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", "表1 ", "图2 ", etc.
+# Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", "表1 ", "图2 ", "注:", "注：", etc.
 AUTO_NUMBERING_PATTERN = re.compile(
     r'^(?:'
     r'\d+(?:[\.\d)）]+)\s+'  # Numeric: 1. 1.1 1) 1）
@@ -39,6 +39,8 @@ AUTO_NUMBERING_PATTERN = re.compile(
     r'•\s*'                   # Bullet: • (optional space)
     r'|'
     r'[表图]\s*\d+\s*'        # Table/Figure: 表1 图2 表 3 图 4
+    r'|'
+    r'注[:：]\s*'              # Note: 注: 注：
     r')'
 )
 
@@ -51,6 +53,9 @@ TABLE_ROW_NUMBERING_PATTERN = re.compile(
 # Table tag pattern for detecting mixed body/table content from parse_document.py
 # Matches: <table> and </table> tags that wrap table JSON content
 TABLE_TAG_PATTERN = re.compile(r'</?table>')
+
+# Sup/sub tag pattern for fallback retry normalization
+SUP_SUB_TAG_PATTERN = re.compile(r'</?(?:sup|sub)>', re.IGNORECASE)
 
 # Drawing pattern for detecting inline image placeholders
 # Matches:
@@ -128,6 +133,23 @@ def format_text_preview(text: str, max_len: int = 30) -> str:
     if len(clean) > max_len:
         return clean[:max_len] + "..."
     return clean
+
+
+def strip_markup_tags(text: str) -> Tuple[str, bool]:
+    """
+    Strip only <sup>/<sub> tags while preserving inner text.
+
+    Args:
+        text: Input text that may contain XML/HTML-like tags
+
+    Returns:
+        Tuple of (stripped_text, was_stripped)
+    """
+    if not text:
+        return text, False
+
+    stripped = SUP_SUB_TAG_PATTERN.sub('', text)
+    return stripped, stripped != text
 
 
 def is_synthetic_run(run: Dict, include_equations: bool = True) -> bool:

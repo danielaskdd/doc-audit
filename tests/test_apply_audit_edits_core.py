@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from _apply_audit_edits_helpers import (
     apply_module, AuditEditApplier, NS, DRAWING_PATTERN,
-    strip_auto_numbering, EditResult, NSMAP,
+    strip_auto_numbering, strip_markup_tags, EditResult, NSMAP,
     create_paragraph_xml, create_paragraph_with_inline_image,
     create_paragraph_with_anchor_image, create_paragraph_with_track_changes,
     create_mock_applier, create_edit_item, get_test_author,
@@ -804,6 +804,33 @@ class TestStripAutoNumbering:
         assert strip_auto_numbering("Normal text") == ("Normal text", False)
 
 
+class TestStripMarkupTags:
+    """Tests for strip_markup_tags helper."""
+
+    def test_strip_sup_sub_tags(self):
+        stripped, changed = strip_markup_tags("H<sup>2</sup>O")
+        assert changed is True
+        assert stripped == "H2O"
+
+    def test_strip_mixed_tags(self):
+        text = (
+            "A<drawing id=\"1\" name=\"img\" />"
+            "x<sub>2</sub>"
+            "<equation>x^2</equation>"
+            "<table>[\"1\"]</table>"
+            "B"
+        )
+        stripped, changed = strip_markup_tags(text)
+        assert changed is True
+        assert stripped == (
+            "A<drawing id=\"1\" name=\"img\" />"
+            "x2"
+            "<equation>x^2</equation>"
+            "<table>[\"1\"]</table>"
+            "B"
+        )
+
+
 class TestLocateItemMatchNumbering:
     """Regression tests for numbering stripping during item locate."""
 
@@ -856,6 +883,193 @@ class TestLocateItemMatchNumbering:
         assert context["revised_text"].startswith("三防漆涂覆")
         assert not context["revised_text"].startswith("h) ")
         assert "ZD5" in context["revised_text"]
+
+
+class TestNotFoundMarkupRetry:
+    """Tests for not-found fallback retry with markup stripping."""
+
+    @staticmethod
+    def _setup_body(applier, text: str, para_id: str = "AAA"):
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        para = create_paragraph_xml(text, para_id=para_id)
+        body.append(para)
+        applier.body_elem = body
+        applier._init_para_order()
+        return para
+
+    @staticmethod
+    def _create_para_with_subscript(para_id: str = "AAA"):
+        para = etree.Element(f'{{{NS["w"]}}}p', nsmap=NSMAP)
+        para.set(f'{{{NS["w14"]}}}paraId', para_id)
+
+        r1 = etree.SubElement(para, f'{{{NS["w"]}}}r')
+        t1 = etree.SubElement(r1, f'{{{NS["w"]}}}t')
+        t1.text = "π"
+
+        r2 = etree.SubElement(para, f'{{{NS["w"]}}}r')
+        r2pr = etree.SubElement(r2, f'{{{NS["w"]}}}rPr')
+        va = etree.SubElement(r2pr, f'{{{NS["w"]}}}vertAlign')
+        va.set(f'{{{NS["w"]}}}val', "subscript")
+        t2 = etree.SubElement(r2, f'{{{NS["w"]}}}t')
+        t2.text = "C"
+
+        r3 = etree.SubElement(para, f'{{{NS["w"]}}}r')
+        t3 = etree.SubElement(r3, f'{{{NS["w"]}}}t')
+        t3.text = "＝0.65(L为印制板层数）"
+        return para
+
+    def test_not_found_c_delete_retries_to_range_comment(self):
+        applier = create_mock_applier()
+        para = self._setup_body(applier, "H2O sample")
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action="delete",
+            violation_text="H<sup>2</sup>O",
+            revised_text="",
+        )
+
+        # Force C-branch: boundary crossed + no table/body fallback hit.
+        applier._collect_runs_info_across_paragraphs = (
+            lambda start_para, uuid_end: ([], "", False, "boundary_crossed")
+        )
+        applier._find_tables_in_range = lambda start_para, uuid_end: []
+        applier._is_paragraph_in_table = lambda _para: False
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message == "Violation text not found(C)"
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
+        assert len(para.findall('.//w:del', NSMAP)) == 0
+        assert len(para.findall('.//w:ins', NSMAP)) == 0
+        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(C)")
+
+    def test_not_found_s_manual_retries_to_range_comment(self):
+        applier = create_mock_applier()
+        para = self._setup_body(applier, "H2O sample")
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action="manual",
+            violation_text="H<sup>2</sup>O",
+            revised_text="Use plain text",
+        )
+
+        # Force S-branch: one table segment considered, still not found on first pass.
+        fake_table = etree.Element(f'{{{NS["w"]}}}tbl', nsmap=NSMAP)
+        applier._find_tables_in_range = lambda start_para, uuid_end: [fake_table]
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message == "Violation text not found(S)"
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
+        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(S)")
+
+    def test_not_found_m_replace_retries_to_range_comment(self):
+        applier = create_mock_applier()
+        para = self._setup_body(applier, "H2O sample")
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action="replace",
+            violation_text="H<sup>2</sup>O",
+            revised_text="Water",
+        )
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message == "Violation text not found(M)"
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
+        assert len(para.findall('.//w:del', NSMAP)) == 0
+        assert len(para.findall('.//w:ins', NSMAP)) == 0
+        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(M)")
+
+    def test_retry_strips_sup_sub_in_both_violation_and_document(self):
+        applier = create_mock_applier()
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        para = self._create_para_with_subscript("AAA")
+        body.append(para)
+        applier.body_elem = body
+        applier._init_para_order()
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action="manual",
+            violation_text="πC＝0.65(L为印制板层数）",
+            revised_text="建议说明变量定义",
+        )
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message == "Violation text not found(M)"
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
+        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(M)")
+
+    @pytest.mark.parametrize(
+        "reason_case,fix_action,violation_text,revised_text,expect_success,expect_warning",
+        [
+            ("C", "delete", "Missing target", "", True, True),
+            ("S", "manual", "Missing target", "Suggestion", True, True),
+            ("M", "replace", "Missing target", "Fixed", False, False),
+        ],
+    )
+    def test_not_found_retry_miss_keeps_reference_comment_and_prefix(
+        self,
+        reason_case,
+        fix_action,
+        violation_text,
+        revised_text,
+        expect_success,
+        expect_warning,
+    ):
+        applier = create_mock_applier()
+        para = self._setup_body(applier, "H2O sample")
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action=fix_action,
+            violation_text=violation_text,
+            revised_text=revised_text,
+        )
+
+        if reason_case == "C":
+            applier._collect_runs_info_across_paragraphs = (
+                lambda start_para, uuid_end: ([], "", False, "boundary_crossed")
+            )
+            applier._find_tables_in_range = lambda start_para, uuid_end: []
+            applier._is_paragraph_in_table = lambda _para: False
+        elif reason_case == "S":
+            fake_table = etree.Element(f'{{{NS["w"]}}}tbl', nsmap=NSMAP)
+            applier._find_tables_in_range = lambda start_para, uuid_end: [fake_table]
+
+        result = applier._process_item(item)
+
+        assert result.success is expect_success
+        assert result.warning is expect_warning
+        assert result.error_message == f"Violation text not found({reason_case})"
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 0
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 0
+        assert len(para.findall('.//w:commentReference', NSMAP)) == 1
+        assert applier.comments[0]['text'].startswith(
+            f"[FALLBACK]Violation text not found({reason_case})"
+        )
 
 
 # ============================================================

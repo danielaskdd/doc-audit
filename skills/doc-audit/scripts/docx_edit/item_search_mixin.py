@@ -18,11 +18,172 @@ from .common import (
     normalize_table_json,
     dedupe_search_attempts,
     extract_matching_table_row,
+    strip_markup_tags,
     DEBUG_MARKER,
 )
 
 
 class ItemSearchMixin:
+    def _strip_sup_sub_with_mapping(self, text: str) -> Tuple[str, List[int]]:
+        """
+        Strip <sup>/<sub> tags and build index mapping to original text.
+
+        Returns:
+            (stripped_text, stripped_idx_to_original_idx)
+        """
+        if not text:
+            return text, []
+
+        stripped_chars: List[str] = []
+        idx_map: List[int] = []
+        i = 0
+        while i < len(text):
+            lower_tail = text[i:].lower()
+            if lower_tail.startswith('<sup>'):
+                i += 5
+                continue
+            if lower_tail.startswith('</sup>'):
+                i += 6
+                continue
+            if lower_tail.startswith('<sub>'):
+                i += 5
+                continue
+            if lower_tail.startswith('</sub>'):
+                i += 6
+                continue
+
+            stripped_chars.append(text[i])
+            idx_map.append(i)
+            i += 1
+
+        return ''.join(stripped_chars), idx_map
+
+    def _find_in_runs_with_sup_sub_stripped(
+        self,
+        runs_info: List[Dict],
+        search_text: str,
+    ) -> Tuple[int, Optional[str]]:
+        """
+        Find text after stripping <sup>/<sub> tags on both sides.
+
+        Returns:
+            (match_start_in_original_runs_text, matched_text_override)
+        """
+        combined_text = ''.join(r.get('text', '') for r in runs_info)
+        stripped_search, _ = strip_markup_tags(search_text)
+        if not stripped_search:
+            return -1, None
+
+        stripped_combined, idx_map = self._strip_sup_sub_with_mapping(combined_text)
+        pos = stripped_combined.find(stripped_search)
+        if pos == -1:
+            return -1, None
+
+        stripped_end = pos + len(stripped_search) - 1
+        if stripped_end >= len(idx_map):
+            return -1, None
+
+        orig_start = idx_map[pos]
+        orig_end = idx_map[stripped_end] + 1
+        return orig_start, combined_text[orig_start:orig_end]
+
+    def _try_not_found_markup_retry_to_range_comment(
+        self,
+        item: EditItem,
+        anchor_para,
+        violation_text: str,
+        revised_text: str,
+        reason: str,
+    ) -> bool:
+        """
+        Retry not-found items by stripping <sup>/<sub> tags on both sides.
+
+        On hit, convert to range comment via _apply_manual (with fallback_reason).
+        """
+        if not reason.startswith("Violation text not found("):
+            return False
+
+        stripped_violation, _ = strip_markup_tags(violation_text)
+        stripped_violation = stripped_violation.strip()
+        if not stripped_violation:
+            if self.verbose:
+                print("  [Not-found retry] skip: empty text after sup/sub strip")
+            return False
+
+        item_author = self._author_for_item(item)
+        if self.verbose:
+            print(
+                f"  [Not-found retry] try sup/sub-stripped text: "
+                f"'{format_text_preview(stripped_violation)}'"
+            )
+
+        # 1) Retry in single-paragraph mode first.
+        for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
+            runs_info_orig, _ = self._collect_runs_info_original(para)
+            pos, matched_override = self._find_in_runs_with_sup_sub_stripped(
+                runs_info_orig, violation_text
+            )
+            if pos == -1:
+                continue
+
+            matched_text = matched_override if matched_override is not None else stripped_violation
+            status = self._apply_manual(
+                para,
+                matched_text,
+                item.violation_reason,
+                revised_text,
+                runs_info_orig,
+                pos,
+                item_author,
+                is_cross_paragraph=False,
+                fallback_reason=reason,
+            )
+            if status == 'success':
+                if self.verbose:
+                    print("  [Not-found retry] hit in single paragraph (sup/sub strip)")
+                return True
+
+        # 2) Retry in cross-paragraph mode.
+        cross_runs, _, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
+            anchor_para, item.uuid_end
+        )
+        if boundary_error is not None or not cross_runs:
+            if self.verbose:
+                print("  [Not-found retry] miss in cross-paragraph mode")
+            return False
+
+        pos, matched_override = self._find_in_runs_with_sup_sub_stripped(
+            cross_runs, violation_text
+        )
+        if pos == -1:
+            if self.verbose:
+                print("  [Not-found retry] miss in cross-paragraph mode")
+            return False
+
+        matched_text = matched_override if matched_override is not None else stripped_violation
+        status = self._apply_manual(
+            anchor_para,
+            matched_text,
+            item.violation_reason,
+            revised_text,
+            cross_runs,
+            pos,
+            item_author,
+            is_cross_paragraph=is_multi_para,
+            fallback_reason=reason,
+        )
+        if status == 'success':
+            if self.verbose:
+                print(
+                    f"  [Not-found retry] hit in "
+                    f"{'cross-paragraph' if is_multi_para else 'cross-range'} mode"
+                )
+            return True
+
+        if self.verbose:
+            print("  [Not-found retry] manual range comment failed")
+        return False
+
     def _locate_item_match(
         self,
         item: EditItem,
@@ -566,6 +727,30 @@ class ItemSearchMixin:
                         except Exception:
                             pass
 
+                    retried = self._try_not_found_markup_retry_to_range_comment(
+                        item=item,
+                        anchor_para=anchor_para,
+                        violation_text=violation_text,
+                        revised_text=revised_text,
+                        reason=reason,
+                    )
+                    if retried:
+                        return {
+                            'target_para': target_para,
+                            'matched_runs_info': matched_runs_info,
+                            'matched_start': matched_start,
+                            'violation_text': violation_text,
+                            'revised_text': revised_text,
+                            'numbering_stripped': numbering_stripped,
+                            'is_cross_paragraph': is_cross_paragraph,
+                            'early_result': EditResult(
+                                success=True,
+                                item=item,
+                                error_message=reason,
+                                warning=True,
+                            ),
+                        }
+
                     self._apply_fallback_comment(anchor_para, item, reason)
                     if self.verbose:
                         print(f"  [Boundary] {reason}")
@@ -608,8 +793,14 @@ class ItemSearchMixin:
                 else:
                     reason = "Violation text not found(M)"
 
-                if item.fix_action == 'manual':
-                    self._apply_error_comment(anchor_para, item)
+                retried = self._try_not_found_markup_retry_to_range_comment(
+                    item=item,
+                    anchor_para=anchor_para,
+                    violation_text=violation_text,
+                    revised_text=revised_text,
+                    reason=reason,
+                )
+                if retried:
                     return {
                         'target_para': target_para,
                         'matched_runs_info': matched_runs_info,
@@ -625,7 +816,25 @@ class ItemSearchMixin:
                             warning=True,
                         ),
                     }
-                self._apply_error_comment(anchor_para, item)
+
+                self._apply_fallback_comment(anchor_para, item, reason)
+
+                if item.fix_action == 'manual':
+                    return {
+                        'target_para': target_para,
+                        'matched_runs_info': matched_runs_info,
+                        'matched_start': matched_start,
+                        'violation_text': violation_text,
+                        'revised_text': revised_text,
+                        'numbering_stripped': numbering_stripped,
+                        'is_cross_paragraph': is_cross_paragraph,
+                        'early_result': EditResult(
+                            success=True,
+                            item=item,
+                            error_message=reason,
+                            warning=True,
+                        ),
+                    }
                 return {
                     'target_para': target_para,
                     'matched_runs_info': matched_runs_info,
