@@ -27,6 +27,299 @@ from utils import sanitize_xml_string
 
 
 class CommentWorkflowMixin:
+    def _append_reference_only_comment(
+        self,
+        para_elem,
+        comment_text: str,
+        author: str,
+        fallback_reason: Optional[str] = None
+    ) -> bool:
+        """Append a reference-only comment at paragraph end.
+
+        When fallback_reason is provided, the comment text is prefixed with
+        [FALLBACK]{reason} as a visible degradation marker.
+        """
+        if para_elem is None:
+            return False
+
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+
+        full_text = comment_text or ""
+        if fallback_reason:
+            if full_text:
+                full_text = f"[FALLBACK]{fallback_reason}  {full_text}"
+            else:
+                full_text = f"[FALLBACK]{fallback_reason}"
+
+        self.comments.append({
+            'id': comment_id,
+            'text': full_text,
+            'author': author
+        })
+        return True
+
+    def _insert_manual_style_range_comment(
+        self,
+        real_runs: List[Dict],
+        para_elem,
+        violation_reason: str,
+        author: str
+    ) -> Tuple[bool, str]:
+        """Insert range comment markers using manual-comment style anchoring."""
+        if not real_runs:
+            return False, "No real runs available"
+
+        first_run_info = real_runs[0]
+        last_run_info = real_runs[-1]
+
+        def _doc_key_for_run(run_info: Dict) -> Optional[Tuple[int, int]]:
+            host_para = run_info.get('host_para_elem')
+            para = run_info.get('para_elem', para_elem)
+            key = None
+            if host_para is not None:
+                key = self._get_run_doc_key(run_info.get('elem'), host_para)
+            if key is None and para is not None and para is not host_para:
+                key = self._get_run_doc_key(run_info.get('elem'), para)
+            return key
+
+        start_key = _doc_key_for_run(first_run_info)
+        end_key = _doc_key_for_run(last_run_info)
+        if start_key is None:
+            return False, "Cannot resolve start run order"
+
+        if end_key is None or (end_key is not None and end_key < start_key):
+            candidate = None
+            for run_info in reversed(real_runs):
+                cand_key = _doc_key_for_run(run_info)
+                if cand_key is not None and cand_key >= start_key:
+                    candidate = run_info
+                    break
+            if candidate is None:
+                return False, "Cannot resolve valid end run order"
+            last_run_info = candidate
+
+        first_run = first_run_info.get('elem')
+        last_run = last_run_info.get('elem')
+
+        start_host_para = first_run_info.get('host_para_elem')
+        end_host_para = last_run_info.get('host_para_elem')
+        start_use_host = start_host_para is not None and start_host_para is not first_run_info.get('para_elem')
+        end_use_host = end_host_para is not None and end_host_para is not last_run_info.get('para_elem')
+
+        has_host_mismatch = any(
+            r.get('host_para_elem') is not None and r.get('host_para_elem') is not r.get('para_elem')
+            for r in real_runs
+        )
+        if has_host_mismatch:
+            start_use_host = True
+            end_use_host = True
+
+        if first_run is None:
+            start_use_host = True
+        if last_run is None:
+            end_use_host = True
+
+        if start_use_host and start_host_para is None:
+            start_host_para = first_run_info.get('para_elem', para_elem)
+        if end_use_host and end_host_para is None:
+            end_host_para = last_run_info.get('para_elem', para_elem)
+
+        reference_para = None
+        for run_info in reversed(real_runs):
+            para_candidate = run_info.get('host_para_elem')
+            if para_candidate is None:
+                para_candidate = run_info.get('para_elem')
+            if para_candidate is None:
+                continue
+            try:
+                _, para_text = self._collect_runs_info_original(para_candidate)
+                if para_text.strip():
+                    reference_para = para_candidate
+                    break
+            except Exception:
+                continue
+        if reference_para is None:
+            reference_para = end_host_para if end_host_para is not None else start_host_para
+            if reference_para is None:
+                reference_para = para_elem
+
+        if start_use_host and end_use_host and start_host_para is not None and reference_para is not None:
+            self._init_para_order()
+            start_idx = self._para_order.get(id(start_host_para))
+            end_idx = self._para_order.get(id(reference_para))
+            if start_idx is not None and end_idx is not None and end_idx < start_idx:
+                return False, "Host paragraph order is inverted"
+
+        if start_use_host:
+            target_para = start_host_para
+            if target_para is None:
+                return False, "Missing start host paragraph"
+            start_parent = target_para
+            start_index = 0
+            for i, child in enumerate(list(target_para)):
+                if child.tag == f'{{{NS["w"]}}}pPr':
+                    continue
+                start_index = i
+                break
+        else:
+            first_para = first_run_info.get('para_elem', para_elem)
+            start_revision = self._find_revision_ancestor(first_run, first_para)
+            if start_revision is not None:
+                start_parent = start_revision.getparent()
+                if start_parent is None:
+                    return False, "Cannot place start marker outside revision"
+                start_index = list(start_parent).index(start_revision)
+            else:
+                start_parent = first_run.getparent() if first_run is not None else None
+                if start_parent is None:
+                    return False, "Missing start run parent"
+                start_index = list(start_parent).index(first_run)
+
+        if end_use_host:
+            target_para = reference_para if reference_para is not None else end_host_para
+            if target_para is None:
+                return False, "Missing end host paragraph"
+            end_parent = target_para
+            end_index = len(list(target_para))
+        else:
+            last_para = last_run_info.get('para_elem', para_elem)
+            end_revision = self._find_revision_ancestor(last_run, last_para)
+            if end_revision is not None:
+                end_parent = end_revision.getparent()
+                if end_parent is None:
+                    return False, "Cannot place end marker outside revision"
+                end_index = list(end_parent).index(end_revision) + 1
+            else:
+                end_parent = last_run.getparent() if last_run is not None else None
+                if end_parent is None:
+                    return False, "Missing end run parent"
+                end_index = list(end_parent).index(last_run) + 1
+
+        comment_id = self.next_comment_id
+        self.next_comment_id += 1
+        range_start = etree.fromstring(
+            f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        )
+        range_end = etree.fromstring(
+            f'<w:commentRangeEnd xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
+        )
+        comment_ref = etree.fromstring(f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>''')
+
+        inserted = []
+        try:
+            start_parent.insert(start_index, range_start)
+            inserted.append(range_start)
+
+            if start_parent is end_parent and start_index < end_index:
+                end_index += 1
+
+            end_parent.insert(end_index, range_end)
+            inserted.append(range_end)
+            end_parent.insert(end_index + 1, comment_ref)
+            inserted.append(comment_ref)
+        except Exception:
+            for node in reversed(inserted):
+                parent = node.getparent()
+                if parent is not None:
+                    parent.remove(node)
+            self.next_comment_id = comment_id
+            return False, "Failed to insert range markers"
+
+        self.comments.append({
+            'id': comment_id,
+            'text': violation_reason,
+            'author': author
+        })
+        return True, ""
+
+    def _try_add_multi_cell_range_comment(
+        self,
+        success_cell_edits: List[Dict],
+        violation_reason: str,
+        author: str
+    ) -> Tuple[bool, str]:
+        """
+        Try inserting a range comment for multi-cell replace.
+
+        Strategy:
+        - Re-collect fresh runs from successful cells after replace.
+        - Build first/last anchors in document order.
+        - Insert markers using the same anchoring rules as manual comments.
+
+        Returns:
+            (True, "") on success, (False, reason) on fallback.
+        """
+        if not success_cell_edits:
+            return False, "No successful cells available"
+
+        cells = []
+        seen_cells = set()
+        for cell_edit in success_cell_edits:
+            cell_elem = cell_edit.get('cell_elem')
+            if cell_elem is None:
+                return False, "Missing cell element"
+            cell_id = id(cell_elem)
+            if cell_id in seen_cells:
+                continue
+            seen_cells.add(cell_id)
+            cells.append(cell_elem)
+
+        if not cells:
+            return False, "No valid cells for range comment"
+
+        candidate_runs = []
+        seen_run_keys = set()
+        for cell_elem in cells:
+            paras = self._xpath(cell_elem, './/w:p')
+            for para in paras:
+                para_runs, _ = self._collect_runs_info_original(para)
+                for run in para_runs:
+                    run_elem = run.get('elem')
+                    if run_elem is None:
+                        continue
+                    run_key = (id(para), id(run_elem))
+                    if run_key in seen_run_keys:
+                        continue
+                    seen_run_keys.add(run_key)
+
+                    run['para_elem'] = para
+                    run['host_para_elem'] = para
+                    run['cell_elem'] = cell_elem
+                    run['row_elem'] = self._find_ancestor_row(para)
+                    candidate_runs.append(run)
+
+        if not candidate_runs:
+            return False, "No run anchor found in successful cells"
+
+        keyed_runs = []
+        for run in candidate_runs:
+            para = run.get('host_para_elem')
+            if para is None:
+                para = run.get('para_elem')
+            key = self._get_run_doc_key(run.get('elem'), para)
+            if key is not None:
+                keyed_runs.append((key, run))
+
+        if not keyed_runs:
+            return False, "Cannot resolve run order for successful cells"
+
+        keyed_runs.sort(key=lambda item: item[0])
+        ordered_runs = [run for _, run in keyed_runs]
+        anchor_para = ordered_runs[0].get('para_elem')
+        return self._insert_manual_style_range_comment(
+            ordered_runs, anchor_para, violation_reason, author
+        )
+
     def _apply_error_comment(self, para_elem, item: EditItem, author_override: str = None) -> bool:
         """
         Insert an unselected comment at the end of paragraph for failed items.
@@ -1414,6 +1707,7 @@ class CommentWorkflowMixin:
 
                                     success_count = 0
                                     failed_cells = []  # List of (cell_edit, cell_para, error_reason)
+                                    success_cells = []
                                     first_success_para = None
 
                                     for cell_edit in multi_cells:
@@ -1439,6 +1733,7 @@ class CommentWorkflowMixin:
 
                                         # Success - track for overall comment
                                         success_count += 1
+                                        success_cells.append(cell_edit)
                                         if first_success_para is None:
                                             # Get first paragraph for comment placement
                                             for run in cell_edit['cell_runs']:
@@ -1451,21 +1746,31 @@ class CommentWorkflowMixin:
                                     if success_count > 0:
                                         # At least one cell succeeded - add overall comment
                                         if first_success_para is not None:
-                                            comment_id = self.next_comment_id
-                                            self.next_comment_id += 1
-
-                                            # Insert commentReference at end of first successful paragraph
-                                            ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                                                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                                                <w:commentReference w:id="{comment_id}"/>
-                                            </w:r>'''
-                                            first_success_para.append(etree.fromstring(ref_xml))
-
-                                            self.comments.append({
-                                                'id': comment_id,
-                                                'text': item.violation_reason,
-                                                'author': item_author
-                                            })
+                                            # Try range comment only for full multi-cell success.
+                                            # Otherwise keep stable reference-only behavior.
+                                            if success_count == len(multi_cells):
+                                                range_ok, range_reason = self._try_add_multi_cell_range_comment(
+                                                    success_cells,
+                                                    item.violation_reason,
+                                                    item_author
+                                                )
+                                                if not range_ok:
+                                                    fallback_comment_text = (
+                                                        f"{{WHY}}{item.violation_reason}  "
+                                                        f"{{WHERE}}{item.violation_text}"
+                                                    )
+                                                    self._append_reference_only_comment(
+                                                        first_success_para,
+                                                        fallback_comment_text,
+                                                        item_author,
+                                                        fallback_reason=range_reason
+                                                    )
+                                            else:
+                                                self._append_reference_only_comment(
+                                                    first_success_para,
+                                                    item.violation_reason,
+                                                    item_author
+                                                )
 
                                         # Add individual comments for failed cells
                                         for cell_edit, cell_para, error_reason in failed_cells:
