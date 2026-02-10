@@ -1425,6 +1425,106 @@ class TestManualCommentOrdering:
         assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
 
 
+class TestMultiCellRangeComment:
+    def test_range_comment_for_same_row_cells(self):
+        """Multi-cell full success in same row should produce a range comment."""
+        applier = create_mock_applier()
+
+        tbl = create_table_with_cells([['CellA'], ['CellB']], ['AAA', 'BBB'])
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        cells = body.findall('.//w:tc', NSMAP)
+        assert len(cells) == 2
+
+        ok, reason = applier._try_add_multi_cell_range_comment(
+            [{'cell_elem': cells[0]}, {'cell_elem': cells[1]}],
+            "Range reason",
+            "Author"
+        )
+
+        assert ok is True
+        assert reason == ""
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'] == "Range reason"
+        assert applier.comments[0]['author'] == "Author"
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
+
+    def test_range_comment_across_rows_supported(self):
+        """Manual-style range anchoring should support multi-row table spans."""
+        applier = create_mock_applier()
+
+        tbl = create_multi_row_table(
+            [[['R1C1'], ['R1C2']], [['R2C1'], ['R2C2']]],
+            ['A1', 'A2', 'B1', 'B2']
+        )
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        body.append(tbl)
+        applier.body_elem = body
+
+        row1_cell = body.find('.//w:tr[1]/w:tc[1]', NSMAP)
+        row2_cell = body.find('.//w:tr[2]/w:tc[1]', NSMAP)
+        assert row1_cell is not None
+        assert row2_cell is not None
+
+        ok, reason = applier._try_add_multi_cell_range_comment(
+            [{'cell_elem': row1_cell}, {'cell_elem': row2_cell}],
+            "Range reason",
+            "Author"
+        )
+        assert ok is True
+        assert reason == ""
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'] == "Range reason"
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
+
+    def test_fallback_anchor_comment_prefix_when_range_fails(self):
+        """Fallback anchor comment should keep required WHY/WHERE prefix format."""
+        applier = create_mock_applier()
+
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p.set(f'{{{NS["w14"]}}}paraId', 'AAA')
+        r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+        t.text = 'Anchor'
+        applier.body_elem = body
+
+        ok, reason = applier._try_add_multi_cell_range_comment(
+            [{'cell_elem': None}],
+            "Range reason",
+            "Author"
+        )
+        assert ok is False
+        assert reason == "Missing cell element"
+
+        fallback_reason = f"Range comment failed: {reason}"
+        fallback_text = "{WHY}Reason text  {WHERE}Violation text"
+        anchor_para = body.find('.//w:tr[1]/w:tc[1]/w:p', NSMAP)
+        if anchor_para is None:
+            anchor_para = p
+        applied = applier._append_reference_only_comment(
+            anchor_para,
+            fallback_text,
+            "Author",
+            fallback_reason=fallback_reason
+        )
+        assert applied is True
+        assert len(applier.comments) == 1
+        assert applier.comments[0]['text'] == (
+            "[FALLBACK]Range comment failed: Missing cell element  "
+            "{WHY}Reason text  {WHERE}Violation text"
+        )
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 0
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))) == 0
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
+
+
 # ============================================================
 # Main
 # ============================================================

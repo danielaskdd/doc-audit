@@ -24,7 +24,9 @@ from docx_edit.navigation_mixin import NavigationMixin
 from docx_edit.table_edit_mixin import TableEditMixin
 from docx_edit.revision_mixin import RevisionMixin
 from docx_edit.edit_mixin import EditMixin
-from docx_edit.comment_workflow_mixin import CommentWorkflowMixin
+from docx_edit.item_search_mixin import ItemSearchMixin
+from docx_edit.item_result_mixin import ItemResultMixin
+from docx_edit.main_workflow_mixin import MainWorkflowMixin
 
 
 class AuditEditApplier(
@@ -32,7 +34,9 @@ class AuditEditApplier(
     TableEditMixin,
     RevisionMixin,
     EditMixin,
-    CommentWorkflowMixin,
+    ItemSearchMixin,
+    ItemResultMixin,
+    MainWorkflowMixin,
 ):
     """Composite applier assembled from focused mixins for easier maintenance."""
 
