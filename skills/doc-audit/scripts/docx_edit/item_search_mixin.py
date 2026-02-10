@@ -513,15 +513,15 @@ class ItemSearchMixin:
                         match_pos = -1
                         matched_text = violation_text
                         matched_override = None
-                        matched_is_stripped = False
+                        matched_strip_mode: Optional[str] = None
 
-                        for search_text, is_stripped in search_attempts:
+                        for search_text, strip_mode in search_attempts:
                             match_pos, matched_override = self._find_in_runs_with_normalization(
                                 all_runs, search_text
                             )
                             if match_pos != -1:
                                 matched_text = matched_override or search_text
-                                matched_is_stripped = is_stripped
+                                matched_strip_mode = strip_mode
                                 break
 
                         if match_pos != -1:
@@ -530,7 +530,12 @@ class ItemSearchMixin:
                             matched_start = match_pos
                             is_cross_paragraph = len(body_paras_data) > 1
                             violation_text = matched_text
-                            numbering_stripped = matched_is_stripped
+                            numbering_stripped = matched_strip_mode is not None
+                            if matched_strip_mode and item.fix_action == 'replace':
+                                stripped_revised, _ = strip_numbering_by_mode(
+                                    revised_text, matched_strip_mode
+                                )
+                                revised_text = stripped_revised
 
                             if self.verbose:
                                 if is_cross_paragraph:

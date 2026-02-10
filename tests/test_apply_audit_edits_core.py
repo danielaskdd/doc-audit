@@ -803,6 +803,60 @@ class TestStripAutoNumbering:
         assert strip_auto_numbering("Normal text") == ("Normal text", False)
 
 
+class TestLocateItemMatchNumbering:
+    """Regression tests for numbering stripping during item locate."""
+
+    def test_boundary_body_match_strips_revised_text(self):
+        """When violation_text is stripped by mode, revised_text should be stripped too."""
+        applier = create_mock_applier()
+        para = create_paragraph_xml(
+            "三防漆涂覆\n依据文件ADYU0.005.000《三防漆涂覆通用工艺规程》和"
+            "ADYU2.088.1192ZD6《信息处理组件三防漆涂覆作业指导书》中要求执行。",
+            para_id="AAAA1111",
+        )
+        item = create_edit_item(
+            uuid="AAAA1111",
+            uuid_end="AAAA1111",
+            fix_action="replace",
+            violation_text=(
+                "h) 三防漆涂覆\n依据文件ADYU0.005.000《三防漆涂覆通用工艺规程》和"
+                "ADYU2.088.1192ZD6《信息处理组件三防漆涂覆作业指导书》中要求执行。"
+            ),
+            revised_text=(
+                "h) 三防漆涂覆\n依据文件ADYU0.005.000《三防漆涂覆通用工艺规程》和"
+                "ADYU2.088.1192ZD5《信息处理组件三防漆涂覆作业指导书》中要求执行。"
+            ),
+        )
+
+        # Force fallback route:
+        # single-para original miss -> numbering variant miss -> boundary_crossed ->
+        # body segment original miss -> body segment numbering variant hit
+        search_results = iter([(-1, None), (-1, None), (-1, None), (0, None)])
+        applier._find_in_runs_with_normalization = lambda runs, text: next(search_results)
+        applier._iter_paragraphs_in_range = lambda start_para, uuid_end: iter([para])
+        applier._collect_runs_info_across_paragraphs = (
+            lambda start_para, uuid_end: ([], "", False, "boundary_crossed")
+        )
+        applier._find_tables_in_range = lambda start_para, uuid_end: []
+        applier._is_paragraph_in_table = lambda _para: False
+        applier._apply_fallback_comment = lambda *args, **kwargs: None
+
+        context = applier._locate_item_match(
+            item=item,
+            anchor_para=para,
+            violation_text=item.violation_text,
+            revised_text=item.revised_text,
+        )
+
+        assert context["target_para"] is para
+        assert context["matched_start"] == 0
+        assert context["numbering_stripped"] is True
+        assert context["violation_text"].startswith("三防漆涂覆")
+        assert context["revised_text"].startswith("三防漆涂覆")
+        assert not context["revised_text"].startswith("h) ")
+        assert "ZD5" in context["revised_text"]
+
+
 # ============================================================
 # Tests: _find_revision_ancestor
 # ============================================================
