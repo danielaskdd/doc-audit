@@ -15,7 +15,10 @@ from .common import (
     strip_table_row_number_only,
     strip_table_row_numbering,
     normalize_table_json,
-    DEBUG_MARKER
+    DEBUG_MARKER,
+    filter_synthetic_runs,
+    dedupe_search_attempts,
+    extract_matching_table_row,
 )
 from typing import List, Dict, Optional, Tuple
 
@@ -1144,25 +1147,8 @@ class CommentWorkflowMixin:
                             if pos == -1 and DEBUG_MARKER and (DEBUG_MARKER in table_text or DEBUG_MARKER in search_text):
                                 print(f"\n  [DEBUG] Table matching failed for row containing '{DEBUG_MARKER}':")
                                 
-                                # Extract only the row containing DEBUG_MARKER from table_text
-                                def extract_matching_row(text, marker):
-                                    """Extract the row containing the marker from table JSON format."""
-                                    # Table format: ["cell1", "cell2"], ["cell3", "cell4"]
-                                    # Split by row boundaries '], ['
-                                    if not text.startswith('["'):
-                                        return None
-                                    
-                                    # Remove outer brackets and split by row separator
-                                    rows_text = text[2:-2] if text.endswith('"]') else text[2:]
-                                    rows = rows_text.split('"], ["')
-                                    
-                                    for row in rows:
-                                        if marker in row:
-                                            return '["' + row + '"]'
-                                    return None
-                                
-                                table_row = extract_matching_row(table_text, DEBUG_MARKER)
-                                search_row = extract_matching_row(search_text, DEBUG_MARKER)
+                                table_row = extract_matching_table_row(table_text, DEBUG_MARKER)
+                                search_row = extract_matching_table_row(search_text, DEBUG_MARKER)
                                 
                                 if table_row:
                                     print(f"  [DEBUG] Table row content:")
@@ -1297,15 +1283,7 @@ class CommentWorkflowMixin:
                                     search_attempts.append((newline_text, None))
                                     search_attempts.extend(build_numbering_variants(newline_text))
 
-                                # De-duplicate while preserving order
-                                seen = set()
-                                deduped_attempts: List[Tuple[str, Optional[str]]] = []
-                                for text, mode in search_attempts:
-                                    key = (text, mode)
-                                    if key in seen:
-                                        continue
-                                    seen.add(key)
-                                    deduped_attempts.append((text, mode))
+                                deduped_attempts = dedupe_search_attempts(search_attempts)
 
                                 match_pos = -1
                                 matched_search_text = violation_text
@@ -1554,19 +1532,11 @@ class CommentWorkflowMixin:
             # Pass matched_runs_info and matched_start to avoid double matching.
             # For delete/replace: if current match conflicts with existing revisions,
             # retry with the next match in the remaining block content.
-            def _filter_non_boundary_runs(runs: List[Dict]) -> List[Dict]:
-                return [
-                    r for r in runs
-                    if not r.get('is_para_boundary', False)
-                    and not r.get('is_json_boundary', False)
-                    and not r.get('is_json_escape', False)
-                ]
-
             def _resolve_target_para_for_match(current_runs: List[Dict], current_start: int,
                                                fallback_para):
                 match_end = current_start + len(violation_text)
                 affected = self._find_affected_runs(current_runs, current_start, match_end)
-                real_runs = _filter_non_boundary_runs(affected)
+                real_runs = filter_synthetic_runs(affected, include_equations=False)
                 for run in real_runs:
                     para = run.get('para_elem')
                     if para is not None:
@@ -1585,7 +1555,7 @@ class CommentWorkflowMixin:
                         affected = self._find_affected_runs(matched_runs_info, current_start, match_end)
 
                         # Filter out boundary markers (paragraph and JSON boundaries)
-                        real_runs = _filter_non_boundary_runs(affected)
+                        real_runs = filter_synthetic_runs(affected, include_equations=False)
 
                         # Check if actual match spans multiple paragraphs
                         para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)
@@ -1652,7 +1622,7 @@ class CommentWorkflowMixin:
                         affected = self._find_affected_runs(matched_runs_info, current_start, match_end)
 
                         # Filter out boundary markers (paragraph and JSON boundaries)
-                        real_runs = _filter_non_boundary_runs(affected)
+                        real_runs = filter_synthetic_runs(affected, include_equations=False)
 
                         # Check if actual match spans multiple paragraphs
                         para_elems = set(r.get('para_elem') for r in real_runs if r.get('para_elem') is not None)

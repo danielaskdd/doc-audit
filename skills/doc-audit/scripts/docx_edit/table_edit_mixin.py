@@ -8,6 +8,7 @@ from .common import (
     NS,
     EditItem,
     format_text_preview,
+    is_synthetic_run,
 )
 from lxml import etree
 
@@ -414,9 +415,7 @@ class TableEditMixin:
             # Find which cell contains this change
             change_cell = None
             for run in affected_runs:
-                if (run.get('is_json_boundary') or 
-                    run.get('is_json_escape') or 
-                    run.get('is_para_boundary')):
+                if is_synthetic_run(run, include_equations=False):
                     continue
                 
                 # Check if this run is affected by the change
@@ -454,9 +453,7 @@ class TableEditMixin:
         # Group affected runs by cell
         cell_runs_map = {}
         for run in affected_runs:
-            if (run.get('is_json_boundary') or 
-                run.get('is_json_escape') or 
-                run.get('is_para_boundary')):
+            if is_synthetic_run(run, include_equations=False):
                 continue
             
             cell = run.get('cell_elem')

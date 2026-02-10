@@ -5,7 +5,7 @@ Helper functions and data classes for docx editing, handling shared constants, d
 import json
 import re
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Iterable
 
 
 # ============================================================
@@ -124,6 +124,76 @@ def format_text_preview(text: str, max_len: int = 30) -> str:
     if len(clean) > max_len:
         return clean[:max_len] + "..."
     return clean
+
+
+def is_synthetic_run(run: Dict, include_equations: bool = True) -> bool:
+    """
+    Check whether a run is synthetic (boundary/escape marker, not editable text).
+
+    Synthetic runs are injected by run-collection logic for matching and boundary
+    tracking, and should usually be excluded from edit/comment anchor operations.
+
+    Args:
+        run: Run info dictionary
+        include_equations: If True, equation markers are treated as synthetic.
+            If False, equation markers are treated as real runs.
+
+    Returns:
+        True if this run is synthetic and should be filtered out.
+    """
+    if run.get('is_para_boundary', False):
+        return True
+    if run.get('is_json_boundary', False):
+        return True
+    if run.get('is_json_escape', False):
+        return True
+    if include_equations and run.get('is_equation', False):
+        return True
+    return False
+
+
+def filter_synthetic_runs(
+    runs: Iterable[Dict],
+    include_equations: bool = True
+) -> List[Dict]:
+    """
+    Return runs excluding synthetic boundary/escape markers.
+
+    Args:
+        runs: Iterable of run info dictionaries
+        include_equations: If True, equation markers are filtered out.
+            If False, equation markers are kept.
+
+    Returns:
+        List of non-synthetic runs.
+    """
+    return [
+        r for r in runs
+        if not is_synthetic_run(r, include_equations=include_equations)
+    ]
+
+
+def dedupe_search_attempts(
+    attempts: List[Tuple[str, Optional[str]]]
+) -> List[Tuple[str, Optional[str]]]:
+    """
+    De-duplicate search attempts while preserving order.
+
+    Args:
+        attempts: Sequence of (search_text, strip_mode) tuples
+
+    Returns:
+        De-duplicated list preserving first occurrence order.
+    """
+    seen = set()
+    deduped: List[Tuple[str, Optional[str]]] = []
+    for text, mode in attempts:
+        key = (text, mode)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((text, mode))
+    return deduped
 
 
 def strip_auto_numbering(text: str) -> Tuple[str, bool]:
@@ -450,6 +520,33 @@ def extract_longest_segment(text: str) -> Optional[str]:
     if not clean:
         return None
     return max(clean, key=len)
+
+
+def extract_matching_table_row(text: str, marker: str) -> Optional[str]:
+    """
+    Extract the first JSON-like table row containing marker text.
+
+    Expected row string format: '["cell1", "cell2"], ["cell3", "cell4"]'
+
+    Args:
+        text: Table row string or multi-row row-string
+        marker: Marker to locate
+
+    Returns:
+        The matching row segment in '["..."]' format, or None if not found.
+    """
+    if not marker:
+        return None
+    if not text.startswith('["'):
+        return None
+
+    rows_text = text[2:-2] if text.endswith('"]') else text[2:]
+    rows = rows_text.split('"], ["')
+
+    for row in rows:
+        if marker in row:
+            return '["' + row + '"]'
+    return None
 
 
 def normalize_table_json(text: str) -> str:

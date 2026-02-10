@@ -8,7 +8,14 @@ import difflib
 from typing import List, Dict, Tuple, Optional
 from lxml import etree
 
-from .common import NS, DRAWING_PATTERN, EQUATION_PATTERN, format_text_preview
+from .common import (
+    NS,
+    DRAWING_PATTERN,
+    EQUATION_PATTERN,
+    format_text_preview,
+    is_synthetic_run,
+    filter_synthetic_runs,
+)
 
 
 class RevisionMixin:
@@ -207,9 +214,7 @@ class RevisionMixin:
             # Find runs affected by this change
             for run_idx, run in enumerate(affected_runs):
                 # Skip synthetic boundary markers
-                if (run.get('is_json_boundary') or 
-                    run.get('is_json_escape') or 
-                    run.get('is_para_boundary')):
+                if is_synthetic_run(run, include_equations=False):
                     continue
                 
                 # Check if this run is affected by the change (using absolute positions)
@@ -239,7 +244,7 @@ class RevisionMixin:
         cell_runs = []
         
         for run in affected_runs:
-            if run.get('is_json_boundary') or run.get('is_json_escape') or run.get('is_para_boundary'):
+            if is_synthetic_run(run, include_equations=False):
                 continue
             cell = run.get('cell_elem')
             if cell is not None and id(cell) == target_cell_id:
@@ -580,11 +585,10 @@ class RevisionMixin:
         Returns:
             List of runs that have actual document elements
         """
-        return [r for r in runs
-                if not r.get('is_json_boundary', False)
-                and not r.get('is_json_escape', False)
-                and not r.get('is_para_boundary', False)
-                and (include_equations or not r.get('is_equation', False))]
+        return filter_synthetic_runs(
+            runs,
+            include_equations=not include_equations
+        )
 
     def _get_run_original_text(self, run: Dict) -> str:
         """
