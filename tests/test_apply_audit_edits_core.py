@@ -116,10 +116,8 @@ class TestApplyDelete:
         # Verify w:del element was created
         del_elems = para.findall('.//w:del', NSMAP)
         assert len(del_elems) == 1
-        # Verify comment was also created with -R suffix author
         assert len(applier.comments) == 1
         assert applier.comments[0]['text'] == "Test reason"
-        assert applier.comments[0]['author'].endswith('-R')
 
     def test_delete_text_not_found(self):
         """Test deleting text that doesn't match position"""
@@ -162,10 +160,8 @@ class TestApplyReplaceWithImages:
         ins_elems = para.findall('.//w:ins', NSMAP)
         assert len(del_elems) == 1
         assert len(ins_elems) == 1
-        # Verify comment was also created with -R suffix author
         assert len(applier.comments) == 1
         assert applier.comments[0]['text'] == "Test reason"
-        assert applier.comments[0]['author'].endswith('-R')
 
     def test_replace_insert_image_fallback(self):
         """Test that inserting images via replace triggers fallback"""

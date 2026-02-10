@@ -324,11 +324,10 @@ class TableEditMixin:
                 </w:r>'''
                 first_success_para.append(etree.fromstring(ref_xml))
                 
-                # Record comment with -R suffix author
                 self.comments.append({
                     'id': comment_id,
                     'text': violation_reason,
-                    'author': f"{author}-R"
+                    'author': author
                 })
             
             # Add individual comments for failed cells

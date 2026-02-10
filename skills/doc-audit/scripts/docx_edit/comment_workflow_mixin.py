@@ -1461,11 +1461,10 @@ class CommentWorkflowMixin:
                                             </w:r>'''
                                             first_success_para.append(etree.fromstring(ref_xml))
 
-                                            # Record comment with -R suffix author
                                             self.comments.append({
                                                 'id': comment_id,
                                                 'text': item.violation_reason,
-                                                'author': f"{item_author}-R"
+                                                'author': item_author
                                             })
 
                                         # Add individual comments for failed cells

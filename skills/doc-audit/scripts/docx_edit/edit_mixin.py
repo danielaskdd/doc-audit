@@ -345,7 +345,7 @@ class EditMixin:
         self.comments.append({
             'id': comment_id,
             'text': violation_reason,
-            'author': f"{author}-R"
+            'author': author
         })
         
         if success_count < len(prepared):
@@ -547,11 +547,10 @@ class EditMixin:
         self._replace_runs(para_elem, real_runs, new_elements)
 
         # Record comment with violation_reason as content
-        # Use "-R" suffix to distinguish comment author from track change author
         self.comments.append({
             'id': comment_id,
             'text': violation_reason,
-            'author': f"{author}-R"
+            'author': author
         })
 
         return 'success'
@@ -941,12 +940,11 @@ class EditMixin:
                     omath.getparent().remove(omath)
 
         # Record comment with violation_reason as content (only if not skipped)
-        # Use "-R" suffix to distinguish comment author from track change author
         if not skip_comment:
             self.comments.append({
                 'id': comment_id,
                 'text': violation_reason,
-                'author': f"{author}-R"
+                'author': author
             })
 
         return 'success'
