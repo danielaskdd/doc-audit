@@ -50,7 +50,7 @@ from prompt import (  # noqa: E402
 )
 
 # Maximum number of concurrent LLM API calls
-MAX_PARALLEL_WORKERS = 8
+MAX_PARALLEL_WORKERS = 5
 
 # Default assets directory (relative to script)
 DEFAULT_ASSETS_DIR = _SCRIPT_DIR / ".." / "assets"
