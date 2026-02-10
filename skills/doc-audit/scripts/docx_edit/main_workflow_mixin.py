@@ -20,7 +20,7 @@ from lxml import etree
 from utils import sanitize_xml_string
 
 
-class CommentWorkflowMixin:
+class MainWorkflowMixin:
     def _append_reference_only_comment(
         self,
         para_elem,
