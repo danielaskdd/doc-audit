@@ -8,17 +8,8 @@ from .common import (
     EditItem,
     EditResult,
     COMMENTS_CONTENT_TYPE,
-    extract_longest_segment,
-    format_text_preview,
-    build_numbering_variants,
-    strip_numbering_by_mode,
-    strip_table_row_number_only,
-    strip_table_row_numbering,
-    normalize_table_json,
     DEBUG_MARKER,
     filter_synthetic_runs,
-    dedupe_search_attempts,
-    extract_matching_table_row,
 )
 from typing import List, Dict, Optional, Tuple
 
@@ -68,6 +59,232 @@ class CommentWorkflowMixin:
         })
         return True
 
+    def _comment_doc_key_for_run(
+        self,
+        run_info: Dict,
+        default_para
+    ) -> Optional[Tuple[int, int]]:
+        """Compute document-order key using host para if available, else para."""
+        host_para = run_info.get('host_para_elem')
+        para = run_info.get('para_elem', default_para)
+        key = None
+        if host_para is not None:
+            key = self._get_run_doc_key(run_info.get('elem'), host_para)
+        if key is None and para is not None and para is not host_para:
+            key = self._get_run_doc_key(run_info.get('elem'), para)
+        return key
+
+    def _pick_reference_para(
+        self,
+        runs: List[Dict],
+        default_para,
+        end_host_para=None,
+        start_host_para=None
+    ):
+        """Choose a reference paragraph that has visible text if possible."""
+        reference_para = None
+        for run_info in reversed(runs):
+            para_candidate = run_info.get('host_para_elem')
+            if para_candidate is None:
+                para_candidate = run_info.get('para_elem')
+            if para_candidate is None:
+                continue
+            try:
+                _, para_text = self._collect_runs_info_original(para_candidate)
+                if para_text.strip():
+                    reference_para = para_candidate
+                    break
+            except Exception:
+                continue
+
+        if reference_para is None:
+            reference_para = end_host_para if end_host_para is not None else start_host_para
+            if reference_para is None:
+                reference_para = default_para
+        return reference_para
+
+    def _append_manual_reference_only_comment(
+        self,
+        para_elem,
+        comment_id: int,
+        violation_reason: str,
+        revised_text: str,
+        author: str
+    ) -> bool:
+        """Append a reference-only fallback comment using existing comment_id."""
+        if para_elem is None:
+            print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+            return False
+
+        ref_xml = f'''<w:r xmlns:w="{NS['w']}">
+            <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
+            <w:commentReference w:id="{comment_id}"/>
+        </w:r>'''
+        para_elem.append(etree.fromstring(ref_xml))
+
+        comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
+        if revised_text:
+            comment_text += f"\nSuggestion: {revised_text}"
+
+        self.comments.append({
+            'id': comment_id,
+            'text': comment_text,
+            'author': author
+        })
+        return True
+
+    def _build_manual_comment_text(
+        self,
+        violation_reason: str,
+        revised_text: str,
+        fallback_reason: Optional[str] = None
+    ) -> str:
+        """Build final comment text for manual action."""
+        if fallback_reason:
+            comment_text = f"[FALLBACK]{fallback_reason} {violation_reason}"
+        else:
+            comment_text = violation_reason
+        if revised_text:
+            comment_text += f"\nSuggestion: {revised_text}"
+        return comment_text
+
+    def _insert_manual_start_marker(
+        self,
+        range_start,
+        start_use_host: bool,
+        start_host_para,
+        start_revision,
+        first_run,
+        no_split_start: bool,
+        before_text: str,
+        rPr_xml: str
+    ) -> bool:
+        """Insert commentRangeStart marker for manual comment."""
+        if start_use_host:
+            target_para = start_host_para
+            if target_para is None:
+                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                return False
+            insert_idx = 0
+            for i, child in enumerate(list(target_para)):
+                if child.tag == f'{{{NS["w"]}}}pPr':
+                    continue
+                insert_idx = i
+                break
+            target_para.insert(insert_idx, range_start)
+            return True
+
+        if start_revision is not None:
+            parent = start_revision.getparent()
+            if parent is not None:
+                idx = list(parent).index(start_revision)
+                parent.insert(idx, range_start)
+            return True
+
+        if first_run is None:
+            return False
+
+        parent = first_run.getparent()
+        if parent is None:
+            return False
+        try:
+            idx = list(parent).index(first_run)
+        except ValueError:
+            return False
+
+        if no_split_start:
+            parent.insert(idx, range_start)
+            return True
+
+        if before_text:
+            run_or_container = self._create_run(before_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                for child_run in run_or_container:
+                    parent.insert(idx, child_run)
+                    idx += 1
+            else:
+                parent.insert(idx, run_or_container)
+                idx += 1
+
+            t_elem = first_run.find('w:t', NS)
+            if t_elem is not None and t_elem.text:
+                t_elem.text = t_elem.text[len(before_text):]
+
+        parent.insert(idx, range_start)
+        return True
+
+    def _insert_manual_end_marker(
+        self,
+        range_end,
+        comment_ref,
+        end_use_host: bool,
+        reference_para,
+        end_host_para,
+        end_revision,
+        last_run,
+        after_text: str,
+        rPr_xml: str,
+        no_split_end: bool
+    ) -> bool:
+        """Insert commentRangeEnd and commentReference for manual comment."""
+        if end_use_host:
+            target_para = reference_para if reference_para is not None else end_host_para
+            if target_para is None:
+                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                return False
+            if (
+                self.verbose and reference_para is not None and end_host_para is not None
+                and reference_para is not end_host_para
+            ):
+                print("  [Debug] End anchor moved to previous non-empty paragraph")
+            target_para.append(range_end)
+            target_para.append(comment_ref)
+            return True
+
+        if end_revision is not None:
+            parent = end_revision.getparent()
+            if parent is not None:
+                idx = list(parent).index(end_revision)
+                parent.insert(idx + 1, range_end)
+                parent.insert(idx + 2, comment_ref)
+            return True
+
+        parent = last_run.getparent() if last_run is not None else None
+        if parent is None:
+            return False
+        try:
+            idx = list(parent).index(last_run)
+        except ValueError:
+            return False
+
+        if no_split_end:
+            parent.insert(idx + 1, range_end)
+            parent.insert(idx + 2, comment_ref)
+            return True
+
+        if after_text:
+            t_elem = last_run.find('w:t', NS)
+            if t_elem is not None and t_elem.text:
+                original_text = t_elem.text
+                keep_len = len(original_text) - len(after_text)
+                t_elem.text = original_text[:keep_len]
+
+            parent.insert(idx + 1, range_end)
+            parent.insert(idx + 2, comment_ref)
+            run_or_container = self._create_run(after_text, rPr_xml)
+            if run_or_container.tag == 'container':
+                insert_pos = idx + 3
+                for child_run in run_or_container:
+                    parent.insert(insert_pos, child_run)
+                    insert_pos += 1
+            else:
+                parent.insert(idx + 3, run_or_container)
+            return True
+
+        parent.insert(idx + 1, range_end)
+        parent.insert(idx + 2, comment_ref)
+        return True
+
     def _insert_manual_style_range_comment(
         self,
         real_runs: List[Dict],
@@ -82,25 +299,15 @@ class CommentWorkflowMixin:
         first_run_info = real_runs[0]
         last_run_info = real_runs[-1]
 
-        def _doc_key_for_run(run_info: Dict) -> Optional[Tuple[int, int]]:
-            host_para = run_info.get('host_para_elem')
-            para = run_info.get('para_elem', para_elem)
-            key = None
-            if host_para is not None:
-                key = self._get_run_doc_key(run_info.get('elem'), host_para)
-            if key is None and para is not None and para is not host_para:
-                key = self._get_run_doc_key(run_info.get('elem'), para)
-            return key
-
-        start_key = _doc_key_for_run(first_run_info)
-        end_key = _doc_key_for_run(last_run_info)
+        start_key = self._comment_doc_key_for_run(first_run_info, para_elem)
+        end_key = self._comment_doc_key_for_run(last_run_info, para_elem)
         if start_key is None:
             return False, "Cannot resolve start run order"
 
         if end_key is None or (end_key is not None and end_key < start_key):
             candidate = None
             for run_info in reversed(real_runs):
-                cand_key = _doc_key_for_run(run_info)
+                cand_key = self._comment_doc_key_for_run(run_info, para_elem)
                 if cand_key is not None and cand_key >= start_key:
                     candidate = run_info
                     break
@@ -134,24 +341,12 @@ class CommentWorkflowMixin:
         if end_use_host and end_host_para is None:
             end_host_para = last_run_info.get('para_elem', para_elem)
 
-        reference_para = None
-        for run_info in reversed(real_runs):
-            para_candidate = run_info.get('host_para_elem')
-            if para_candidate is None:
-                para_candidate = run_info.get('para_elem')
-            if para_candidate is None:
-                continue
-            try:
-                _, para_text = self._collect_runs_info_original(para_candidate)
-                if para_text.strip():
-                    reference_para = para_candidate
-                    break
-            except Exception:
-                continue
-        if reference_para is None:
-            reference_para = end_host_para if end_host_para is not None else start_host_para
-            if reference_para is None:
-                reference_para = para_elem
+        reference_para = self._pick_reference_para(
+            real_runs,
+            para_elem,
+            end_host_para=end_host_para,
+            start_host_para=start_host_para
+        )
 
         if start_use_host and end_use_host and start_host_para is not None and reference_para is not None:
             self._init_para_order()
@@ -468,17 +663,13 @@ class CommentWorkflowMixin:
             'success': Comment added successfully
             'fallback': Should fallback to error comment
         """
-        # Use original text position directly
         match_start = orig_match_start
         match_end = match_start + len(violation_text)
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
-
         if not affected:
             return 'fallback'
 
-        # Filter out all synthetic boundary markers (JSON and paragraph boundaries)
         real_runs = self._filter_real_runs(affected, include_equations=True)
-
         if not real_runs:
             return 'fallback'
 
@@ -487,82 +678,44 @@ class CommentWorkflowMixin:
 
         first_run_info = real_runs[0]
         last_run_info = real_runs[-1]
-
-        def _doc_key_for_run(run_info: Dict) -> Optional[Tuple[int, int]]:
-            """Compute document-order key using host para if available, else para_elem."""
-            host_para = run_info.get('host_para_elem')
-            para = run_info.get('para_elem', para_elem)
-            key = None
-            if host_para is not None:
-                key = self._get_run_doc_key(run_info.get('elem'), host_para)
-            if key is None and para is not None and para is not host_para:
-                key = self._get_run_doc_key(run_info.get('elem'), para)
-            return key
-
-        start_key = _doc_key_for_run(first_run_info)
-        end_key = _doc_key_for_run(last_run_info)
+        start_key = self._comment_doc_key_for_run(first_run_info, para_elem)
+        end_key = self._comment_doc_key_for_run(last_run_info, para_elem)
 
         if start_key is not None and end_key is None:
-            # No valid end run to anchor range - fallback to reference-only comment
-            fallback_para = first_run_info.get('host_para_elem')
-            if fallback_para is None:
-                fallback_para = first_run_info.get('para_elem')
-            if fallback_para is None:
-                fallback_para = para_elem
-            if fallback_para is None:
-                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+            fallback_para = (
+                first_run_info.get('host_para_elem')
+                or first_run_info.get('para_elem')
+                or para_elem
+            )
+            if not self._append_manual_reference_only_comment(
+                fallback_para, comment_id, violation_reason, revised_text, author
+            ):
                 return 'fallback'
-            ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                <w:commentReference w:id="{comment_id}"/>
-            </w:r>'''
-            fallback_para.append(etree.fromstring(ref_xml))
-            comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
-            if revised_text:
-                comment_text += f"\nSuggestion: {revised_text}"
-            self.comments.append({
-                'id': comment_id,
-                'text': comment_text,
-                'author': author
-            })
             return 'success'
 
         if start_key is not None and end_key is not None and end_key < start_key:
             candidate = None
             for run_info in reversed(real_runs):
-                cand_key = _doc_key_for_run(run_info)
+                cand_key = self._comment_doc_key_for_run(run_info, para_elem)
                 if cand_key is not None and cand_key >= start_key:
                     candidate = run_info
                     break
             if candidate is None:
-                fallback_para = first_run_info.get('host_para_elem')
-                if fallback_para is None:
-                    fallback_para = first_run_info.get('para_elem')
-                if fallback_para is None:
-                    fallback_para = para_elem
-                if fallback_para is None:
-                    print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                fallback_para = (
+                    first_run_info.get('host_para_elem')
+                    or first_run_info.get('para_elem')
+                    or para_elem
+                )
+                if not self._append_manual_reference_only_comment(
+                    fallback_para, comment_id, violation_reason, revised_text, author
+                ):
                     return 'fallback'
-                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                    <w:commentReference w:id="{comment_id}"/>
-                </w:r>'''
-                fallback_para.append(etree.fromstring(ref_xml))
-                comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
-                if revised_text:
-                    comment_text += f"\nSuggestion: {revised_text}"
-                self.comments.append({
-                    'id': comment_id,
-                    'text': comment_text,
-                    'author': author
-                })
                 if self.verbose:
                     print("  [Debug] ParaId order inverted; fallback to reference-only comment")
                 return 'success'
             if self.verbose:
                 print("  [Debug] ParaId order inverted; adjusted end run")
             last_run_info = candidate
-            # Clamp match_end to avoid splitting beyond the adjusted end run
             match_end = min(match_end, last_run_info.get('end', match_end))
 
         first_run = first_run_info.get('elem')
@@ -571,15 +724,20 @@ class CommentWorkflowMixin:
         no_split_start = first_run_info.get('is_equation', False)
         no_split_end = last_run_info.get('is_equation', False)
 
-        # Host paragraph anchors (for vMerge continue cases where runs are reused)
         start_host_para = first_run_info.get('host_para_elem')
         end_host_para = last_run_info.get('host_para_elem')
-        start_use_host = start_host_para is not None and start_host_para is not first_run_info.get('para_elem')
-        end_use_host = end_host_para is not None and end_host_para is not last_run_info.get('para_elem')
+        start_use_host = (
+            start_host_para is not None
+            and start_host_para is not first_run_info.get('para_elem')
+        )
+        end_use_host = (
+            end_host_para is not None
+            and end_host_para is not last_run_info.get('para_elem')
+        )
 
-        # If any run is a host mismatch (vMerge continue reuse), prefer host-para anchors
         has_host_mismatch = any(
-            r.get('host_para_elem') is not None and r.get('host_para_elem') is not r.get('para_elem')
+            r.get('host_para_elem') is not None
+            and r.get('host_para_elem') is not r.get('para_elem')
             for r in real_runs
         )
         if has_host_mismatch:
@@ -598,54 +756,30 @@ class CommentWorkflowMixin:
         if end_use_host and end_host_para is None:
             end_host_para = last_run_info.get('para_elem', para_elem)
 
-        # Choose a reference paragraph that actually has visible content.
-        reference_para = None
-        for run_info in reversed(real_runs):
-            para_candidate = run_info.get('host_para_elem')
-            if para_candidate is None:
-                para_candidate = run_info.get('para_elem')
-            if para_candidate is None:
-                continue
-            try:
-                _, para_text = self._collect_runs_info_original(para_candidate)
-                if para_text.strip():
-                    reference_para = para_candidate
-                    break
-            except Exception:
-                continue
-        if reference_para is None:
-            reference_para = end_host_para if end_host_para is not None else start_host_para
-            if reference_para is None:
-                reference_para = para_elem
+        reference_para = self._pick_reference_para(
+            real_runs,
+            para_elem,
+            end_host_para=end_host_para,
+            start_host_para=start_host_para
+        )
 
-        # If host anchors are inverted, fallback to reference-only comment
-        if start_use_host and end_use_host and start_host_para is not None and reference_para is not None:
+        if (
+            start_use_host and end_use_host and start_host_para is not None
+            and reference_para is not None
+        ):
             self._init_para_order()
             start_idx = self._para_order.get(id(start_host_para))
             end_idx = self._para_order.get(id(reference_para))
             if start_idx is not None and end_idx is not None and end_idx < start_idx:
                 fallback_para = start_host_para if start_host_para is not None else para_elem
-                if fallback_para is None:
-                    print("  [Warning] Reference-only fallback failed: no anchor paragraph")
+                if not self._append_manual_reference_only_comment(
+                    fallback_para, comment_id, violation_reason, revised_text, author
+                ):
                     return 'fallback'
-                ref_xml = f'''<w:r xmlns:w="{NS['w']}">
-                    <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
-                    <w:commentReference w:id="{comment_id}"/>
-                </w:r>'''
-                fallback_para.append(etree.fromstring(ref_xml))
-                comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
-                if revised_text:
-                    comment_text += f"\nSuggestion: {revised_text}"
-                self.comments.append({
-                    'id': comment_id,
-                    'text': comment_text,
-                    'author': author
-                })
                 if self.verbose:
                     print("  [Debug] ParaId order inverted; fallback to reference-only comment")
                 return 'success'
 
-        # Get parent paragraphs (may be different in cross-paragraph mode)
         if is_cross_paragraph:
             first_para = first_run_info.get('para_elem', para_elem)
             last_para = last_run_info.get('para_elem', para_elem)
@@ -653,23 +787,20 @@ class CommentWorkflowMixin:
             first_para = para_elem
             last_para = para_elem
 
-        # Check if start/end runs are inside revision markup
         start_revision = self._find_revision_ancestor(first_run, first_para)
         end_revision = self._find_revision_ancestor(last_run, last_para)
 
-        # Calculate text split points using real runs
-        # Use original text for mutations (not JSON-escaped text)
         first_orig_text = self._get_run_original_text(first_run_info)
         last_orig_text = self._get_run_original_text(last_run_info)
-
-        # Translate offsets from escaped space to original space
-        before_offset = self._translate_escaped_offset(first_run_info, max(0, match_start - first_run_info['start']))
-        after_offset = self._translate_escaped_offset(last_run_info, max(0, match_end - last_run_info['start']))
-
+        before_offset = self._translate_escaped_offset(
+            first_run_info, max(0, match_start - first_run_info['start'])
+        )
+        after_offset = self._translate_escaped_offset(
+            last_run_info, max(0, match_end - last_run_info['start'])
+        )
         before_text = first_orig_text[:before_offset]
         after_text = last_orig_text[after_offset:]
-        
-        # Create comment markers
+
         range_start = etree.fromstring(
             f'<w:commentRangeStart xmlns:w="{NS["w"]}" w:id="{comment_id}"/>'
         )
@@ -680,150 +811,42 @@ class CommentWorkflowMixin:
             <w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>
             <w:commentReference w:id="{comment_id}"/>
         </w:r>''')
-        
-        # === Handle START position ===
-        if start_use_host:
-            # Insert commentRangeStart at start of host paragraph (no run split)
-            target_para = start_host_para
-            if target_para is None:
-                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
-                return 'fallback'
-            insert_idx = 0
-            for i, child in enumerate(list(target_para)):
-                if child.tag == f'{{{NS["w"]}}}pPr':
-                    continue
-                insert_idx = i
-                break
-            target_para.insert(insert_idx, range_start)
-        elif start_revision is not None:
-            # Start is inside revision: insert commentRangeStart before revision container
-            parent = start_revision.getparent()
-            if parent is not None:
-                idx = list(parent).index(start_revision)
-                parent.insert(idx, range_start)
-        elif no_split_start:
-            # Start is in a non-text run (equation): insert range start before the run
-            parent = first_run.getparent() if first_run is not None else None
-            if parent is None:
-                return 'fallback'
-            try:
-                idx = list(parent).index(first_run)
-            except ValueError:
-                return 'fallback'
-            parent.insert(idx, range_start)
-        else:
-            # Start is in normal run: may need to split
-            parent = first_run.getparent()
-            if parent is None:
-                return 'fallback'
-            
-            try:
-                idx = list(parent).index(first_run)
-            except ValueError:
-                return 'fallback'
-            
-            if before_text:
-                # Need to split: create run for before_text, insert before first_run
-                run_or_container = self._create_run(before_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    # Unwrap container: insert each child run
-                    for child_run in run_or_container:
-                        parent.insert(idx, child_run)
-                        idx += 1
-                else:
-                    parent.insert(idx, run_or_container)
-                    idx += 1
-                
-                # Update first_run's text content (remove before_text portion)
-                t_elem = first_run.find('w:t', NS)
-                if t_elem is not None and t_elem.text:
-                    t_elem.text = t_elem.text[len(before_text):]
-            
-            # Insert commentRangeStart before the (possibly modified) first_run
-            parent.insert(idx, range_start)
-        
-        # === Handle END position ===
-        if end_use_host:
-            # Insert commentRangeEnd and reference at end of host paragraph (no run split)
-            target_para = reference_para if reference_para is not None else end_host_para
-            if target_para is None:
-                print("  [Warning] Reference-only fallback failed: no anchor paragraph")
-                return 'fallback'
-            if self.verbose and reference_para is not None and end_host_para is not None and reference_para is not end_host_para:
-                print("  [Debug] End anchor moved to previous non-empty paragraph")
-            target_para.append(range_end)
-            target_para.append(comment_ref)
-        elif end_revision is not None:
-            # End is inside revision: insert commentRangeEnd after revision container
-            parent = end_revision.getparent()
-            if parent is not None:
-                idx = list(parent).index(end_revision)
-                parent.insert(idx + 1, range_end)
-                parent.insert(idx + 2, comment_ref)
-        elif no_split_end:
-            # End is in a non-text run (equation): insert range end after the run
-            parent = last_run.getparent() if last_run is not None else None
-            if parent is None:
-                return 'fallback'
-            try:
-                idx = list(parent).index(last_run)
-            except ValueError:
-                return 'fallback'
-            parent.insert(idx + 1, range_end)
-            parent.insert(idx + 2, comment_ref)
-        else:
-            # End is in normal run: may need to split
-            parent = last_run.getparent()
-            if parent is None:
-                return 'fallback'
-            
-            try:
-                idx = list(parent).index(last_run)
-            except ValueError:
-                return 'fallback'
-            
-            if after_text:
-                # Need to split: update last_run to remove after_text, create new run for after_text
-                t_elem = last_run.find('w:t', NS)
-                if t_elem is not None and t_elem.text:
-                    original_text = t_elem.text
-                    # Keep only the portion up to match_end
-                    keep_len = len(original_text) - len(after_text)
-                    t_elem.text = original_text[:keep_len]
-                
-                # Insert commentRangeEnd after last_run
-                parent.insert(idx + 1, range_end)
-                # Insert commentReference after range_end
-                parent.insert(idx + 2, comment_ref)
-                # Create after_run and insert after comment_ref
-                run_or_container = self._create_run(after_text, rPr_xml)
-                if run_or_container.tag == 'container':
-                    # Unwrap container: insert each child run
-                    insert_pos = idx + 3
-                    for child_run in run_or_container:
-                        parent.insert(insert_pos, child_run)
-                        insert_pos += 1
-                else:
-                    parent.insert(idx + 3, run_or_container)
-            else:
-                # No split needed: insert commentRangeEnd and reference after last_run
-                parent.insert(idx + 1, range_end)
-                parent.insert(idx + 2, comment_ref)
 
-        # Record comment content
-        if fallback_reason:
-            comment_text = f"[FALLBACK]{fallback_reason} {violation_reason}"
-        else:
-            comment_text = violation_reason
-        if revised_text:
-            comment_text += f"\nSuggestion: {revised_text}"
-        
+        if not self._insert_manual_start_marker(
+            range_start,
+            start_use_host=start_use_host,
+            start_host_para=start_host_para,
+            start_revision=start_revision,
+            first_run=first_run,
+            no_split_start=no_split_start,
+            before_text=before_text,
+            rPr_xml=rPr_xml
+        ):
+            return 'fallback'
+
+        if not self._insert_manual_end_marker(
+            range_end,
+            comment_ref,
+            end_use_host=end_use_host,
+            reference_para=reference_para,
+            end_host_para=end_host_para,
+            end_revision=end_revision,
+            last_run=last_run,
+            after_text=after_text,
+            rPr_xml=rPr_xml,
+            no_split_end=no_split_end
+        ):
+            return 'fallback'
+
         self.comments.append({
             'id': comment_id,
-            'text': comment_text,
+            'text': self._build_manual_comment_text(
+                violation_reason,
+                revised_text,
+                fallback_reason=fallback_reason
+            ),
             'author': author
         })
-        
         return 'success'
 
     def _save_comments(self):
@@ -934,599 +957,23 @@ class CommentWorkflowMixin:
             
             item_author = self._author_for_item(item)
 
-            # Handle mixed body/table content (violation_text contains <table> tags)
-            has_table_tag = '<table>' in violation_text or '</table>' in violation_text
-            if has_table_tag:
-                if item.fix_action in ('delete', 'replace'):
-                    reason = "Mixed body/table content is invalid"
-                    self._apply_fallback_comment(anchor_para, item, reason)
-                    if self.verbose:
-                        print(f"  [Mixed content] {reason}")
-                    return EditResult(success=True, item=item, error_message=reason, warning=True)
-                else:  # manual
-                    longest = extract_longest_segment(violation_text)
-                    if longest:
-                        if self.verbose:
-                            print(f"  [Mixed content] Extracted longest segment for comment: '{format_text_preview(longest)}'")
-                        violation_text = longest
+            search_context = self._locate_item_match(
+                item=item,
+                anchor_para=anchor_para,
+                violation_text=violation_text,
+                revised_text=revised_text,
+            )
+            early_result = search_context['early_result']
+            if early_result is not None:
+                return early_result
 
-            # 2. Search for text from anchor paragraph using ORIGINAL text (before revisions)
-            # Store match results to pass to apply methods (avoid double matching)
-            # IMPORTANT: Search is restricted to uuid -> uuid_end range to prevent
-            # accidental modifications to content in other text blocks
-            target_para = None
-            matched_runs_info = None
-            matched_start = -1
-            numbering_stripped = False
-            
-            # Strategy: Try single-paragraph search first, then cross-paragraph if needed
-            is_cross_paragraph = False
-            numbering_variants = build_numbering_variants(violation_text)
-            
-            # Try original text first (using revision-free view) - single paragraph
-            for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                runs_info_orig, _ = self._collect_runs_info_original(para)
-
-                pos, matched_override = self._find_in_runs_with_normalization(
-                    runs_info_orig, violation_text
-                )
-                if pos != -1:
-                    target_para = para
-                    matched_runs_info = runs_info_orig
-                    matched_start = pos
-                    if matched_override is not None:
-                        violation_text = matched_override
-                    break
-            
-            # Fallback 1: Try stripping auto-numbering if original match failed
-            if target_para is None:
-                for stripped_violation, strip_mode in numbering_variants:
-                    for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                        runs_info_orig, _ = self._collect_runs_info_original(para)
-
-                        pos, matched_override = self._find_in_runs_with_normalization(
-                            runs_info_orig, stripped_violation
-                        )
-                        if pos != -1:
-                            target_para = para
-                            matched_runs_info = runs_info_orig
-                            matched_start = pos
-                            numbering_stripped = True
-                            violation_text = matched_override or stripped_violation
-
-                            # Handle revised_text for replace operation
-                            if item.fix_action == 'replace':
-                                stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
-                                if revised_has_numbering:
-                                    # Both have numbering: strip both
-                                    revised_text = stripped_revised
-                                # else: Only violation_text had numbering, keep revised_text as-is
-
-                            break
-                    if target_para is not None:
-                        break
-            
-            # Fallback 2: Try cross-paragraph search (within uuid → uuid_end range)
-            # This also handles table content with JSON format matching
-            boundary_error = None
-            if target_para is None:
-                # Collect runs across all paragraphs in range
-                cross_runs, cross_text, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
-                    anchor_para, item.uuid_end
-                )
-
-                if boundary_error:
-                    # Boundary error detected - will handle below
-                    if self.verbose:
-                        print(f"  [Boundary] {boundary_error}")
-                elif is_multi_para:
-                    # Only use cross-paragraph mode if there are actually multiple paragraphs
-                    # Build search attempts: original, numbering-stripped variants, and newline-unescaped
-                    search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
-                    for stripped_violation, strip_mode in numbering_variants:
-                        search_attempts.append((stripped_violation, strip_mode))
-                    if '\\n' in violation_text:
-                        search_attempts.append((violation_text.replace('\\n', '\n'), None))
-                    if self._is_table_mode(cross_runs) and violation_text.startswith('["'):
-                        stripped_row_only, was_row_stripped = strip_table_row_number_only(violation_text)
-                        if was_row_stripped:
-                            search_attempts.append((stripped_row_only, "table_row_number"))
-                        stripped_table_text, was_table_stripped = strip_table_row_numbering(violation_text)
-                        if was_table_stripped and stripped_table_text != stripped_row_only:
-                            search_attempts.append((stripped_table_text, "table_row"))
-
-                    for search_text, strip_mode in search_attempts:
-                        if self._is_table_mode(cross_runs):
-                            pos = cross_text.find(search_text)
-                            matched_override = None
-                            if pos == -1 and search_text:
-                                normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(cross_runs)
-                                pos_norm = normalized_table_text.find(search_text)
-                                if pos_norm != -1:
-                                    norm_end = pos_norm + len(search_text) - 1
-                                    if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
-                                        orig_start = norm_to_orig[pos_norm]
-                                        orig_end = norm_to_orig[norm_end] + 1
-                                        pos = orig_start
-                                        matched_override = cross_text[orig_start:orig_end]
-                        else:
-                            pos, matched_override = self._find_in_runs_with_normalization(
-                                cross_runs, search_text
-                            )
-
-                        if pos != -1:
-                            # Found match across paragraphs
-                            target_para = anchor_para  # Use anchor as reference
-                            matched_runs_info = cross_runs
-                            matched_start = pos
-                            is_cross_paragraph = True
-                            if matched_override is not None:
-                                violation_text = matched_override
-                            else:
-                                violation_text = search_text
-
-                            if strip_mode:
-                                numbering_stripped = True
-                                if item.fix_action == 'replace':
-                                    if strip_mode == "table_row_number":
-                                        stripped_revised, revised_has_numbering = strip_table_row_number_only(revised_text)
-                                    elif strip_mode == "table_row":
-                                        stripped_revised, revised_has_numbering = strip_table_row_numbering(revised_text)
-                                    else:
-                                        stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
-                                    if revised_has_numbering:
-                                        revised_text = stripped_revised
-
-                            if self.verbose:
-                                print(f"  [Success] Found in cross-paragraph mode")
-                            break
-            
-            # Fallback 3: Try table search if violation_text looks like JSON array
-            if target_para is None and (violation_text.startswith('["') or violation_text.startswith('[["')):
-                # Normalize to remove duplicate brackets at boundaries (LLM artifacts)
-                violation_text = normalize_table_json(violation_text)
-                if item.fix_action == 'replace':
-                    revised_text = normalize_table_json(revised_text)
-                
-                # Find all tables in range
-                tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
-                
-                # Try with original violation_text first, then with row numbering stripped
-                search_attempts = [
-                    (violation_text, None),  # Original text, not stripped
-                ]
-
-                stripped_row_only, was_row_stripped = strip_table_row_number_only(violation_text)
-                if was_row_stripped:
-                    search_attempts.append((stripped_row_only, "table_row_number"))
-
-                stripped_table_text, was_table_stripped = strip_table_row_numbering(violation_text)
-                if was_table_stripped and stripped_table_text != stripped_row_only:
-                    search_attempts.append((stripped_table_text, "table_row"))
-                
-                for search_text, strip_mode in search_attempts:
-                    for table_idx, table_elem in enumerate(tables_in_range):
-                        # Get the first and last paragraph in this table
-                        table_paras = list(table_elem.iter(f'{{{NS["w"]}}}p'))
-                        if not table_paras:
-                            continue
-                        
-                        first_table_para = table_paras[0]
-                        last_table_para = table_paras[-1]
-                        
-                        # Get their paraIds
-                        first_para_id = first_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                        last_para_id = last_table_para.get('{http://schemas.microsoft.com/office/word/2010/wordml}paraId')
-                        
-                        if not first_para_id or not last_para_id:
-                            continue
-                        
-                        # Collect table content in JSON format
-                        try:
-                            table_runs, table_text, _, _ = self._collect_runs_info_in_table(
-                                first_table_para, last_para_id, table_elem
-                            )
-                            
-                            # Search for search_text in table content
-                            pos = table_text.find(search_text)
-                            matched_text_override = None
-                            if pos == -1 and search_text:
-                                # Fallback: normalize table text by stripping per-paragraph whitespace
-                                # to match parse_document.py behavior, and map back to original indices.
-                                normalized_table_text, norm_to_orig = self._normalize_table_text_for_search(table_runs)
-                                pos_norm = normalized_table_text.find(search_text)
-                                if pos_norm != -1:
-                                    norm_end = pos_norm + len(search_text) - 1
-                                    if 0 <= pos_norm < len(norm_to_orig) and 0 <= norm_end < len(norm_to_orig):
-                                        orig_start = norm_to_orig[pos_norm]
-                                        orig_end = norm_to_orig[norm_end] + 1
-                                        pos = orig_start
-                                        matched_text_override = table_text[orig_start:orig_end]
-                            
-                            # Debug logging for specific content
-                            if pos == -1 and DEBUG_MARKER and (DEBUG_MARKER in table_text or DEBUG_MARKER in search_text):
-                                print(f"\n  [DEBUG] Table matching failed for row containing '{DEBUG_MARKER}':")
-                                
-                                table_row = extract_matching_table_row(table_text, DEBUG_MARKER)
-                                search_row = extract_matching_table_row(search_text, DEBUG_MARKER)
-                                
-                                if table_row:
-                                    print(f"  [DEBUG] Table row content:")
-                                    print(f"    {table_row}")
-                                else:
-                                    print(f"  [DEBUG] Table content (marker '{DEBUG_MARKER}' not found in individual row):")
-                                    print(f"    {table_text[:300]}...")
-                                
-                                if search_row:
-                                    print(f"  [DEBUG] Searching for:")
-                                    print(f"    {search_row}")
-                                else:
-                                    print(f"  [DEBUG] Search content (marker '{DEBUG_MARKER}' not found in individual row):")
-                                    print(f"    {search_text[:300]}...")
-                                
-                                # Show character-level diff if both rows found
-                                if table_row and search_row:
-                                    min_len = min(len(table_row), len(search_row))
-                                    for i in range(min_len):
-                                        if table_row[i] != search_row[i]:
-                                            print(f"  [DEBUG] First difference at position {i}:")
-                                            print(f"    Table: ...{repr(table_row[max(0,i-10):i+30])}...")
-                                            print(f"    Search: ...{repr(search_row[max(0,i-10):i+30])}...")
-                                            break
-                                    else:
-                                        # No difference found in common length, check length difference
-                                        if len(table_row) != len(search_row):
-                                            print(f"  [DEBUG] Length mismatch: table={len(table_row)}, search={len(search_row)}")
-                            
-                            if pos != -1:
-                                # Found match in this table!
-                                target_para = first_table_para  # Use first para as anchor
-                                matched_runs_info = table_runs
-                                matched_start = pos
-                                is_cross_paragraph = True  # Table mode is always cross-paragraph
-                                
-                                # Update violation_text to the matched version(stripped or not)
-                                violation_text = matched_text_override or search_text
-                                
-                                # For replace operations, also strip row numbering from revised_text
-                                if strip_mode and item.fix_action == 'replace':
-                                    if strip_mode == "table_row_number":
-                                        stripped_revised, revised_was_stripped = strip_table_row_number_only(revised_text)
-                                    else:
-                                        stripped_revised, revised_was_stripped = strip_table_row_numbering(revised_text)
-                                    if revised_was_stripped:
-                                        revised_text = stripped_revised
-                                
-                                if self.verbose:
-                                    if strip_mode:
-                                        print(f"  [Success] Found in table after stripping row numbering")
-                                    else:
-                                        print(f"  [Success] Found in table (JSON format)")
-                                break
-
-                        except (ValueError, KeyError, IndexError, AttributeError) as e:
-                            # If table processing fails, continue to next table
-                            if self.verbose:
-                                print(f"  [Warning] Skipping table: {e}")
-                            continue
-                    
-                    # If found, break outer loop
-                    if target_para is not None:
-                        break
-            
-            # Fallback 2.5: Try non-JSON table search (raw text mode)
-            # For plain text violation_text that may be in table cells with multiple paragraphs
-            if target_para is None and not violation_text.startswith('["') and not violation_text.startswith('[["'):
-                # Find all tables in range
-                tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
-                
-                for table_elem in tables_in_range:
-                    # Search for raw text in each cell independently
-                    result = self._search_in_table_cell_raw(
-                        table_elem, violation_text, anchor_para, item.uuid_end
-                    )
-                    
-                    if result:
-                        target_para, matched_runs_info, matched_start, matched_text, strip_mode = result
-                        # Update violation_text with the actual matched text (handles fallback normalization)
-                        violation_text = matched_text
-                        # Cell content is always treated as single-paragraph for now
-                        is_cross_paragraph = False
-                        if strip_mode:
-                            numbering_stripped = True
-                            if item.fix_action == 'replace':
-                                stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, strip_mode)
-                                if revised_has_numbering:
-                                    revised_text = stripped_revised
-                        
-                        if self.verbose:
-                            print(f"  [Success] Found in table cell (plain text mode)")
-                        break
-            
-            if target_para is None:
-                # Check if we have a boundary error from table/row crossing
-                if boundary_error:
-                    # Special handling for boundary_crossed: try searching in tables first
-                    if boundary_error == 'boundary_crossed':
-                        # Find all tables in range
-                        tables_in_range = self._find_tables_in_range(anchor_para, item.uuid_end)
-                        
-                        # Try searching raw text in each table cell
-                        for table_elem in tables_in_range:
-                            # Iterate all cells in this table
-                            for tc in table_elem.iter(f'{{{NS["w"]}}}tc'):
-                                # Collect all paragraphs in this cell
-                                cell_paras = tc.findall(f'{{{NS["w"]}}}p')
-                                if not cell_paras:
-                                    continue
-                                
-                                # Build cell's raw text content (with \n between paragraphs)
-                                cell_text_parts = []
-                                cell_para_runs_map = {}  # Map from para to runs_info
-                                
-                                for cell_para in cell_paras:
-                                    para_runs, para_text = self._collect_runs_info_original(cell_para)
-                                    cell_text_parts.append(para_text)
-                                    cell_para_runs_map[id(cell_para)] = (para_runs, para_text)
-                                
-                                # Join with \n (actual newline, not JSON-escaped)
-                                cell_combined_text = '\n'.join(cell_text_parts)
-                                
-                                # Normalize to match parse_document.py behavior (removes trailing whitespace)
-                                cell_normalized = self._normalize_text_for_search(cell_combined_text)
-                                
-                                # Build search attempts for raw text in cell
-                                search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
-                                search_attempts.extend(build_numbering_variants(violation_text))
-                                if '\\n' in violation_text:
-                                    newline_text = violation_text.replace('\\n', '\n')
-                                    search_attempts.append((newline_text, None))
-                                    search_attempts.extend(build_numbering_variants(newline_text))
-
-                                deduped_attempts = dedupe_search_attempts(search_attempts)
-
-                                match_pos = -1
-                                matched_search_text = violation_text
-                                matched_strip_mode: Optional[str] = None
-                                for search_text, strip_mode in deduped_attempts:
-                                    match_pos = cell_normalized.find(search_text)
-                                    if match_pos != -1:
-                                        matched_search_text = search_text
-                                        matched_strip_mode = strip_mode
-                                        break
-
-                                if match_pos != -1:
-                                    # Found match in this cell!
-                                    if self.verbose:
-                                        print(f"  [Success] Found in table cell (raw text match)")
-                                    if matched_strip_mode:
-                                        numbering_stripped = True
-                                        violation_text = matched_search_text
-                                        if item.fix_action == 'replace':
-                                            stripped_revised, revised_has_numbering = strip_numbering_by_mode(revised_text, matched_strip_mode)
-                                            if revised_has_numbering:
-                                                revised_text = stripped_revised
-                                    else:
-                                        violation_text = matched_search_text
-                                    
-                                    # Determine which paragraph(s) contain the match
-                                    # For simplicity, if match is within first paragraph, use it
-                                    # Otherwise, this is a cross-paragraph match within the cell
-                                    current_offset = 0
-                                    matched_para = None
-                                    matched_para_runs = None
-                                    matched_para_start = -1
-                                    
-                                    for cell_para in cell_paras:
-                                        para_id_obj = id(cell_para)
-                                        if para_id_obj not in cell_para_runs_map:
-                                            continue
-                                        
-                                        para_runs, para_text = cell_para_runs_map[para_id_obj]
-                                        para_len = len(para_text)
-                                        
-                                        # Check if match starts in this paragraph
-                                        if current_offset <= match_pos < current_offset + para_len:
-                                            matched_para = cell_para
-                                            matched_para_runs = para_runs
-                                            matched_para_start = match_pos - current_offset
-                                            break
-                                        
-                                        current_offset += para_len + 1  # +1 for \n separator
-                                    
-                                    if matched_para is not None:
-                                        # Use the matched paragraph
-                                        target_para = matched_para
-                                        matched_runs_info = matched_para_runs
-                                        matched_start = matched_para_start
-                                        is_cross_paragraph = False  # Single para in cell
-                                        break
-                                else:
-                                    # Debug: log snippet from marker on non-JSON match failure
-                                    marker_idx = cell_combined_text.find(DEBUG_MARKER)
-                                    if DEBUG_MARKER and marker_idx != -1:
-                                        snippet_len = len(DEBUG_MARKER) + 60
-                                        snippet = cell_combined_text[marker_idx:marker_idx + snippet_len]
-                                        print(f"  [DEBUG] Non-JSON cell content from marker: {repr(snippet)}")
-
-                            # If found, break table loop
-                            if target_para is not None:
-                                break
-                    
-                    # If still not found after table search, try body text search
-                    if target_para is None:
-                        if self.verbose:
-                            print(f"  [Boundary] Table search failed, trying body text...")
-                        
-                        # Collect ALL body paragraphs in range, grouped by continuity
-                        # This handles: table→body, body→table, and interleaved scenarios
-                        body_segments = []  # List of segments, each segment = [(para, runs, text), ...]
-                        current_segment = []
-                        
-                        for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                            if self._is_paragraph_in_table(para):
-                                # Encountered table paragraph - end current body segment
-                                if current_segment:
-                                    body_segments.append(current_segment)
-                                    current_segment = []
-                                continue
-                            
-                            # Body paragraph
-                            para_runs, para_text = self._collect_runs_info_original(para)
-                            # Skip empty paragraphs to match parse_document.py behavior
-                            if not para_text.strip():
-                                continue
-                            
-                            current_segment.append((para, para_runs, para_text))
-                        
-                        # Don't forget the last segment
-                        if current_segment:
-                            body_segments.append(current_segment)
-                        
-                        # Search in each body segment (try both original and stripped numbering)
-                        for segment_idx, body_paras_data in enumerate(body_segments):
-                            # Build combined text with \n separator (like _collect_runs_info_in_body)
-                            all_runs = []
-                            pos = 0
-                            
-                            for i, (para, para_runs, para_text) in enumerate(body_paras_data):
-                                # Add paragraph runs with updated positions
-                                for run in para_runs:
-                                    run_copy = dict(run)
-                                    run_copy['para_elem'] = para
-                                    run_copy['start'] = run['start'] + pos
-                                    run_copy['end'] = run['end'] + pos
-                                    all_runs.append(run_copy)
-                                
-                                pos += len(para_text)
-                                
-                                # Add paragraph boundary (except after last)
-                                if i < len(body_paras_data) - 1:
-                                    all_runs.append({
-                                        'text': '\n',
-                                        'start': pos,
-                                        'end': pos + 1,
-                                        'para_elem': para,
-                                        'is_para_boundary': True
-                                    })
-                                    pos += 1
-                            
-                            # Try multiple search patterns (original and stripped numbering)
-                            # Use build_numbering_variants() to support multi-line numbering removal
-                            search_attempts: List[Tuple[str, Optional[str]]] = [(violation_text, None)]
-                            numbering_variants = build_numbering_variants(violation_text)
-                            search_attempts.extend(numbering_variants)
-                            
-                            match_pos = -1
-                            matched_text = violation_text
-                            matched_override = None
-                            matched_is_stripped = False
-                            
-                            for search_text, is_stripped in search_attempts:
-                                match_pos, matched_override = self._find_in_runs_with_normalization(
-                                    all_runs, search_text
-                                )
-                                if match_pos != -1:
-                                    matched_text = matched_override or search_text
-                                    matched_is_stripped = is_stripped
-                                    break
-                            
-                            if match_pos != -1:
-                                # Found match in this segment!
-                                target_para = body_paras_data[0][0]  # Use first para as anchor
-                                matched_runs_info = all_runs
-                                matched_start = match_pos
-                                is_cross_paragraph = len(body_paras_data) > 1
-                                violation_text = matched_text  # Update violation_text to matched version
-                                numbering_stripped = matched_is_stripped
-                                
-                                if self.verbose:
-                                    if is_cross_paragraph:
-                                        print(f"  [Success] Found in body segment {segment_idx + 1} (cross-paragraph)")
-                                    else:
-                                        print(f"  [Success] Found in body segment {segment_idx + 1}")
-                                break  # Stop searching other segments
-                    
-                    # If still not found after segmented body text search, apply fallback
-                    if target_para is None:
-                        reason = ""
-                        if boundary_error == 'boundary_crossed':
-                            reason = "Violation text not found(C)"  # Table/body boundary crossed
-                        else:
-                            reason = f"Boundary error: {boundary_error}"
-
-                        # Debug: log body paragraph content from marker on boundary failure
-                        if DEBUG_MARKER:
-                            try:
-                                for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                                    if self._is_paragraph_in_table(para):
-                                        continue
-                                    _, para_text = self._collect_runs_info_original(para)
-                                    marker_idx = para_text.find(DEBUG_MARKER)
-                                    if marker_idx != -1:
-                                        snippet_len = len(DEBUG_MARKER) + 60
-                                        snippet = para_text[marker_idx:marker_idx + snippet_len]
-                                        print(f"  [DEBUG] Body search target: {repr(violation_text)}")
-                                        break
-                            except Exception:
-                                # Debug logging should never break apply flow
-                                pass
-
-                        self._apply_fallback_comment(anchor_para, item, reason)
-                        if self.verbose:
-                            print(f"  [Boundary] {reason}")
-                        return EditResult(
-                            success=True,
-                            item=item,
-                            error_message=reason,
-                            warning=True
-                        )
-                
-                # Only proceed with fallback if target_para is still None
-                # (boundary_error handling may have found a match)
-                if target_para is None:
-                    # Debug: log body paragraph content from marker on overall match failure
-                    if DEBUG_MARKER:
-                        try:
-                            for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-                                if self._is_paragraph_in_table(para):
-                                    continue
-                                _, para_text = self._collect_runs_info_original(para)
-                                marker_idx = para_text.find(DEBUG_MARKER)
-                                if marker_idx != -1:
-                                    snippet_len = len(DEBUG_MARKER) + 60
-                                    snippet = para_text[marker_idx:marker_idx + snippet_len]
-                                    print(f"  [DEBUG] Body search target: {repr(violation_text)}")
-                                    break
-                        except Exception:
-                            # Debug logging should never break apply flow
-                            pass
-
-                    # Calculate total segments for error message
-                    # Variables are initialized in their respective code paths above
-                    # If not set, default to empty lists
-                    tables_count = len(tables_in_range) if 'tables_in_range' in dir() else 0
-                    body_count = len(body_segments) if 'body_segments' in dir() else 0
-                    total_segments = tables_count + body_count
-                    
-                    if total_segments == 1:
-                        reason = "Violation text not found(S)"  # Single segment
-                    else:
-                        reason = f"Violation text not found(M)"  # Multiple segments
-                    
-                    # For manual fix_action, text not found is expected (not an error)
-                    if item.fix_action == 'manual':
-                        self._apply_error_comment(anchor_para, item)
-                        return EditResult(
-                            success=True,
-                            item=item,
-                            error_message=reason,
-                            warning=True
-                        )
-                    else:
-                        # For delete/replace, text not found is an error
-                        self._apply_error_comment(anchor_para, item)
-                        return EditResult(False, item, reason)
+            target_para = search_context['target_para']
+            matched_runs_info = search_context['matched_runs_info']
+            matched_start = search_context['matched_start']
+            violation_text = search_context['violation_text']
+            revised_text = search_context['revised_text']
+            numbering_stripped = search_context['numbering_stripped']
+            is_cross_paragraph = search_context['is_cross_paragraph']
             
             # 3. Apply operation based on fix_action
             # Pass matched_runs_info and matched_start to avoid double matching.
@@ -1876,160 +1323,20 @@ class CommentWorkflowMixin:
                 self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, f"Unknown action type: {item.fix_action}")
             
-            # Handle results
-            if success_status == 'success':
-                if numbering_stripped and self.verbose:
-                    print(f"  [Success] Matched after stripping auto-numbering")
-                return EditResult(True, item)
-            elif success_status == 'conflict':
-                # Text overlaps with previous rule modification - mark as warning
-                reason = "Multiple changes overlap."
-                fallback_para = target_para if target_para is not None else anchor_para
-                conflict_item = item
-                if last_conflict_text and last_conflict_text != item.violation_text:
-                    conflict_item = EditItem(
-                        uuid=item.uuid,
-                        uuid_end=item.uuid_end,
-                        violation_text=last_conflict_text,
-                        violation_reason=item.violation_reason,
-                        fix_action=item.fix_action,
-                        revised_text=item.revised_text,
-                        category=item.category,
-                        rule_id=item.rule_id,
-                        heading=item.heading,
-                    )
-                self._apply_fallback_comment(fallback_para, conflict_item, reason)
-                if self.verbose:
-                    print(f"  [Conflict] {reason}")
-                return EditResult(
-                    success=True,
-                    item=item,
-                    error_message=reason,
-                    warning=True
-                )
-            elif success_status == 'cross_paragraph_fallback':
-                # Cross-paragraph delete/replace not supported - fallback to manual comment
-                reason = (
-                    "Cross-paragraph delete/replace not supported"
-                )
-                # Apply manual comment instead
-                manual_status = self._apply_manual(
-                    target_para, violation_text,
-                    item.violation_reason, revised_text,
-                    matched_runs_info, matched_start,
-                    item_author,
-                    is_cross_paragraph,
-                    fallback_reason=reason
-                )
-                if manual_status == 'success':
-                    if self.verbose:
-                        print(f"  [Cross-paragraph] Applied comment instead")
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=reason,
-                        warning=True
-                    )
-                else:
-                    # Manual comment also failed - use fallback comment
-                    self._apply_fallback_comment(target_para, item, reason)
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=f"{reason} (comment also failed)",
-                        warning=True
-                    )
-            elif success_status == 'cross_row_fallback':
-                # Cross-row delete/replace not supported - Word doesn't support cross-row comments
-                reason = "Cross-row edit not supported"
-                # Use fallback comment (non-selected) since cross-row comments are not supported
-                self._apply_fallback_comment(target_para, item, reason)
-                if self.verbose:
-                    print(f"  [Cross-row] Applied fallback comment")
-                return EditResult(
-                    success=True,
-                    item=item,
-                    error_message=reason,
-                    warning=True
-                )
-            elif success_status == 'cross_cell_fallback':
-                # Cross-cell delete/replace not supported - fallback to manual comment
-                reason = "Cross-cell edit not supported"
-                # Apply manual comment instead (same row comment is supported)
-                manual_status = self._apply_manual(
-                    target_para, violation_text,
-                    item.violation_reason, revised_text,
-                    matched_runs_info, matched_start,
-                    item_author,
-                    is_cross_paragraph,
-                    fallback_reason=reason
-                )
-                if manual_status == 'success':
-                    if self.verbose:
-                        print(f"  [Cross-cell] Applied comment instead")
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=reason,
-                        warning=True
-                    )
-                else:
-                    # Manual comment also failed - use fallback comment
-                    self._apply_fallback_comment(target_para, item, reason)
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=f"{reason} (comment also failed)",
-                        warning=True
-                    )
-            elif success_status == 'equation_fallback':
-                # Equation-only content cannot be edited - fallback to manual comment
-                reason = "Equation cannot be edited"
-                manual_status = self._apply_manual(
-                    target_para, violation_text,
-                    item.violation_reason, revised_text,
-                    matched_runs_info, matched_start,
-                    item_author,
-                    is_cross_paragraph,
-                    fallback_reason=reason
-                )
-                if manual_status == 'success':
-                    if self.verbose:
-                        print(f"  [Equation-only] Applied comment instead")
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=reason,
-                        warning=True
-                    )
-                else:
-                    # Manual comment also failed - use fallback comment
-                    self._apply_fallback_comment(target_para, item, reason)
-                    return EditResult(
-                        success=True,
-                        item=item,
-                        error_message=f"{reason} (comment also failed)",
-                        warning=True
-                    )
-            elif success_status == 'fallback':
-                # Fallback to comment annotation - mark as warning for all fix_actions
-                reason = "No editable runs found"
-                if item.fix_action == 'manual':
-                    self._apply_error_comment(target_para, item)
-                else:
-                    self._apply_fallback_comment(target_para, item, reason)
-                if self.verbose:
-                    print(f"  [Fallback] {reason}")
-                return EditResult(
-                    success=True,
-                    item=item,
-                    error_message=reason,
-                    warning=True
-                )
-            else:
-                # Unexpected return value or old boolean False
-                self._apply_error_comment(anchor_para, item)
-                return EditResult(False, item, "Operation failed")
+            return self._build_result_from_status(
+                item=item,
+                success_status=success_status,
+                target_para=target_para,
+                anchor_para=anchor_para,
+                violation_text=violation_text,
+                revised_text=revised_text,
+                matched_runs_info=matched_runs_info,
+                matched_start=matched_start,
+                item_author=item_author,
+                is_cross_paragraph=is_cross_paragraph,
+                numbering_stripped=numbering_stripped,
+                last_conflict_text=last_conflict_text,
+            )
                 
         except Exception as e:
             # Insert error comment on exception if anchor paragraph exists
