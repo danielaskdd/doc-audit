@@ -54,6 +54,9 @@ The resulting `_blocks.jsonl` is the foundational input for the auditing system.
 - **Images**: `<drawing id="..." name="..." path="..." format="..." />`
   - Embedded image (`r:embed`): exported to `<blocks_stem>.image/`, `path` stores relative file path
   - Linked image (`r:link`): not downloaded, `path` stores original external URL
+  - `format`: normalized image format derived from content-type/file extension, common values include
+    `png`, `jpeg`, `emf`, `wmf`, `gif`, `bmp`, `tiff`, `webp`, `svg`
+  - `format` is omitted when format cannot be determined or when drawing has no image blip (e.g., chart shape)
 - **Formulas**: OMML → LaTeX, wrapped in `<equation>...</equation>`
 - **Super/Subscripts**: `<sup>...</sup>` / `<sub>...</sub>`
 

@@ -54,6 +54,9 @@
 - **图片**：`<drawing id="..." name="..." path="..." format="..." />`
   - 内嵌图片（`r:embed`）：导出到 `<blocks_stem>.image/`，`path` 写相对路径
   - 外链图片（`r:link`）：不下载，`path` 写原始外链 URL
+  - `format`：由 content-type/文件扩展名归一化得到，常见取值包括
+    `png`、`jpeg`、`emf`、`wmf`、`gif`、`bmp`、`tiff`、`webp`、`svg`
+  - 若无法判定格式，或该 drawing 不包含图片 blip（如图表形状），则省略 `format` 属性
 - **公式**：OMML → LaTeX，包裹 `<equation>...</equation>`
 - **上下标**：`<sup>...</sup>` / `<sub>...</sub>`
 
