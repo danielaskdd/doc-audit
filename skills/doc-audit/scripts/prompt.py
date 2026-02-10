@@ -22,10 +22,9 @@ PROMPT_TEMPLATES = {
 
 Instructions:
 1. Check if the provided text block violates ANY of the rules above.
-2. Use the "Section hierarchy context" to understand where this block sits in the document structure. This context helps you:
-   - Understand the semantic scope of the content (e.g., a clause under "Penalty Terms" vs "Payment Terms")
-   - Apply rules appropriately based on document section type
-   - Identify context-dependent violations (e.g., vague terms acceptable in summaries but not in binding clauses)
+2. Understand text block content:
+   - Utilize the 'Section Hierarchy Context' to determine the block's precise location within the document structure (e.g., distinguishing a clause under 'Penalty Terms' from 'Payment Terms') and apply the corresponding logic based on the identified section type.
+   - Tables are provided as 2D JSON arrays within <table> tags; For multi-segment tables, use the `Table header context` to maintain column-to-field mapping.
 3. Report each violation as a separate item. Do not merge multiple instances of the same audit rule into one entry. If one violation satisfies multiple rules, report only the first rule ID that applies.
 4. CRITICAL: The rule_id MUST exactly match the ID of the specific rule violated. If content violates rule [R005], report "rule_id": "R005". Never default to R001 - always use the actual rule ID from the list above.
 5. For each violation found, provide:
@@ -120,14 +119,20 @@ Key Principles:
 4. If the same entity appears multiple times with different information, create separate entries
 
 Extraction Guidelines:
-1. Extract ONLY information explicitly stated in the text - never infer or assume.
-2. Each unique entity instance should be a separate extraction result.
-3. Fields must use the exact field names defined in the rule.
-4. If a field value cannot be found, use empty string for both value and evidence.
-5. Evidence must be a verbatim quote from origin content that directly supports the extracted value.
-6. For tabular data, extract one entity per row where applicable.
-7. If the same entity appears multiple times with different information, create separate entries.
-8. CRITICAL: The rule_id MUST exactly match the ID of the rule being extracted. If extracting for rule [G003], use "rule_id": "G003". Never default to G001.
+1. Extract enities from the provided text block according the rules above:
+   - Zero Inference: Extract ONLY information explicitly stated. Do NOT infer, assume, or hallucinate based on external knowledge.
+   - Granular Extraction: Each entity must be a standalone object with its own fields. If an entity type appears multiple times (e.g., three different "Penalties"), output three separate JSON objects.
+   - Deduplication vs. Separation: If the same entity appears with different attributes, create separate entries. If the information is identical and redundant, consolidate it.
+2. Field & Schema Constraints:
+   - Strict Naming: You must use the exact field names defined in the schema. Do not normalize or "fix" the casing of keys.
+   - Missing Data: If a field value is not found, return "" (empty string) for both value and evidence. Do not use "N/A" or "None".
+   - Rule ID Integrity (CRITICAL): The rule_id must match the source rule exactly (e.g., G003). Double-check that you are not defaulting to G001.
+3. Evidence & Validation
+   - Verbatim Quotes: The evidence field must contain an exact, word-for-word snippet from the source text. Do not summarize or paraphrase the evidence.
+   - Traceability: Ensure the evidence provided is the minimal sufficient string that supports the extraction.
+4. Understand text block content:
+   - Utilize the 'Section Hierarchy Context' to determine the block's precise location within the document structure (e.g., distinguishing a clause under 'Penalty Terms' from 'Payment Terms') and apply the corresponding logic based on the identified section type.
+   - Tables are provided as 2D JSON arrays within <table> tags; For multi-segment tables, use the `Table header context` to maintain column-to-field mapping.
 
 evidence field guidelines:
 1. The evidence field is utilized for locating the original text. It must be a direct verbatim quote from the content of text block. All punctuation, line breaks, and whitespace must be strictly preserved to ensure an exact match.
@@ -146,7 +151,7 @@ evidence field guidelines:
     - Ensure row-level JSON evidence is complete, starting from the first cell (beginning with the ‘[’ bracket).
     - If evidence spans multiple rows, include consecutive rows separated by comma for full context.
 
-Return JSON only with this structure:
+Return the results as a valid JSON array of objects with the following structure, ensuring all special characters within strings are properly escaped to maintain JSON integrity:
 {{
   "results": [
     {{
@@ -305,24 +310,35 @@ def format_block_for_prompt(block: dict) -> str:
     Returns:
         Formatted string
     """
-    heading = block.get('heading', 'Unknown').strip()
-    content = block.get('content', '').strip()
-    block_type = block.get('type', 'text')
-    parent_headings = block.get('parent_headings', [])
+    def _safe_text(value, default: str = "") -> str:
+        if value is None:
+            return default
+        text = value.strip() if isinstance(value, str) else str(value).strip()
+        return text if text else default
+
+    heading = _safe_text(block.get('heading'), "Unknown")
+    content = _safe_text(block.get('content'))
+
+    parent_headings_raw = block.get('parent_headings') or []
+    if not isinstance(parent_headings_raw, list):
+        parent_headings_raw = [parent_headings_raw]
+    parent_headings = []
+    for item in parent_headings_raw:
+        item_text = _safe_text(item)
+        if item_text:
+            parent_headings.append(item_text)
+
+    table_header = block.get('table_header') or []
+    if not isinstance(table_header, list):
+        table_header = [table_header]
 
     ### Context format
     # Context hierarchy: 1  header1 → 1.2  header2 → 1.2.2  header3
-    context = ""
+    context = f"Section hierarchy context: {heading}"
     if parent_headings:
-        context = f"Section hierarchy context: {' → '.join(h.strip() for h in parent_headings)}  → {heading}"
-
-    if block_type == 'table':
-        # Format table as readable text
-        if isinstance(content, list):
-            rows = []
-            for row in content:
-                rows.append(" | ".join(str(cell) for cell in row))
-            content = "\n".join(rows)
+        context = f"Section hierarchy context: {' → '.join(parent_headings)}  → {heading}"
+    if table_header:
+        context = context + "\n" + f"Table header context: {table_header}"
 
     return f"""{context}
 
