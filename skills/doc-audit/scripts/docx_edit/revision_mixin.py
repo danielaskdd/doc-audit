@@ -8,6 +8,8 @@ import difflib
 from typing import List, Dict, Tuple, Optional
 from lxml import etree
 
+from drawing_image_extractor import extract_drawing_placeholder_from_element
+
 from .common import (
     NS,
     DRAWING_PATTERN,
@@ -406,7 +408,6 @@ class RevisionMixin:
         runs_info = []
         pos = 0
         w_ns = NS['w']
-        wp_ns = NS['wp']
         m_ns = NS['m']
         w_ins_tag = f'{{{w_ns}}}ins'
         w_r_tag = f'{{{w_ns}}}r'
@@ -497,24 +498,22 @@ class RevisionMixin:
                     flush_text_buffer()
 
                     # Create separate entry for drawing
-                    inline = elem.find(f'{{{wp_ns}}}inline')
-                    if inline is not None:
-                        doc_pr = inline.find(f'{{{wp_ns}}}docPr')
-                        if doc_pr is not None:
-                            img_id = doc_pr.get('id', '')
-                            img_name = doc_pr.get('name', '')
-                            drawing_text = f'<drawing id="{img_id}" name="{img_name}" />'
+                    drawing_text = extract_drawing_placeholder_from_element(
+                        elem,
+                        context=None,
+                        include_extended_attrs=False,
+                    )
 
-                            runs_info.append({
-                                'text': drawing_text,
-                                'start': pos,
-                                'end': pos + len(drawing_text),
-                                'elem': run_elem,
-                                'rPr': rPr,
-                                'is_drawing': True,
-                                'drawing_elem': elem  # Store reference to drawing element
-                            })
-                            pos += len(drawing_text)
+                    runs_info.append({
+                        'text': drawing_text,
+                        'start': pos,
+                        'end': pos + len(drawing_text),
+                        'elem': run_elem,
+                        'rPr': rPr,
+                        'is_drawing': True,
+                        'drawing_elem': elem  # Store reference to drawing element
+                    })
+                    pos += len(drawing_text)
                 elif elem.tag == m_omath_tag:
                     # Flush any accumulated text before the equation
                     flush_text_buffer()

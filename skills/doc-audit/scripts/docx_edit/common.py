@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Iterable
 
+from drawing_image_extractor import DRAWING_PATTERN as DRAWING_PATTERN_SHARED
+
 
 # ============================================================
 # Constants
@@ -51,8 +53,10 @@ TABLE_ROW_NUMBERING_PATTERN = re.compile(
 TABLE_TAG_PATTERN = re.compile(r'</?table>')
 
 # Drawing pattern for detecting inline image placeholders
-# Matches: <drawing id="1" name="图片 1" />
-DRAWING_PATTERN = re.compile(r'<drawing\s+id="[^"]*"\s+name="[^"]*"\s*/>')
+# Matches:
+#   <drawing id="1" name="图片 1" />
+#   <drawing id="1" name="图片 1" path="x_blocks.image/image1.png" format="png" />
+DRAWING_PATTERN = DRAWING_PATTERN_SHARED
 
 # Equation pattern for detecting LaTeX equation placeholders
 # Matches: <equation>latex_content</equation>

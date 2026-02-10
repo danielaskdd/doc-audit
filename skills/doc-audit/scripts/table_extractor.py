@@ -10,8 +10,17 @@ from docx.table import Table
 from docx.oxml.ns import qn
 from typing import List
 
+from drawing_image_extractor import (
+    DrawingExtractionContext,
+    extract_drawing_placeholder_from_element,
+)
 
-def extract_text_from_run_table(run_elem, qn_func) -> str:
+
+def extract_text_from_run_table(
+    run_elem,
+    qn_func,
+    drawing_context: DrawingExtractionContext = None,
+) -> str:
     """
     Extract text from a run element in table cell, preserving superscript/subscript with markup.
     
@@ -51,15 +60,11 @@ def extract_text_from_run_table(run_elem, qn_func) -> str:
                 text += '\n'
             # Skip page and column breaks (layout elements)
         elif tag == 'drawing':
-            # Extract inline images (ignore floating images wp:anchor)
-            ns_wp = {'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'}
-            inline = child.find('wp:inline', ns_wp)
-            if inline is not None:
-                doc_pr = inline.find('wp:docPr', ns_wp)
-                if doc_pr is not None:
-                    img_id = doc_pr.get('id', '')
-                    img_name = doc_pr.get('name', '')
-                    text += f'<drawing id="{img_id}" name="{img_name}" />'
+            text += extract_drawing_placeholder_from_element(
+                child,
+                context=drawing_context,
+                include_extended_attrs=True,
+            )
     
     # Apply superscript/subscript markup if needed
     if text and vert_align == 'superscript':
@@ -70,7 +75,11 @@ def extract_text_from_run_table(run_elem, qn_func) -> str:
     return text
 
 
-def extract_paragraph_content_table(para_elem, qn_func) -> str:
+def extract_paragraph_content_table(
+    para_elem,
+    qn_func,
+    drawing_context: DrawingExtractionContext = None,
+) -> str:
     """
     Extract text and equations from a table cell paragraph in document order.
 
@@ -94,7 +103,13 @@ def extract_paragraph_content_table(para_elem, qn_func) -> str:
         if tag in ('del', 'moveFrom'):
             return
         if tag == 'r':
-            parts.append(extract_text_from_run_table(node, qn_func))
+            parts.append(
+                extract_text_from_run_table(
+                    node,
+                    qn_func,
+                    drawing_context=drawing_context,
+                )
+            )
             return
         if tag == 'oMath':
             from omml import convert_omml_to_latex
@@ -134,7 +149,7 @@ class TableExtractor:
     """
     
     @staticmethod
-    def extract(table: Table, numbering_resolver=None) -> List[List[str]]:
+    def extract(table: Table, numbering_resolver=None, drawing_context: DrawingExtractionContext = None) -> List[List[str]]:
         """
         Extract table to 2D string array.
         
@@ -145,11 +160,19 @@ class TableExtractor:
         Returns:
             List of rows, each row is list of cell text strings
         """
-        result = TableExtractor.extract_with_metadata(table, numbering_resolver)
+        result = TableExtractor.extract_with_metadata(
+            table,
+            numbering_resolver=numbering_resolver,
+            drawing_context=drawing_context,
+        )
         return result['rows']
     
     @staticmethod
-    def extract_with_metadata(table: Table, numbering_resolver=None) -> dict:
+    def extract_with_metadata(
+        table: Table,
+        numbering_resolver=None,
+        drawing_context: DrawingExtractionContext = None,
+    ) -> dict:
         """
         Extract table to 2D string array with metadata (paraIds, header info).
         
@@ -250,7 +273,11 @@ class TableExtractor:
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
                             # Get text content with format preservation (superscript/subscript/equations)
-                            para_text = extract_paragraph_content_table(para_elem, qn)
+                            para_text = extract_paragraph_content_table(
+                                para_elem,
+                                qn,
+                                drawing_context=drawing_context,
+                            )
                             
                             # Get numbering label
                             label = numbering_resolver.get_label(para_elem)
@@ -278,7 +305,11 @@ class TableExtractor:
                                 cell_para_id_end = para_id_attr  # Always update to get last
                             
                             # Extract text with format preservation (superscript/subscript/equations)
-                            para_text = extract_paragraph_content_table(para_elem, qn)
+                            para_text = extract_paragraph_content_table(
+                                para_elem,
+                                qn,
+                                drawing_context=drawing_context,
+                            )
                             
                             if para_text:
                                 para_texts.append(para_text.strip())

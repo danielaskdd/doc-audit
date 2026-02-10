@@ -140,7 +140,7 @@ def create_paragraph_with_anchor_image(
 ) -> etree.Element:
     """
     Create a paragraph with text and floating (anchor) image.
-    Anchor images should be ignored by the system.
+    Anchor images should be extracted as drawing placeholders.
 
     Args:
         text_content: Text content

@@ -26,10 +26,15 @@ try:
     from numbering_resolver import NumberingResolver
     from table_extractor import TableExtractor
     from utils import estimate_tokens
+    from drawing_image_extractor import (
+        DrawingExtractionContext,
+        create_drawing_context,
+        extract_drawing_placeholder_from_element,
+    )
 except ImportError:
     print(
         "Error: Required modules not found. Ensure numbering_resolver.py, table_extractor.py, "
-        "and utils.py are in the same directory.",
+        "drawing_image_extractor.py, and utils.py are in the same directory.",
         file=sys.stderr
     )
     sys.exit(1)
@@ -1132,7 +1137,11 @@ def get_heading_level(para_element, styles_outline_map: dict) -> int:
     return None
 
 
-def extract_text_from_run(run, ns: dict) -> str:
+def extract_text_from_run(
+    run,
+    ns: dict,
+    drawing_context: DrawingExtractionContext = None,
+) -> str:
     """
     Extract text from a run element, preserving superscript/subscript with markup.
     
@@ -1172,14 +1181,11 @@ def extract_text_from_run(run, ns: dict) -> str:
                 text += '\n'
             # Skip page and column breaks (layout elements)
         elif tag == 'drawing':
-            # Extract inline images (ignore floating images wp:anchor)
-            inline = child.find('wp:inline', ns)
-            if inline is not None:
-                doc_pr = inline.find('wp:docPr', ns)
-                if doc_pr is not None:
-                    img_id = doc_pr.get('id', '')
-                    img_name = doc_pr.get('name', '')
-                    text += f'<drawing id="{img_id}" name="{img_name}" />'
+            text += extract_drawing_placeholder_from_element(
+                child,
+                context=drawing_context,
+                include_extended_attrs=True,
+            )
     
     # Apply superscript/subscript markup if needed
     if text and vert_align == 'superscript':
@@ -1190,7 +1196,11 @@ def extract_text_from_run(run, ns: dict) -> str:
     return text
 
 
-def extract_paragraph_content(element, ns) -> str:
+def extract_paragraph_content(
+    element,
+    ns,
+    drawing_context: DrawingExtractionContext = None,
+) -> str:
     """
     Extract text and equations from a paragraph element in document order.
 
@@ -1214,7 +1224,7 @@ def extract_paragraph_content(element, ns) -> str:
         if tag in ('del', 'moveFrom'):
             return
         if tag == 'r':
-            parts.append(extract_text_from_run(node, ns))
+            parts.append(extract_text_from_run(node, ns, drawing_context=drawing_context))
             return
         if tag == 'oMath':
             from omml import convert_omml_to_latex
@@ -1239,7 +1249,12 @@ def extract_paragraph_content(element, ns) -> str:
     return ''.join(parts)
 
 
-def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = None) -> list:
+def extract_audit_blocks(
+    file_path: str,
+    debug: bool = False,
+    fixlevel: int = None,
+    drawing_context: DrawingExtractionContext = None,
+) -> list:
     """
     Extract text blocks (chunks) from a DOCX file for auditing.
     
@@ -1291,7 +1306,11 @@ def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = No
                 'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
                 'm': 'http://schemas.openxmlformats.org/officeDocument/2006/math',
             }
-            para_text = extract_paragraph_content(element, ns)
+            para_text = extract_paragraph_content(
+                element,
+                ns,
+                drawing_context=drawing_context,
+            )
             
             para_text = para_text.strip()
             if not para_text:
@@ -1419,7 +1438,11 @@ def extract_audit_blocks(file_path: str, debug: bool = False, fixlevel: int = No
             # (doc.tables may have different order due to nested tables)
             from docx.table import Table
             table = Table(element, doc)
-            table_metadata = TableExtractor.extract_with_metadata(table, numbering_resolver=resolver)
+            table_metadata = TableExtractor.extract_with_metadata(
+                table,
+                numbering_resolver=resolver,
+                drawing_context=drawing_context,
+            )
             
             table_rows = table_metadata['rows']
             para_ids = table_metadata['para_ids']
@@ -1777,9 +1800,22 @@ def main():
     if doc_path.suffix.lower() != '.docx':
         print(f"Warning: File does not have .docx extension: {args.document}", file=sys.stderr)
 
+    # Determine output path before extraction (used for image export directory naming)
+    if args.output:
+        output_path = args.output
+    else:
+        output_path = doc_path.stem + "_blocks." + args.format
+
+    drawing_context = create_drawing_context(args.document, output_path)
+
     # Extract blocks
     print(f"Parsing document: {args.document}")
-    blocks = extract_audit_blocks(args.document, debug=args.debug, fixlevel=args.fixlevel)
+    blocks = extract_audit_blocks(
+        args.document,
+        debug=args.debug,
+        fixlevel=args.fixlevel,
+        drawing_context=drawing_context,
+    )
     print(f"Extracted {len(blocks)} text blocks")
 
     # Print statistics
@@ -1805,12 +1841,6 @@ def main():
             if len(block['content']) > 300:
                 content += "..."
             print(f"Content: {content}")
-
-    # Determine output path
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = doc_path.stem + "_blocks." + args.format
 
     # Create metadata
     metadata = create_metadata(args.document)
