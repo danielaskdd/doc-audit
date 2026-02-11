@@ -28,7 +28,7 @@ class ItemResultMixin:
             return EditResult(True, item)
 
         if success_status == 'conflict':
-            reason = "Multiple changes overlap."
+            reason = "Multiple changes overlap"
             fallback_para = target_para if target_para is not None else anchor_para
             conflict_item = item
             if last_conflict_text and last_conflict_text != item.violation_text:

@@ -1570,7 +1570,7 @@ class TestMultiCellRangeComment:
         assert applied is True
         assert len(applier.comments) == 1
         assert applier.comments[0]['text'] == (
-            "[FALLBACK]Range comment failed: Missing cell element  "
+            "[FALLBACK]Range comment failed: Missing cell element\n"
             "{WHY}Reason text  {WHERE}Violation text"
         )
         assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 0

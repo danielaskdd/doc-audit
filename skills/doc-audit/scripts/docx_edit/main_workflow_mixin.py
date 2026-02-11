@@ -23,6 +23,8 @@ from utils import sanitize_xml_string
 
 
 class MainWorkflowMixin:
+    _COMMENT_SOFT_BREAK_TOKEN = "<<<DOC_AUDIT_SOFT_BREAK>>>"
+
     @staticmethod
     def _pick_first_non_none(*candidates):
         """Return the first candidate that is not None."""
@@ -58,7 +60,7 @@ class MainWorkflowMixin:
         full_text = comment_text or ""
         if fallback_reason:
             if full_text:
-                full_text = f"[FALLBACK]{fallback_reason}  {full_text}"
+                full_text = f"[FALLBACK]{fallback_reason}\n{full_text}"
             else:
                 full_text = f"[FALLBACK]{fallback_reason}"
 
@@ -132,7 +134,7 @@ class MainWorkflowMixin:
         </w:r>'''
         para_elem.append(etree.fromstring(ref_xml))
 
-        comment_text = f"[FALLBACK]Reference-only comment: {violation_reason}"
+        comment_text = f"[FALLBACK]Reference-only comment\n{violation_reason}"
         if revised_text:
             comment_text += f"\nSuggestion: {revised_text}"
 
@@ -151,7 +153,7 @@ class MainWorkflowMixin:
     ) -> str:
         """Build final comment text for manual action."""
         if fallback_reason:
-            comment_text = f"[FALLBACK]{fallback_reason} {violation_reason}"
+            comment_text = f"[FALLBACK]{fallback_reason}\n{violation_reason}"
         else:
             comment_text = violation_reason
         if revised_text:
@@ -588,7 +590,7 @@ class MainWorkflowMixin:
         para_elem.append(etree.fromstring(ref_xml))
         
         # Format: [FALLBACK] reason | {WHY} ... {WHERE} ... {SUGGEST} ...
-        comment_text = f"[FALLBACK]{reason} {{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text} {{SUGGEST}}{item.revised_text}"
+        comment_text = f"[FALLBACK]{reason}\n{{WHY}}{item.violation_reason} {{WHERE}}{item.violation_text} {{SUGGEST}}{item.revised_text}"
         
         self.comments.append({
             'id': comment_id,
@@ -847,6 +849,51 @@ class MainWorkflowMixin:
         })
         return 'success'
 
+    def _prepare_comment_text_for_word(self, comment_text: str) -> str:
+        """
+        Prepare comment text before writing to comments.xml.
+
+        For [FALLBACK] comments, only the first newline is rendered as a real
+        soft break (<w:br/>). Remaining newlines are escaped as literal "\\n".
+        """
+        normalized = (comment_text or "").replace('\r\n', '\n').replace('\r', '\n')
+        if not normalized.startswith("[FALLBACK]"):
+            return normalized
+        if '\n' not in normalized:
+            return normalized
+
+        head, tail = normalized.split('\n', 1)
+        escaped_tail = tail.replace('\n', '\\n')
+        return f"{head}{self._COMMENT_SOFT_BREAK_TOKEN}{escaped_tail}"
+
+    def _append_comment_segments_to_paragraph(self, p_elem, prepared_text: str) -> None:
+        """Append parsed comment runs to a comment paragraph, supporting soft breaks."""
+        segments = self._parse_formatted_text(prepared_text)
+        token = self._COMMENT_SOFT_BREAK_TOKEN
+
+        for segment_text, vert_align in segments:
+            if segment_text is None:
+                continue
+
+            parts = segment_text.split(token)
+            for idx, part in enumerate(parts):
+                if part:
+                    r = etree.SubElement(p_elem, f'{{{NS["w"]}}}r')
+
+                    if vert_align:
+                        rPr = etree.SubElement(r, f'{{{NS["w"]}}}rPr')
+                        vert_elem = etree.SubElement(rPr, f'{{{NS["w"]}}}vertAlign')
+                        vert_elem.set(f'{{{NS["w"]}}}val', vert_align)
+
+                    t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+                    # Preserve whitespace (Word drops leading/trailing spaces without this)
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    t.text = part
+
+                if idx < len(parts) - 1:
+                    br_run = etree.SubElement(p_elem, f'{{{NS["w"]}}}r')
+                    etree.SubElement(br_run, f'{{{NS["w"]}}}br')
+
     def _save_comments(self):
         """Save comments to comments.xml using OPC API"""
         if not self.comments:
@@ -884,28 +931,11 @@ class MainWorkflowMixin:
 
             # Add paragraph with formatted text (handle <sup>/<sub> markup)
             p = etree.SubElement(comment_elem, f'{{{NS["w"]}}}p')
-            
-            # Parse text for superscript/subscript markup
+
             # sanitize_xml_string first to remove illegal control characters
-            sanitized_text = sanitize_xml_string(comment['text'])
-            segments = self._parse_formatted_text(sanitized_text)
-            
-            for segment_text, vert_align in segments:
-                if not segment_text:
-                    continue
-                
-                r = etree.SubElement(p, f'{{{NS["w"]}}}r')
-                
-                # Add run properties with vertAlign if needed
-                if vert_align:
-                    rPr = etree.SubElement(r, f'{{{NS["w"]}}}rPr')
-                    vert_elem = etree.SubElement(rPr, f'{{{NS["w"]}}}vertAlign')
-                    vert_elem.set(f'{{{NS["w"]}}}val', vert_align)
-                
-                t = etree.SubElement(r, f'{{{NS["w"]}}}t')
-                # Preserve whitespace (Word drops leading/trailing spaces without this)
-                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                t.text = segment_text
+            sanitized_text = sanitize_xml_string(comment.get('text', ''))
+            prepared_text = self._prepare_comment_text_for_word(sanitized_text)
+            self._append_comment_segments_to_paragraph(p, prepared_text)
 
         if self.verbose:
             try:

@@ -1692,7 +1692,7 @@ class TestProcessItemConflictRetry:
         assert result.warning is False
         assert result.error_message is None
         assert not any(
-            c["text"].startswith("[FALLBACK]Multiple changes overlap.")
+            c["text"].startswith("[FALLBACK]Multiple changes overlap")
             for c in applier.comments
         )
 
@@ -1717,11 +1717,11 @@ class TestProcessItemConflictRetry:
 
         assert result.success is True
         assert result.warning is True
-        assert result.error_message == "Multiple changes overlap."
+        assert result.error_message == "Multiple changes overlap"
 
         conflict_comments = [
             c for c in applier.comments
-            if c["text"].startswith("[FALLBACK]Multiple changes overlap.")
+            if c["text"].startswith("[FALLBACK]Multiple changes overlap")
         ]
         assert len(conflict_comments) == 1
 
