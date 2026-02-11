@@ -13,7 +13,7 @@ from unittest.mock import patch
 from _apply_audit_edits_helpers import (
     apply_module, AuditEditApplier, NS, DRAWING_PATTERN,
     strip_auto_numbering, strip_markup_tags, EditResult, NSMAP,
-    create_paragraph_xml, create_paragraph_with_inline_image,
+    create_paragraph_xml, create_paragraph_with_br, create_paragraph_with_inline_image,
     create_paragraph_with_anchor_image, create_paragraph_with_track_changes,
     create_mock_applier, create_edit_item, get_test_author,
     create_mock_body_with_paragraphs
@@ -1045,6 +1045,31 @@ class TestNotFoundMarkupRetry:
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
         assert not applier.comments[0]['text'].startswith("[FALLBACK]")
+
+    def test_not_found_retry_strips_whitespace_before_newline(self):
+        applier = create_mock_applier()
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        para = create_paragraph_with_br("Alpha\nBeta", para_id="AAA")
+        body.append(para)
+        applier.body_elem = body
+        applier._init_para_order()
+
+        item = create_edit_item(
+            uuid="AAA",
+            uuid_end="AAA",
+            fix_action="replace",
+            violation_text="Alpha \nBeta",
+            revised_text="Alpha\nBeta",
+        )
+
+        result = applier._process_item(item)
+
+        assert result.success is True
+        assert result.warning is True
+        assert result.error_message in {"Violation text not found(S)", "Violation text not found(M)"}
+        assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
+        assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
+        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(")
 
     @pytest.mark.parametrize(
         "reason_case,fix_action,violation_text,revised_text,expect_success,expect_warning",

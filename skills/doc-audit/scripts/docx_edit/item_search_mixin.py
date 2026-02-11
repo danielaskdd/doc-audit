@@ -3,6 +3,7 @@ This mixin class handles item text-location logic before applying edits.
 It encapsulates single-paragraph, cross-paragraph, table, and boundary fallbacks.
 """
 
+import re
 from typing import Dict, List, Optional, Tuple, Any
 
 from .common import (
@@ -87,6 +88,20 @@ class ItemSearchMixin:
         orig_end = idx_map[stripped_end] + 1
         return orig_start, combined_text[orig_start:orig_end]
 
+    @staticmethod
+    def _strip_whitespace_before_newline(text: str) -> Tuple[str, bool]:
+        """
+        Strip whitespace characters that appear right before newline boundaries.
+
+        Handles both actual newlines (\\n / \\r\\n) and literal "\\\\n" sequences.
+        """
+        if not text:
+            return text, False
+
+        stripped = re.sub(r'[^\S\r\n]+(?=\r?\n)', '', text)
+        stripped = re.sub(r'[^\S\r\n]+(?=\\n)', '', stripped)
+        return stripped, stripped != text
+
     def _try_not_found_markup_retry_to_range_comment(
         self,
         item: EditItem,
@@ -104,81 +119,99 @@ class ItemSearchMixin:
         if not reason.startswith("Violation text not found("):
             return False
 
-        stripped_violation, _ = strip_markup_tags(violation_text)
-        stripped_violation = stripped_violation.strip()
-        if not stripped_violation:
-            if self.verbose:
-                print("  [Not-found retry] skip: empty text after sup/sub strip")
-            return False
-
         item_author = self._author_for_item(item)
-        if self.verbose:
-            print(
-                f"  [Not-found retry] try sup/sub-stripped text: "
-                f"'{format_text_preview(stripped_violation)}'"
-            )
 
-        # 1) Retry in single-paragraph mode first.
-        for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
-            runs_info_orig, _ = self._collect_runs_info_original(para)
+        def _retry_with_search_text(search_text: str, retry_label: str) -> bool:
+            stripped_search, _ = strip_markup_tags(search_text)
+            stripped_search = stripped_search.strip()
+            if not stripped_search:
+                if self.verbose:
+                    print("  [Not-found retry] skip: empty text after sup/sub strip")
+                return False
+
+            if self.verbose:
+                print(
+                    f"  [Not-found retry] try {retry_label}: "
+                    f"'{format_text_preview(stripped_search)}'"
+                )
+
+            # 1) Retry in single-paragraph mode first.
+            for para in self._iter_paragraphs_in_range(anchor_para, item.uuid_end):
+                runs_info_orig, _ = self._collect_runs_info_original(para)
+                pos, matched_override = self._find_in_runs_with_sup_sub_stripped(
+                    runs_info_orig, search_text
+                )
+                if pos == -1:
+                    continue
+
+                matched_text = (
+                    matched_override if matched_override is not None else stripped_search
+                )
+                status = self._apply_manual(
+                    para,
+                    matched_text,
+                    item.violation_reason,
+                    revised_text,
+                    runs_info_orig,
+                    pos,
+                    item_author,
+                    is_cross_paragraph=False,
+                    fallback_reason=reason if use_fallback_reason else None,
+                )
+                if status == 'success':
+                    if self.verbose:
+                        print(f"  [Not-found retry] hit in single paragraph ({retry_label})")
+                    return True
+
+            # 2) Retry in cross-paragraph mode.
+            cross_runs, _, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
+                anchor_para, item.uuid_end
+            )
+            if boundary_error is not None or not cross_runs:
+                if self.verbose:
+                    print("  [Not-found retry] miss in cross-paragraph mode")
+                return False
+
             pos, matched_override = self._find_in_runs_with_sup_sub_stripped(
-                runs_info_orig, violation_text
+                cross_runs, search_text
             )
             if pos == -1:
-                continue
+                if self.verbose:
+                    print("  [Not-found retry] miss in cross-paragraph mode")
+                return False
 
-            matched_text = matched_override if matched_override is not None else stripped_violation
+            matched_text = matched_override if matched_override is not None else stripped_search
             status = self._apply_manual(
-                para,
+                anchor_para,
                 matched_text,
                 item.violation_reason,
                 revised_text,
-                runs_info_orig,
+                cross_runs,
                 pos,
                 item_author,
-                is_cross_paragraph=False,
+                is_cross_paragraph=is_multi_para,
                 fallback_reason=reason if use_fallback_reason else None,
             )
             if status == 'success':
                 if self.verbose:
-                    print("  [Not-found retry] hit in single paragraph (sup/sub strip)")
+                    print(
+                        f"  [Not-found retry] hit in "
+                        f"{'cross-paragraph' if is_multi_para else 'cross-range'} mode"
+                    )
                 return True
 
-        # 2) Retry in cross-paragraph mode.
-        cross_runs, _, is_multi_para, boundary_error = self._collect_runs_info_across_paragraphs(
-            anchor_para, item.uuid_end
-        )
-        if boundary_error is not None or not cross_runs:
-            if self.verbose:
-                print("  [Not-found retry] miss in cross-paragraph mode")
             return False
 
-        pos, matched_override = self._find_in_runs_with_sup_sub_stripped(
-            cross_runs, violation_text
-        )
-        if pos == -1:
-            if self.verbose:
-                print("  [Not-found retry] miss in cross-paragraph mode")
-            return False
+        if _retry_with_search_text(violation_text, "sup/sub-stripped text"):
+            return True
 
-        matched_text = matched_override if matched_override is not None else stripped_violation
-        status = self._apply_manual(
-            anchor_para,
-            matched_text,
-            item.violation_reason,
-            revised_text,
-            cross_runs,
-            pos,
-            item_author,
-            is_cross_paragraph=is_multi_para,
-            fallback_reason=reason if use_fallback_reason else None,
+        normalized_newline_text, has_newline_ws = self._strip_whitespace_before_newline(
+            violation_text
         )
-        if status == 'success':
-            if self.verbose:
-                print(
-                    f"  [Not-found retry] hit in "
-                    f"{'cross-paragraph' if is_multi_para else 'cross-range'} mode"
-                )
+        if has_newline_ws and _retry_with_search_text(
+            normalized_newline_text,
+            "sup/sub-stripped text with newline-space normalization",
+        ):
             return True
 
         if self.verbose:
