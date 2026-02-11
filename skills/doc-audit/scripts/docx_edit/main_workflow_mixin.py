@@ -575,7 +575,13 @@ class MainWorkflowMixin:
             ordered_runs, anchor_para, violation_reason, author
         )
 
-    def _apply_error_comment(self, para_elem, item: EditItem, author_override: str = None) -> bool:
+    def _apply_error_comment(
+        self,
+        para_elem,
+        item: EditItem,
+        author_override: str = None,
+        fallback_reason: Optional[str] = None,
+    ) -> bool:
         """
         Insert an unselected comment at the end of paragraph for failed items.
         
@@ -586,6 +592,7 @@ class MainWorkflowMixin:
             para_elem: Paragraph element to attach comment
             item: EditItem with violation details
             author_override: Optional author name to use instead of default
+            fallback_reason: Optional fallback reason, prepended as [FALLBACK]...
         """
         comment_id = self.next_comment_id
         self.next_comment_id += 1
@@ -598,7 +605,13 @@ class MainWorkflowMixin:
         para_elem.append(etree.fromstring(ref_xml))
         
         # Record comment content with custom format and author
-        comment_text = f"{{WHY}}{item.violation_reason}  {{WHERE}}{item.violation_text}{{SUGGEST}}{item.revised_text}"
+        comment_text = (
+            f"{{WHY}}{item.violation_reason} "
+            f"{{WHERE}}{item.violation_text} "
+            f"{{SUGGEST}}{item.revised_text}"
+        )
+        if fallback_reason:
+            comment_text = f"[FALLBACK]{fallback_reason}\n{comment_text}"
         comment_author = author_override if author_override else self._author_for_item(item)
         self.comments.append({
             'id': comment_id,

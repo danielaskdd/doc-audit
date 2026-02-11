@@ -114,7 +114,11 @@ class ItemResultMixin:
         if success_status == 'fallback':
             reason = status_reason or "No editable runs found"
             if item.fix_action == 'manual':
-                self._apply_error_comment(target_para, item)
+                self._apply_error_comment(
+                    target_para,
+                    item,
+                    fallback_reason=reason,
+                )
             else:
                 self._apply_fallback_comment(target_para, item, reason)
             if self.verbose:
@@ -126,7 +130,11 @@ class ItemResultMixin:
                 warning=True,
             )
 
-        self._apply_error_comment(anchor_para, item)
+        self._apply_error_comment(
+            anchor_para,
+            item,
+            fallback_reason=status_reason,
+        )
         return EditResult(False, item, "Operation failed")
 
     def _build_manual_fallback_result(

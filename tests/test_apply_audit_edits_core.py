@@ -423,6 +423,31 @@ class TestApplyManual:
         )
 
 
+class TestApplyErrorComment:
+    """Tests for _apply_error_comment fallback prefix support."""
+
+    def test_error_comment_with_fallback_reason_prefix(self):
+        applier = create_mock_applier()
+        para = create_paragraph_xml("Some text")
+        item = create_edit_item(
+            violation_text="bad text",
+            violation_reason="reason",
+            revised_text="suggestion",
+        )
+
+        ok = applier._apply_error_comment(
+            para,
+            item,
+            fallback_reason="FB_TEST: fallback path",
+        )
+
+        assert ok is True
+        assert len(applier.comments) == 1
+        assert applier.comments[0]["text"].startswith(
+            "[FALLBACK]FB_TEST: fallback path\n{WHY}reason"
+        )
+
+
 # ============================================================
 # Tests: _apply_delete with Images
 # ============================================================
