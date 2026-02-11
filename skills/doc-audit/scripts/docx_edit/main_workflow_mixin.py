@@ -23,6 +23,14 @@ from utils import sanitize_xml_string
 
 
 class MainWorkflowMixin:
+    @staticmethod
+    def _pick_first_non_none(*candidates):
+        """Return the first candidate that is not None."""
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+        return None
+
     def _append_reference_only_comment(
         self,
         para_elem,
@@ -683,18 +691,6 @@ class MainWorkflowMixin:
         start_key = self._comment_doc_key_for_run(first_run_info, para_elem)
         end_key = self._comment_doc_key_for_run(last_run_info, para_elem)
 
-        if start_key is not None and end_key is None:
-            fallback_para = (
-                first_run_info.get('host_para_elem')
-                or first_run_info.get('para_elem')
-                or para_elem
-            )
-            if not self._append_manual_reference_only_comment(
-                fallback_para, comment_id, violation_reason, revised_text, author
-            ):
-                return 'fallback'
-            return 'success'
-
         if start_key is not None and end_key is not None and end_key < start_key:
             candidate = None
             for run_info in reversed(real_runs):
@@ -703,10 +699,10 @@ class MainWorkflowMixin:
                     candidate = run_info
                     break
             if candidate is None:
-                fallback_para = (
-                    first_run_info.get('host_para_elem')
-                    or first_run_info.get('para_elem')
-                    or para_elem
+                fallback_para = self._pick_first_non_none(
+                    first_run_info.get('host_para_elem'),
+                    first_run_info.get('para_elem'),
+                    para_elem,
                 )
                 if not self._append_manual_reference_only_comment(
                     fallback_para, comment_id, violation_reason, revised_text, author

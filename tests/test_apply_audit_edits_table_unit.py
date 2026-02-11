@@ -1377,8 +1377,8 @@ class TestManualCommentOrdering:
         assert len(end_elems) == 1
         assert all_elems.index(start_elems[0]) < all_elems.index(end_elems[0])
 
-    def test_reference_only_fallback_when_no_valid_end(self):
-        """When no valid end run is found, fallback to reference-only comment."""
+    def test_missing_end_key_uses_range_comment_when_end_anchor_exists(self):
+        """If end_key is missing but end run exists, keep range markers (no fallback)."""
         applier = create_mock_applier()
 
         # Build paragraph with two runs
@@ -1420,9 +1420,62 @@ class TestManualCommentOrdering:
         )
 
         assert status == 'success'
-        assert list(body.iter(f'{{{NS["w"]}}}commentRangeStart')) == []
-        assert list(body.iter(f'{{{NS["w"]}}}commentRangeEnd')) == []
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))) == 1
         assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
+        assert not applier.comments[0]['text'].startswith("[FALLBACK]")
+
+    def test_equation_tail_without_run_elem_uses_range_comment(self):
+        """Tail equation (elem=None) should still create range markers via paragraph anchor."""
+        applier = create_mock_applier()
+
+        body = etree.Element(f'{{{NS["w"]}}}body', nsmap=NSMAP)
+        p = etree.SubElement(body, f'{{{NS["w"]}}}p')
+        p.set(f'{{{NS["w14"]}}}paraId', 'AAA')
+        r = etree.SubElement(p, f'{{{NS["w"]}}}r')
+        t = etree.SubElement(r, f'{{{NS["w"]}}}t')
+        t.text = '前缀'
+        applier.body_elem = body
+        applier._init_para_order()
+
+        eq_text = '<equation>x^2</equation>'
+        runs_info = [
+            {
+                'text': '前缀',
+                'start': 0,
+                'end': 2,
+                'elem': r,
+                'rPr': None,
+                'para_elem': p,
+            },
+            {
+                'text': eq_text,
+                'start': 2,
+                'end': 2 + len(eq_text),
+                'elem': None,
+                'rPr': None,
+                'is_equation': True,
+                'para_elem': p,
+                'omath_elem': None,
+            },
+        ]
+
+        status = applier._apply_manual(
+            p,
+            f'前缀{eq_text}',
+            "Reason",
+            "",
+            runs_info,
+            0,
+            "Test",
+            is_cross_paragraph=False
+        )
+
+        assert status == 'success'
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeStart'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentRangeEnd'))) == 1
+        assert len(list(body.iter(f'{{{NS["w"]}}}commentReference'))) == 1
+        assert not applier.comments[0]['text'].startswith("[FALLBACK]")
 
 
 class TestMultiCellRangeComment:
