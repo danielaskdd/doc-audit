@@ -1328,6 +1328,36 @@ class TestStripTableRowNumbering:
         assert was_stripped is True
         assert stripped == expected
 
+    def test_preserve_section_number_cell(self):
+        """Section-id style values should not be stripped as orphan numbering."""
+        text = '["4", "正文\\na) 采样速率：≥100kHz", "无偏离", "3.2.2.1.1.1.4"]'
+        expected = '["", "正文\\n采样速率：≥100kHz", "无偏离", "3.2.2.1.1.1.4"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_strip_orphan_numbering_line_inside_cell(self):
+        """Standalone numbering line after content should be removed."""
+        text = '["1", "正文\\n1)\\n正文2"]'
+        expected = '["", "正文\\n\\n正文2"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
+    def test_keep_standalone_numbering_cell_without_prior_content(self):
+        """Standalone numbering-only cell keeps old behavior."""
+        text = '["1", "1)"]'
+        expected = '["", "1)"]'
+
+        stripped, was_stripped = apply_module.strip_table_row_numbering(text)
+
+        assert was_stripped is True
+        assert stripped == expected
+
 
 # ============================================================
 # Comment Range Ordering (vMerge continue)

@@ -32,16 +32,32 @@ COMMENTS_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relat
 # Matches: "1. ", "1.1 ", "1) ", "1）", "a. ", "A) ", "• ", "表1 ", "图2 ", "注:", "注：", etc.
 AUTO_NUMBERING_PATTERN = re.compile(
     r'^(?:'
-    r'\d+(?:[\.\d)）]+)\s+'  # Numeric: 1. 1.1 1) 1）
+    r'\d+(?:[\.\d)）]+)\s+'        # Numeric: 1. 1.1 1) 1）
     r'|'
-    r'[a-zA-Z][.)）]\s+'     # Alphabetic: a. A) b）
+    r'[a-zA-Z][.)）]\s+'           # Alphabetic: a. A) b）
     r'|'
-    r'•\s*'                   # Bullet: • (optional space)
+    r'•\s*'                        # Bullet: • (optional space)
     r'|'
-    r'[表图]\s*\d+\s*'        # Table/Figure: 表1 图2 表 3 图 4
+    r'[表图]\s*\d+\s*'             # Table/Figure: 表1 图2 表 3 图 4
     r'|'
-    r'注[:：]\s*'              # Note: 注: 注：
+    r'注[:：]\s*'                  # Note: 注: 注：
     r')'
+)
+
+# Standalone numbering line pattern used only in multiline cleanup.
+# This intentionally includes pure numeric hierarchical strings like "3.2.2.1.1.1.4".
+STANDALONE_NUMBERING_LINE_PATTERN = re.compile(
+    r'^(?:'
+    r'\d+(?:\.\d+|[)）.])*'
+    r'|'
+    r'[a-zA-Z][.)）]'
+    r'|'
+    r'•'
+    r'|'
+    r'[表图]\s*\d+'
+    r'|'
+    r'注[:：]?'
+    r')$'
 )
 
 # Table row numbering pattern for detecting numeric first cell in JSON format
@@ -254,18 +270,41 @@ def strip_auto_numbering_lines(text: str) -> Tuple[str, bool]:
     Returns:
         (stripped_text, was_stripped)
     """
-    if '\n' not in text:
+    line_sep: Optional[str]
+    if '\n' in text:
+        line_sep = '\n'
+    elif '\\n' in text:
+        line_sep = '\\n'
+    else:
         return strip_auto_numbering(text)
 
-    lines = text.split('\n')
+    lines = text.split(line_sep)
     new_lines = []
     was_stripped = False
+    seen_content_before = False
+
     for line in lines:
+        line_stripped = line.strip()
+        is_standalone_numbering = bool(
+            line_stripped and STANDALONE_NUMBERING_LINE_PATTERN.fullmatch(line_stripped)
+        )
+
+        # Remove standalone numbering lines only when we've already seen body content.
+        if is_standalone_numbering and seen_content_before:
+            new_lines.append("")
+            was_stripped = True
+            continue
+
         stripped, stripped_flag = strip_auto_numbering(line)
         if stripped_flag:
             was_stripped = True
         new_lines.append(stripped)
-    return '\n'.join(new_lines), was_stripped
+
+        candidate = stripped.strip()
+        if candidate and not STANDALONE_NUMBERING_LINE_PATTERN.fullmatch(candidate):
+            seen_content_before = True
+
+    return line_sep.join(new_lines), was_stripped
 
 
 def build_numbering_variants(text: str) -> List[Tuple[str, str]]:
@@ -439,24 +478,14 @@ def strip_table_row_numbering(text: str) -> Tuple[str, bool]:
                 row[0] = ""
                 was_modified = True
 
-        # 2. Strip auto-numbering from each cell and paragraph
+        # 2. Strip auto-numbering from each cell, including orphan numbering lines
         new_cells = []
         for cell in row:
             if isinstance(cell, str):
-                # Split cell by newlines (handles both \n and literal \\n after JSON decode)
-                # After json.loads, \\n in JSON becomes \n in string
-                paragraphs = cell.split('\n')
-
-                # Process each paragraph
-                new_paragraphs = []
-                for para in paragraphs:
-                    stripped, stripped_flag = strip_auto_numbering(para)
-                    if stripped_flag:
-                        was_modified = True
-                    new_paragraphs.append(stripped)
-
-                # Rejoin with newline
-                new_cells.append('\n'.join(new_paragraphs))
+                stripped_cell, stripped_flag = strip_auto_numbering_lines(cell)
+                if stripped_flag:
+                    was_modified = True
+                new_cells.append(stripped_cell)
             else:
                 new_cells.append(cell)
 

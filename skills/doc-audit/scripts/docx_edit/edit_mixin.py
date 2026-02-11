@@ -503,7 +503,7 @@ class EditMixin:
                 return self._set_status_reason(
                     'equation_fallback',
                     'EQ_DEL_ONLY',
-                    'equation-only target',
+                    'can not modify equation',
                 )
             return self._set_status_reason(
                 'fallback',

@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 from _apply_audit_edits_helpers import (
     apply_module, AuditEditApplier, NS, DRAWING_PATTERN,
-    strip_auto_numbering, strip_markup_tags, EditResult, NSMAP,
+    strip_auto_numbering, strip_auto_numbering_lines, build_numbering_variants,
+    strip_markup_tags, EditResult, NSMAP,
     create_paragraph_xml, create_paragraph_with_br, create_paragraph_with_inline_image,
     create_paragraph_with_anchor_image, create_paragraph_with_track_changes,
     create_mock_applier, create_edit_item, get_test_author,
@@ -819,6 +820,7 @@ class TestStripAutoNumbering:
         """Test stripping alphabetic prefixes"""
         assert strip_auto_numbering("a. First item") == ("First item", True)
         assert strip_auto_numbering("A) Section") == ("Section", True)
+        assert strip_auto_numbering("b)") == ("b)", False)
     
     def test_strip_bullet(self):
         """Test stripping bullet"""
@@ -827,6 +829,36 @@ class TestStripAutoNumbering:
     def test_no_strip_normal(self):
         """Test no stripping for normal text"""
         assert strip_auto_numbering("Normal text") == ("Normal text", False)
+
+    def test_strip_multiline_marker_without_trailing_space(self):
+        """Strip standalone marker at line end (e.g. '\\nb)')."""
+        text = "验收的依据及方法：\nb)"
+        assert strip_auto_numbering_lines(text) == ("验收的依据及方法：\n", True)
+        assert build_numbering_variants(text) == [("验收的依据及方法：\n", "lines")]
+
+    def test_keep_standalone_marker_without_prior_content(self):
+        """Standalone marker alone should keep old behavior (not stripped)."""
+        text = "b)"
+        assert strip_auto_numbering_lines(text) == ("b)", False)
+        assert build_numbering_variants(text) == []
+
+    def test_strip_orphan_numbering_line_in_middle(self):
+        """Remove standalone numbering line when body content already exists."""
+        text = "正文\n1)\n正文2"
+        assert strip_auto_numbering_lines(text) == ("正文\n\n正文2", True)
+        assert build_numbering_variants(text) == [("正文\n\n正文2", "lines")]
+
+    def test_strip_literal_backslash_n_multiline_marker(self):
+        """Support literal '\\\\n' separators from JSON-escaped violation_text."""
+        text = r"验收的依据及方法： \nb)\n\c)"
+        assert strip_auto_numbering_lines(text) == (r"验收的依据及方法： \n\n\c)", True)
+        assert build_numbering_variants(text) == [(r"验收的依据及方法： \n\n\c)", "lines")]
+
+    def test_strip_literal_backslash_n_orphan_numbering_in_middle(self):
+        """Remove standalone numbering line for literal '\\\\n' separators too."""
+        text = r"正文\n1)\n正文2"
+        assert strip_auto_numbering_lines(text) == (r"正文\n\n正文2", True)
+        assert build_numbering_variants(text) == [(r"正文\n\n正文2", "lines")]
 
 
 class TestStripMarkupTags:
