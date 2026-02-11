@@ -998,12 +998,14 @@ class TestNotFoundMarkupRetry:
 
         assert result.success is True
         assert result.warning is True
-        assert result.error_message == "Violation text not found(C)"
+        assert result.error_message == "NF_C: violation text not found(C)"
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
         assert len(para.findall('.//w:del', NSMAP)) == 0
         assert len(para.findall('.//w:ins', NSMAP)) == 0
-        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(C)")
+        assert applier.comments[0]['text'].startswith(
+            "[FALLBACK]NF_C: violation text not found(C)"
+        )
 
     def test_not_found_s_manual_retries_to_range_comment(self):
         applier = create_mock_applier()
@@ -1046,12 +1048,14 @@ class TestNotFoundMarkupRetry:
 
         assert result.success is True
         assert result.warning is True
-        assert result.error_message == "Violation text not found(M)"
+        assert result.error_message == "NF_M: violation text not found(M)"
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
         assert len(para.findall('.//w:del', NSMAP)) == 0
         assert len(para.findall('.//w:ins', NSMAP)) == 0
-        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(M)")
+        assert applier.comments[0]['text'].startswith(
+            "[FALLBACK]NF_M: violation text not found(M)"
+        )
 
     def test_retry_strips_sup_sub_in_both_violation_and_document(self):
         applier = create_mock_applier()
@@ -1098,10 +1102,13 @@ class TestNotFoundMarkupRetry:
 
         assert result.success is True
         assert result.warning is True
-        assert result.error_message in {"Violation text not found(S)", "Violation text not found(M)"}
+        assert result.error_message in {
+            "NF_S: violation text not found(S)",
+            "NF_M: violation text not found(M)",
+        }
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 1
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 1
-        assert applier.comments[0]['text'].startswith("[FALLBACK]Violation text not found(")
+        assert applier.comments[0]['text'].startswith("[FALLBACK]NF_")
 
     @pytest.mark.parametrize(
         "reason_case,fix_action,violation_text,revised_text,expect_success,expect_warning",
@@ -1145,12 +1152,15 @@ class TestNotFoundMarkupRetry:
 
         assert result.success is expect_success
         assert result.warning is expect_warning
-        assert result.error_message == f"Violation text not found({reason_case})"
+        assert (
+            result.error_message
+            == f"NF_{reason_case}: violation text not found({reason_case})"
+        )
         assert len(para.findall('.//w:commentRangeStart', NSMAP)) == 0
         assert len(para.findall('.//w:commentRangeEnd', NSMAP)) == 0
         assert len(para.findall('.//w:commentReference', NSMAP)) == 1
         assert applier.comments[0]['text'].startswith(
-            f"[FALLBACK]Violation text not found({reason_case})"
+            f"[FALLBACK]NF_{reason_case}: violation text not found({reason_case})"
         )
 
 

@@ -25,6 +25,27 @@ from .common import (
 
 
 class ItemSearchMixin:
+    @staticmethod
+    def _is_not_found_reason(reason: str) -> bool:
+        """Return True when reason is a known not-found warning message."""
+        if not reason:
+            return False
+        normalized = reason.strip()
+        return bool(
+            re.match(
+                r'^(?:NF_[CSM]:\s*)?violation text not found\([CSM]\)$',
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _build_not_found_reason(case: str) -> str:
+        """Build standardized not-found warning reason with code prefix."""
+        reason_case = (case or "").strip().upper()
+        if reason_case not in {"C", "S", "M"}:
+            reason_case = "M"
+        return f"NF_{reason_case}: violation text not found({reason_case})"
+
     def _strip_sup_sub_with_mapping(self, text: str) -> Tuple[str, List[int]]:
         """
         Strip <sup>/<sub> tags and build index mapping to original text.
@@ -116,7 +137,7 @@ class ItemSearchMixin:
 
         On hit, convert to range comment via _apply_manual.
         """
-        if not reason.startswith("Violation text not found("):
+        if not self._is_not_found_reason(reason):
             return False
 
         item_author = self._author_for_item(item)
@@ -744,7 +765,7 @@ class ItemSearchMixin:
 
                 if target_para is None:
                     if boundary_error == 'boundary_crossed':
-                        reason = "Violation text not found(C)"
+                        reason = self._build_not_found_reason("C")
                     else:
                         reason = f"Boundary error: {boundary_error}"
 
@@ -835,9 +856,9 @@ class ItemSearchMixin:
                 total_segments = tables_count + body_count
 
                 if total_segments == 1:
-                    reason = "Violation text not found(S)"
+                    reason = self._build_not_found_reason("S")
                 else:
-                    reason = "Violation text not found(M)"
+                    reason = self._build_not_found_reason("M")
 
                 retried = self._try_not_found_markup_retry_to_range_comment(
                     item=item,

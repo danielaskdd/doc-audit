@@ -671,8 +671,8 @@ class EditMixin:
             if any(r.get('is_equation', False) for r in affected):
                 return self._set_status_reason(
                     'equation_fallback',
-                    'EQ_REP_ONLY',
-                    'equation-only target',
+                    'EQ_MODIFY',
+                    'cannot modify equations',
                 )
             return self._set_status_reason(
                 'fallback',

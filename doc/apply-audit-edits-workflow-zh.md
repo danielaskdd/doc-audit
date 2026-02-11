@@ -59,7 +59,7 @@ JSONL -> EditItem
 
 关键策略：`_try_not_found_markup_retry_to_range_comment()`
 
-- 触发条件：reason 形如 `Violation text not found(...)`
+- 触发条件：reason 形如 `violation text not found(...)`
 - 行为：剥离 `<sup>/<sub>` 后重试匹配，命中则直接转 `_apply_manual` 做范围注释
 - `fix_action == manual`：成功时通常返回“成功无告警”
 - `fix_action in (delete, replace)`：成功时返回“成功+warning”（因为降级为注释）
@@ -77,9 +77,9 @@ JSONL -> EditItem
 定位失败并不总是失败退出，当前实现里存在两类结果：
 
 - 告警成功（`success=True, warning=True`）：
-  - 常见于 `Violation text not found(C)`、mixed content、markup-strip 重试后降级注释等
+  - 常见于 `violation text not found(C)`、mixed content、markup-strip 重试后降级注释等
 - 硬失败（`success=False`）：
-  - 典型是最终落入 `Violation text not found(S/M)` 且 `fix_action` 非 `manual`
+  - 典型是最终落入 `violation text not found(S/M)` 且 `fix_action` 非 `manual`
   - 或锚点段落 `uuid` 根本找不到
 
 这意味着“找不到文本”在不同边界场景下，结果语义并不完全一致。
@@ -159,7 +159,7 @@ JSONL -> EditItem
 
 - 文本未命中：`FB_REP_NO_HIT`
 - 无可编辑 run：`FB_REP_NO_RUN`
-- 仅方程命中：`EQ_REP_ONLY`
+- 仅方程命中：`EQ_MODIFY`
 - 试图修改图片/公式等特殊元素结构：`FB_REP_SPECIAL`
 - 与既有修订重叠：`CF_OVERLAP`
 - 表格跨段不支持直接替换：`CP_TBL_SPAN` / `CP_REP_TBL_MODE`
