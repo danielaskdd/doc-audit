@@ -63,7 +63,8 @@ Deletion via replace strategy (MANDATORY):
 - Never use "delete".
 - When content should be removed, expand violation_text to include enough prefix/suffix context so the match is unique, and set fix_action to "replace".
 - revised_text must equal violation_text after removing the target content.
-- If deleting a table cell, violation_text must be the full row content (JSON row format), and revised_text should keep the row structure while setting the deleted cell to an empty string.
+- Table cell deletion: violation_text must contain the complete row in JSON format; revised_text should maintain the original row structure with the target cell set to an empty string.
+- Table row deletion: Explicit row deletion is not supported. Please clear the row by setting all constituent cells to empty strings.
 
 revised_text guidelines:
 - For "replace": Provide the complete replacement text that can directly substitute violation_text (including deletion scenarios handled by replacement)
