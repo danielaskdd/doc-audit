@@ -24,6 +24,7 @@ from utils import sanitize_xml_string
 
 class MainWorkflowMixin:
     _COMMENT_SOFT_BREAK_TOKEN = "<<<DOC_AUDIT_SOFT_BREAK>>>"
+    _STATUS_REASON_SUMMARY_MAX_LEN = 48
 
     @staticmethod
     def _pick_first_non_none(*candidates):
@@ -32,6 +33,49 @@ class MainWorkflowMixin:
             if candidate is not None:
                 return candidate
         return None
+
+    def _reset_status_reason(self) -> None:
+        """Clear pending fallback/conflict reason for current item."""
+        self._pending_status_reason = None
+
+    def _summarize_status_reason_detail(self, detail: str) -> str:
+        """Build concise single-line summary for long reason detail."""
+        text = " ".join((detail or "").split())
+        if not text:
+            return ""
+        for sep in ('; ', '. '):
+            if sep in text:
+                text = text.split(sep, 1)[0].strip()
+                break
+        if len(text) > self._STATUS_REASON_SUMMARY_MAX_LEN:
+            text = text[: self._STATUS_REASON_SUMMARY_MAX_LEN - 3].rstrip() + "..."
+        return text
+
+    def _set_status_reason(self, status: str, code: str, detail: str = "") -> str:
+        """Store one-shot structured reason for the next result build."""
+        code_text = (code or "").strip() or "FB_UNKNOWN"
+        detail_text = " ".join((detail or "").split())
+        summary_text = self._summarize_status_reason_detail(detail_text)
+        self._pending_status_reason = {
+            'status': status,
+            'code': code_text,
+            'summary': summary_text,
+            'detail': detail_text,
+        }
+        return status
+
+    def _consume_status_reason(self, status: str, include_detail: bool = False) -> Optional[str]:
+        """Return and clear pending reason only when status matches."""
+        pending = getattr(self, '_pending_status_reason', None)
+        if not pending:
+            return None
+        if pending.get('status') != status:
+            return None
+        short_code = pending.get('code')
+        body = pending.get('detail') if include_detail else pending.get('summary')
+        reason = f"{short_code}: {body}" if body else short_code
+        self._pending_status_reason = None
+        return reason
 
     def _append_reference_only_comment(
         self,
@@ -121,7 +165,8 @@ class MainWorkflowMixin:
         comment_id: int,
         violation_reason: str,
         revised_text: str,
-        author: str
+        author: str,
+        fallback_reason: str = "FB_REF_ONLY: reference-only comment",
     ) -> bool:
         """Append a reference-only fallback comment using existing comment_id."""
         if para_elem is None:
@@ -134,7 +179,7 @@ class MainWorkflowMixin:
         </w:r>'''
         para_elem.append(etree.fromstring(ref_xml))
 
-        comment_text = f"[FALLBACK]Reference-only comment\n{violation_reason}"
+        comment_text = f"[FALLBACK]{fallback_reason}\n{violation_reason}"
         if revised_text:
             comment_text += f"\nSuggestion: {revised_text}"
 
@@ -679,11 +724,19 @@ class MainWorkflowMixin:
         match_end = match_start + len(violation_text)
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         if not affected:
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MAN_NO_HIT',
+                'manual hit not found',
+            )
 
         real_runs = self._filter_real_runs(affected, include_equations=True)
         if not real_runs:
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MAN_NO_RUN',
+                'manual no editable runs',
+            )
 
         comment_id = self.next_comment_id
         self.next_comment_id += 1
@@ -709,7 +762,11 @@ class MainWorkflowMixin:
                 if not self._append_manual_reference_only_comment(
                     fallback_para, comment_id, violation_reason, revised_text, author
                 ):
-                    return 'fallback'
+                    return self._set_status_reason(
+                        'fallback',
+                        'FB_MAN_REF_FAIL',
+                        'ref-only append failed',
+                    )
                 if self.verbose:
                     print("  [Debug] ParaId order inverted; fallback to reference-only comment")
                 return 'success'
@@ -775,7 +832,11 @@ class MainWorkflowMixin:
                 if not self._append_manual_reference_only_comment(
                     fallback_para, comment_id, violation_reason, revised_text, author
                 ):
-                    return 'fallback'
+                    return self._set_status_reason(
+                        'fallback',
+                        'FB_MAN_REF_FAIL',
+                        'ref-only append failed',
+                    )
                 if self.verbose:
                     print("  [Debug] ParaId order inverted; fallback to reference-only comment")
                 return 'success'
@@ -822,7 +883,11 @@ class MainWorkflowMixin:
             before_text=before_text,
             rPr_xml=rPr_xml
         ):
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MAN_START_FAIL',
+                'start marker insert failed',
+            )
 
         if not self._insert_manual_end_marker(
             range_end,
@@ -836,7 +901,11 @@ class MainWorkflowMixin:
             rPr_xml=rPr_xml,
             no_split_end=no_split_end
         ):
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MAN_END_FAIL',
+                'end marker insert failed',
+            )
 
         self.comments.append({
             'id': comment_id,
@@ -972,6 +1041,7 @@ class MainWorkflowMixin:
         """Process a single edit item"""
         anchor_para = None
         try:
+            self._reset_status_reason()
             # Strip leading/trailing whitespace from search and replacement text, normalize drawing attribute
             # to prevent matching failures caused by whitespace in JSONL data
             violation_text = normalize_drawing_placeholders_in_text(
@@ -1066,7 +1136,11 @@ class MainWorkflowMixin:
                             if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
                                 if self.verbose:
                                     print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, fallback to comment")
-                                current_status = 'cross_paragraph_fallback'
+                                current_status = self._set_status_reason(
+                                    'cross_paragraph_fallback',
+                                    'CP_TBL_SPAN',
+                                    f'delete spans {len(para_elems)} paras in table',
+                                )
                             else:
                                 if self.verbose:
                                     print(f"  [Cross-paragraph] delete spans {len(para_elems)} paragraphs, applying cross-paragraph delete")
@@ -1144,7 +1218,15 @@ class MainWorkflowMixin:
                                 if self.verbose and current_status == 'success':
                                     print(f"  [Single-cell] All changes in one cell, applied track change")
                                 elif current_status not in ('success', 'conflict'):
-                                    current_status = 'cross_cell_fallback'
+                                    nested_reason = self._consume_status_reason(current_status)
+                                    detail = f'single-cell replace returned {current_status}'
+                                    if nested_reason:
+                                        detail = f"{detail}; {nested_reason}"
+                                    current_status = self._set_status_reason(
+                                        'cross_cell_fallback',
+                                        'CC_SINGLE_FAIL',
+                                        detail,
+                                    )
                             else:
                                 # Try multi-cell extraction - changes distributed across cells
                                 multi_cells = self._try_extract_multi_cell_edits(
@@ -1242,17 +1324,29 @@ class MainWorkflowMixin:
                                                 print(f"  [Multi-cell] Successfully applied track changes to all {len(multi_cells)} cells")
                                     else:
                                         # All cells failed - fallback to overall comment
-                                        current_status = 'cross_cell_fallback'
+                                        current_status = self._set_status_reason(
+                                            'cross_cell_fallback',
+                                            'CC_ALL_FAIL',
+                                            'all extracted cells failed',
+                                        )
                                 else:
                                     # Changes cross cell boundaries - fallback to comment
                                     if self.verbose:
                                         print(f"  [Cross-cell] Changes cross cell boundaries, fallback to comment")
-                                    current_status = 'cross_cell_fallback'
+                                    current_status = self._set_status_reason(
+                                        'cross_cell_fallback',
+                                        'CC_XTRACT_FAIL',
+                                        'cannot split cross-cell edits',
+                                    )
                             if current_status is None and is_cross_row:
                                 # Cell extraction failed for cross-row content
                                 if self.verbose:
                                     print(f"  [Cross-row] Cell extraction failed, fallback to comment")
-                                current_status = 'cross_row_fallback'
+                                current_status = self._set_status_reason(
+                                    'cross_row_fallback',
+                                    'CR_XTRACT_FAIL',
+                                    'cannot decompose cross-row edit',
+                                )
                         elif len(para_elems) > 1:
                             # Actually spans multiple paragraphs
                             if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
@@ -1270,7 +1364,11 @@ class MainWorkflowMixin:
                                 except Exception:
                                     # Debug logging should never break apply flow
                                     pass
-                                current_status = 'cross_paragraph_fallback'
+                                current_status = self._set_status_reason(
+                                    'cross_paragraph_fallback',
+                                    'CP_TBL_SPAN',
+                                    f'replace spans {len(para_elems)} paras in table',
+                                )
                             else:
                                 if self.verbose:
                                     print(f"  [Cross-paragraph] replace spans {len(para_elems)} paragraphs, applying cross-paragraph replace")
@@ -1356,7 +1454,8 @@ class MainWorkflowMixin:
                 # Insert error comment for unknown action type
                 self._apply_error_comment(anchor_para, item)
                 return EditResult(False, item, f"Unknown action type: {item.fix_action}")
-            
+
+            status_reason = self._consume_status_reason(success_status)
             return self._build_result_from_status(
                 item=item,
                 success_status=success_status,
@@ -1370,6 +1469,7 @@ class MainWorkflowMixin:
                 is_cross_paragraph=is_cross_paragraph,
                 numbering_stripped=numbering_stripped,
                 last_conflict_text=last_conflict_text,
+                status_reason=status_reason,
             )
                 
         except Exception as e:

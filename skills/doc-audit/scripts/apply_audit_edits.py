@@ -69,7 +69,7 @@ class AuditEditApplier(
         for i, item in enumerate(self.edit_items):
             if self.verbose:
                 print(f"[{i+1}/{len(self.edit_items)}] {item.fix_action}: "
-                      f"{item.violation_text[:40]}...")
+                      f"{item.violation_text[:50]}...")
 
             result = self._process_item(item)
             self.results.append(result)

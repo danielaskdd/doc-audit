@@ -114,7 +114,7 @@ def json_escape(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)[1:-1]
 
 
-def format_text_preview(text: str, max_len: int = 30) -> str:
+def format_text_preview(text: str, max_len: int = 50) -> str:
     """
     Format text for log output: remove newlines and truncate.
 

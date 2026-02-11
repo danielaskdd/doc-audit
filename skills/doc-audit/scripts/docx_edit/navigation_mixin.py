@@ -54,6 +54,9 @@ class NavigationMixin:
         # Results tracking
         self.results: List[EditResult] = []
 
+        # One-shot status reason latch (written by apply methods, consumed in result mapping)
+        self._pending_status_reason = None
+
     def _category_suffix(self, item: EditItem) -> str:
         """Normalize category suffix for author; default to 'uncategorized'."""
         category = (item.category or '').strip()

@@ -7,13 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 import json
-
-TESTS_DIR = Path(__file__).parent
-sys.path.insert(0, str(TESTS_DIR))
-
 from lxml import etree
 from docx import Document
-
 from _apply_audit_edits_helpers import AuditEditApplier, NS
 
 
@@ -519,10 +514,9 @@ def test_cell_separator_delete_fallback(tmp_path):
             f"Operation should succeed with warning: {results[0].error_message if results else 'No results'}"
         )
         assert results[0].warning, "Operation should have warning flag (fallback to comment)"
-        assert (
-            "fallback" in results[0].error_message.lower()
-            or "cross-cell" in results[0].error_message.lower()
-        ), f"Expected fallback/cross-cell message, got: {results[0].error_message}"
+        assert results[0].error_message.startswith(
+            "CC_XTRACT_FAIL:"
+        ), f"Expected detailed cross-cell reason code, got: {results[0].error_message}"
 
         print("\n✓ Cell separator delete correctly fell back to comment")
         print(f"  Warning: {results[0].error_message}")
@@ -594,10 +588,9 @@ def test_row_separator_delete_fallback(tmp_path):
             f"Operation should succeed with warning: {results[0].error_message if results else 'No results'}"
         )
         assert results[0].warning, "Operation should have warning flag (fallback to comment)"
-        assert (
-            "fallback" in results[0].error_message.lower()
-            or "cross-cell" in results[0].error_message.lower()
-        ), f"Expected fallback/cross-cell message, got: {results[0].error_message}"
+        assert results[0].error_message.startswith(
+            "CC_XTRACT_FAIL:"
+        ), f"Expected detailed cross-cell reason code, got: {results[0].error_message}"
 
         print("\n✓ Row separator delete correctly fell back to comment")
         print(f"  Warning: {results[0].error_message}")

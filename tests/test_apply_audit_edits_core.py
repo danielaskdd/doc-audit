@@ -1727,3 +1727,29 @@ class TestProcessItemConflictRetry:
 
         where_part = conflict_comments[0]["text"].split("{WHERE}", 1)[1].split("{SUGGEST}", 1)[0]
         assert where_part == "foo "
+
+
+class TestStatusReasonLatch:
+    """Tests for one-shot status reason write/consume behavior."""
+
+    def test_consume_requires_matching_status(self):
+        applier = create_mock_applier()
+        applier._set_status_reason(
+            "cross_cell_fallback",
+            "CC_SAMPLE",
+            "sample reason",
+        )
+
+        # Mismatch should not consume.
+        assert applier._consume_status_reason("fallback") is None
+        matched = applier._consume_status_reason("cross_cell_fallback")
+        assert matched == "CC_SAMPLE: sample reason"
+
+        # One-shot: consumed reason should be cleared.
+        assert applier._consume_status_reason("cross_cell_fallback") is None
+
+    def test_set_is_last_write_wins_not_queue(self):
+        applier = create_mock_applier()
+        applier._set_status_reason("fallback", "FB_A", "first")
+        applier._set_status_reason("fallback", "FB_B", "second")
+        assert applier._consume_status_reason("fallback") == "FB_B: second"

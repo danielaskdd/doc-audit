@@ -196,7 +196,11 @@ class TableEditMixin:
             'success' if at least one cell deleted, 'fallback' if all failed
         """
         if not real_runs:
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MC_DEL_NO_RUN',
+                'multi-delete no runs',
+            )
 
         match_end = match_start + len(violation_text)
 
@@ -354,7 +358,11 @@ class TableEditMixin:
             return 'success'
         else:
             # All cells failed - fallback to overall comment
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_MC_DEL_ALL',
+                'all cells failed in multi-delete',
+            )
 
     def _try_extract_multi_cell_edits(self, violation_text: str, revised_text: str,
                                         affected_runs: List[Dict], match_start: int) -> Optional[List[Dict]]:
@@ -573,7 +581,11 @@ class TableEditMixin:
                 cell_paras.add(para)
 
         if not cell_paras:
-            return 'cross_cell_fallback'
+            return self._set_status_reason(
+                'cross_cell_fallback',
+                'CC_NO_PARA',
+                'cell has no paragraph anchor',
+            )
 
         if len(cell_paras) == 1:
             # Single paragraph — direct apply (existing simple path)
@@ -581,7 +593,11 @@ class TableEditMixin:
             runs_info, text = self._collect_runs_info_original(para)
             pos = text.find(cell_violation)
             if pos == -1:
-                return 'cross_cell_fallback'
+                return self._set_status_reason(
+                    'cross_cell_fallback',
+                    'CC_TEXT_MISS',
+                    'cell text not found',
+                )
             return self._apply_replace(
                 para, cell_violation, cell_revised,
                 violation_reason, runs_info, pos, author,
@@ -619,7 +635,11 @@ class TableEditMixin:
         # Paragraph delimiters are represented by a single "\n" between paragraphs.
         expected_cell_text = '\n'.join(para_texts)
         if cell_violation != expected_cell_text:
-            return 'cross_cell_fallback'
+            return self._set_status_reason(
+                'cross_cell_fallback',
+                'CC_TEXT_DIFF',
+                'cell text mismatch',
+            )
 
         # 4. Build para_segments from actual paragraph lengths
         para_segments = []

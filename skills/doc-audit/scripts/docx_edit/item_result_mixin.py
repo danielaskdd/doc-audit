@@ -20,6 +20,7 @@ class ItemResultMixin:
         is_cross_paragraph: bool,
         numbering_stripped: bool,
         last_conflict_text: str,
+        status_reason: str = None,
     ) -> EditResult:
         """Build final EditResult for a processed item."""
         if success_status == 'success':
@@ -54,6 +55,7 @@ class ItemResultMixin:
             )
 
         if success_status == 'cross_paragraph_fallback':
+            reason = status_reason or "Cross-paragraph delete/replace not supported"
             return self._build_manual_fallback_result(
                 item=item,
                 target_para=target_para,
@@ -63,12 +65,12 @@ class ItemResultMixin:
                 matched_start=matched_start,
                 item_author=item_author,
                 is_cross_paragraph=is_cross_paragraph,
-                reason="Cross-paragraph delete/replace not supported",
+                reason=reason,
                 verbose_label="Cross-paragraph",
             )
 
         if success_status == 'cross_row_fallback':
-            reason = "Cross-row edit not supported"
+            reason = status_reason or "Cross-row edit not supported"
             self._apply_fallback_comment(target_para, item, reason)
             if self.verbose:
                 print("  [Cross-row] Applied fallback comment")
@@ -80,6 +82,7 @@ class ItemResultMixin:
             )
 
         if success_status == 'cross_cell_fallback':
+            reason = status_reason or "Cross-cell edit not supported"
             return self._build_manual_fallback_result(
                 item=item,
                 target_para=target_para,
@@ -89,11 +92,12 @@ class ItemResultMixin:
                 matched_start=matched_start,
                 item_author=item_author,
                 is_cross_paragraph=is_cross_paragraph,
-                reason="Cross-cell edit not supported",
+                reason=reason,
                 verbose_label="Cross-cell",
             )
 
         if success_status == 'equation_fallback':
+            reason = status_reason or "Equation cannot be edited"
             return self._build_manual_fallback_result(
                 item=item,
                 target_para=target_para,
@@ -103,12 +107,12 @@ class ItemResultMixin:
                 matched_start=matched_start,
                 item_author=item_author,
                 is_cross_paragraph=is_cross_paragraph,
-                reason="Equation cannot be edited",
+                reason=reason,
                 verbose_label="Equation-only",
             )
 
         if success_status == 'fallback':
-            reason = "No editable runs found"
+            reason = status_reason or "No editable runs found"
             if item.fix_action == 'manual':
                 self._apply_error_comment(target_para, item)
             else:

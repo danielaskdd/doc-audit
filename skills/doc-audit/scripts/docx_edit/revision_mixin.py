@@ -68,7 +68,11 @@ class RevisionMixin:
         if should_reject:
             if self.verbose:
                 print(f"  [Fallback] {reject_reason}")
-            return fallback_status
+            return self._set_status_reason(
+                fallback_status,
+                'FB_DIFF_SPECIAL',
+                reject_reason,
+            )
 
         # 2. Detect deleted paragraph boundaries
         # Only treat the \n between paragraph segments as real boundaries.
@@ -113,13 +117,21 @@ class RevisionMixin:
                 if match_pos is None:
                     match_pos = stripped_text.find(orig_segment)
                 if match_pos == -1:
-                    return fallback_status
+                    return self._set_status_reason(
+                        fallback_status,
+                        'FB_DIFF_SEG_MISS',
+                        'segment miss after strip-runs',
+                    )
                 match_pos += lead
             else:
                 if match_pos is None:
                     match_pos = para_text.find(orig_segment)
                 if match_pos == -1:
-                    return fallback_status
+                    return self._set_status_reason(
+                        fallback_status,
+                        'FB_DIFF_SEG_MISS',
+                        'segment miss in paragraph',
+                    )
 
             status = self._apply_replace(
                 para_elem, orig_segment, revised_segment,
@@ -128,9 +140,17 @@ class RevisionMixin:
             )
 
             if status == 'conflict':
-                return 'conflict'
+                return self._set_status_reason(
+                    'conflict',
+                    'CF_OVERLAP',
+                    'overlaps existing revision',
+                )
             if status != 'success':
-                return fallback_status
+                return self._set_status_reason(
+                    fallback_status,
+                    'FB_DIFF_CHILD',
+                    f'child replace returned {status}',
+                )
             any_applied = True
 
         # 4. Merge paragraphs where boundary was deleted

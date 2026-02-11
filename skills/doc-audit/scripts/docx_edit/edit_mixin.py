@@ -289,31 +289,51 @@ class EditMixin:
         if not affected:
             if self.verbose:
                 print("  [Cross-paragraph delete] No affected runs found")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_NO_HIT',
+                'delete hit not found',
+            )
 
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
             if self.verbose:
                 print("  [Cross-paragraph delete] No real runs after filtering")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_NO_RUN',
+                'no editable runs',
+            )
 
         # Do not apply cross-paragraph delete in table mode
         if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
             if self.verbose:
                 print("  [Cross-paragraph delete] Table mode detected, fallback")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_TBL_MODE',
+                'table mode unsupported',
+            )
 
         # Check overlap with existing revisions
         if self._check_overlap_with_revisions(real_runs):
             if self.verbose:
                 print("  [Cross-paragraph delete] Overlap with existing revisions")
-            return 'conflict'
+            return self._set_status_reason(
+                'conflict',
+                'CF_OVERLAP',
+                'overlaps existing revision',
+            )
 
         para_groups = self._group_runs_by_paragraph(real_runs)
         if not para_groups:
             if self.verbose:
                 print("  [Cross-paragraph delete] No paragraph groups")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_NO_GRP',
+                'run grouping failed',
+            )
 
         if self.verbose:
             print(f"  [Cross-paragraph delete] Processing {len(para_groups)} paragraph(s)")
@@ -324,7 +344,11 @@ class EditMixin:
         if not prepared:
             if self.verbose:
                 print("  [Cross-paragraph delete] No paragraphs prepared for deletion")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_NO_SEG',
+                'no segments prepared',
+            )
 
         # Pre-generate shared change_id and comment_id for unified deletion
         shared_change_id = self._get_next_change_id()
@@ -339,7 +363,11 @@ class EditMixin:
         if success_count == 0:
             if self.verbose:
                 print(f"  [Cross-paragraph delete] All paragraphs failed, fallback to comment")
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_DEL_ALL_FAIL',
+                'all segments failed',
+            )
         
         # Record single comment for the unified deletion
         self.comments.append({
@@ -374,24 +402,44 @@ class EditMixin:
 
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
         if not affected:
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_REP_NO_HIT',
+                'replace hit not found',
+            )
 
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_REP_NO_RUN',
+                'no editable runs',
+            )
 
         # Do not apply cross-paragraph replace in table mode
         if self._is_table_mode(real_runs) or any(r.get('cell_elem') is not None for r in real_runs):
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_REP_TBL_MODE',
+                'table mode unsupported',
+            )
 
         # Check overlap with existing revisions
         if self._check_overlap_with_revisions(real_runs):
-            return 'conflict'
+            return self._set_status_reason(
+                'conflict',
+                'CF_OVERLAP',
+                'overlaps existing revision',
+            )
 
         # Build paragraph groups in order
         para_groups = self._group_runs_by_paragraph(real_runs)
         if not para_groups:
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_REP_NO_GRP',
+                'run grouping failed',
+            )
 
         # Build paragraph ranges within combined_text
         para_segments = self._build_para_segments_from_groups(
@@ -401,7 +449,11 @@ class EditMixin:
         )
 
         if not para_segments:
-            return 'cross_paragraph_fallback'
+            return self._set_status_reason(
+                'cross_paragraph_fallback',
+                'CP_REP_SEG_FAIL',
+                'segment build failed',
+            )
 
         return self._apply_diff_per_paragraph(
             para_segments, violation_text, revised_text,
@@ -438,18 +490,34 @@ class EditMixin:
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
 
         if not affected:
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_DEL_NO_HIT',
+                'delete hit not found',
+            )
 
         # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
             if any(r.get('is_equation', False) for r in affected):
-                return 'equation_fallback'
-            return 'fallback'
+                return self._set_status_reason(
+                    'equation_fallback',
+                    'EQ_DEL_ONLY',
+                    'equation-only target',
+                )
+            return self._set_status_reason(
+                'fallback',
+                'FB_DEL_NO_RUN',
+                'no editable runs',
+            )
 
         # Check if text overlaps with previous modifications
         if self._check_overlap_with_revisions(real_runs):
-            return 'conflict'
+            return self._set_status_reason(
+                'conflict',
+                'CF_OVERLAP',
+                'overlaps existing revision',
+            )
 
         rPr_xml = self._get_rPr_xml(real_runs[0].get('rPr'))
         change_id = self._get_next_change_id()
@@ -591,14 +659,26 @@ class EditMixin:
         affected = self._find_affected_runs(orig_runs_info, match_start, match_end)
 
         if not affected:
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_REP_NO_HIT',
+                'replace hit not found',
+            )
 
         # Filter out synthetic boundary runs (JSON boundaries, para boundaries)
         real_runs = self._filter_real_runs(affected)
         if not real_runs:
             if any(r.get('is_equation', False) for r in affected):
-                return 'equation_fallback'
-            return 'fallback'
+                return self._set_status_reason(
+                    'equation_fallback',
+                    'EQ_REP_ONLY',
+                    'equation-only target',
+                )
+            return self._set_status_reason(
+                'fallback',
+                'FB_REP_NO_RUN',
+                'no editable runs',
+            )
 
         # Check if we need markup-aware diff (detect <sup>/<sub> tags)
         has_markup = ('<sup>' in violation_text or '<sub>' in violation_text or 
@@ -618,7 +698,11 @@ class EditMixin:
         if should_reject:
             if self.verbose:
                 print(f"  [Fallback] {reject_reason}")
-            return 'fallback'
+            return self._set_status_reason(
+                'fallback',
+                'FB_REP_SPECIAL',
+                reject_reason,
+            )
 
         # Check for conflicts only on delete operations
         current_pos = match_start
@@ -634,7 +718,11 @@ class EditMixin:
                 del_affected = self._find_affected_runs(orig_runs_info, current_pos, del_end)
                 del_real = self._filter_real_runs(del_affected)
                 if self._check_overlap_with_revisions(del_real):
-                    return 'conflict'
+                    return self._set_status_reason(
+                        'conflict',
+                        'CF_OVERLAP',
+                        'overlaps existing revision',
+                    )
                 current_pos = del_end
             elif op == 'equal':
                 current_pos += len(text)
