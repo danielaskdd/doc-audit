@@ -1,4 +1,4 @@
-# Word无头编辑工作流
+# Word无头编辑脚本说明
 
 本文面向维护 `apply_audit_edits.py` 的开发者，梳理“审核结果应用”在不同 `fix_action` 下的执行路径、状态流转与回退策略。
 
@@ -30,7 +30,7 @@
 
 ---
 
-## 1. 总览：单条审核项的处理骨架
+## 1. 总览：单条编辑项的处理骨架
 
 `AuditEditApplier.apply()` 对每条 `EditItem` 执行 `_process_item(item)`，整体分 4 段：
 
@@ -180,7 +180,7 @@ JSONL -> EditItem
 
 ---
 
-## 3. fix_action 分流与编辑路径
+## 3. 编辑阶段（按fix_action 分流与编辑路径）
 
 ### 3.1 `fix_action = delete`
 
@@ -292,7 +292,7 @@ manual 不做 track changes，只做评论标注（范围注释优先，必要�
 
 ---
 
-## 4. 冲突重试策略（delete/replace 共享）
+## 4. 编辑冲突重试策略（delete/replace 共享）
 
 如果审核结果要求对同一个文本块的多处相同内容进行修改，后面条目的修改会命中前面已经修改过的条目，导致出现编辑冲突（当状态为 `conflict`，典型是 `CF_OVERLAP`），此时在剩余的文本块中继续重试。即在后续的文本块中进行匹配和应用规则：
 
@@ -307,7 +307,7 @@ manual 不做 track changes，只做评论标注（范围注释优先，必要�
 
 ---
 
-## 5. 状态到结果的映射（`_build_result_from_status`）
+## 5. 编辑状态到结果的映射（`_build_result_from_status`）
 
 `_build_result_from_status` 是“状态收口层”：把编辑阶段返回的内部状态字符串统一转换成最终 `EditResult`，并集中处理降级 comment 的副作用。
 
@@ -340,17 +340,18 @@ manual 不做 track changes，只做评论标注（范围注释优先，必要�
 
 ---
 
-## 6. 注释策略分层
+## 6. 批注（注释）策略分层
 
-系统里有 4 类“注释落地”策略：
+系统里有 4 类“批注（注释）落地”策略：
 
-1. 正常注释（配合 track changes 的 comment）
-2. fallback comment：`_apply_fallback_comment()`
+1. 正常comment（Manual和Repalce完成后的 comment）
+2. 编辑失败后的fallback comment：`_apply_fallback_comment()`
    - 格式：`[FALLBACK]{reason}\n{WHY}...{WHERE}...{SUGGEST}...`
 3. error comment：`_apply_error_comment()`
    - 用于异常/未知状态
 4. cell fallback comment：`_apply_cell_fallback_comment()`
    - 多 cell 部分失败场景，前缀 `[CELL FAILED]`
+   - 对部分失败的cell单独添加批注
 
 ---
 
@@ -483,7 +484,7 @@ manual 不做 track changes，只做评论标注（范围注释优先，必要�
 
 ---
 
-## 9. 失败项输出与重试
+## 9. 失败编辑条目输出与重试
 
 `apply()` 后，`save_failed_items()` 会把失败条目输出为 `<input>_fail.jsonl`：
 
@@ -495,6 +496,8 @@ manual 不做 track changes，只做评论标注（范围注释优先，必要�
 ```bash
 python skills/doc-audit/scripts/apply_audit_edits.py xxx_fail.jsonl --skip-hash
 ```
+
+> 重跑前应当先接受把之前的修订并清空所有批注，避免新旧批注信息叠加在一起。
 
 ---
 
