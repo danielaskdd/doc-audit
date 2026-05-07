@@ -1249,6 +1249,55 @@ def extract_paragraph_content(
     return ''.join(parts)
 
 
+def _build_unsplit_block(heading: str, paragraphs: list, parent_headings: list, level: int) -> dict:
+    """Build a single block from paragraphs without size-based splitting."""
+    last_para = paragraphs[-1]
+    return {
+        "uuid": paragraphs[0]['para_id'],
+        "uuid_end": last_para.get('para_id_end') or last_para.get('para_id'),
+        "heading": heading,
+        "content": "\n".join(p['text'] for p in paragraphs),
+        "type": "text",
+        "parent_headings": parent_headings,
+        "level": level,
+    }
+
+
+def _flush_current_block(
+    blocks: list,
+    heading: str,
+    paragraphs: list,
+    parent_headings: list,
+    level: int,
+    fixlevel: int,
+    debug: bool,
+) -> None:
+    """
+    Flush accumulated paragraphs into blocks, respecting fixlevel mode.
+
+    In default mode (fixlevel is None), runs split_long_block for token-based splitting.
+    In fixlevel mode, emits a single unsplit block and warns when size exceeds the limit.
+    """
+    if not paragraphs:
+        return
+
+    if fixlevel is None:
+        blocks.extend(split_long_block(heading, paragraphs, parent_headings, level, debug))
+        return
+
+    block = _build_unsplit_block(heading, paragraphs, parent_headings, level)
+    block_tokens = estimate_tokens(block['content'])
+    if block_tokens > MAX_BLOCK_CONTENT_TOKENS:
+        preview = heading[:80] + "..." if len(heading) > 80 else heading
+        print(
+            f"Warning: fixlevel block exceeds {MAX_BLOCK_CONTENT_TOKENS} tokens "
+            f"(~{block_tokens} tokens) under heading \"{preview}\". "
+            f"Consider increasing --fixlevel=N or removing --fixlevel for automatic splitting.",
+            file=sys.stderr,
+        )
+    blocks.append(block)
+
+
 def extract_audit_blocks(
     file_path: str,
     debug: bool = False,
@@ -1347,25 +1396,12 @@ def extract_audit_blocks(
                     # This heading triggers a block split
                     # Only save previous block if it has body content
                     if has_body_content and current_paragraphs:
-                        # Split long blocks if needed (unless in fixlevel mode)
-                        if fixlevel is None:
-                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
-                        else:
-                            # Fixed level mode: no splitting, create single block
-                            total_content = "\n".join(p['text'] for p in current_paragraphs)
-                            last_para = current_paragraphs[-1]
-                            uuid_end = last_para.get('para_id_end') or last_para.get('para_id')
-                            split_blocks = [{
-                                "uuid": current_paragraphs[0]['para_id'],
-                                "uuid_end": uuid_end,
-                                "heading": current_heading,
-                                "content": total_content,
-                                "type": "text",
-                                "parent_headings": current_parent_headings,
-                                "level": current_heading_level
-                            }]
-                        blocks.extend(split_blocks)
-                        
+                        _flush_current_block(
+                            blocks, current_heading, current_paragraphs,
+                            current_parent_headings, current_heading_level,
+                            fixlevel, debug,
+                        )
+
                         # Reset for new block
                         current_paragraphs = []
                         has_body_content = False
@@ -1481,8 +1517,11 @@ def extract_audit_blocks(
                     else:
                         # Middle or last chunk: save current block first
                         if current_paragraphs:
-                            split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
-                            blocks.extend(split_blocks)
+                            _flush_current_block(
+                                blocks, current_heading, current_paragraphs,
+                                current_parent_headings, current_heading_level,
+                                fixlevel, debug,
+                            )
                             current_paragraphs = []
                             has_body_content = False
                         
@@ -1558,32 +1597,40 @@ def extract_audit_blocks(
             # Reset numbering tracking after table (table end boundary)
             resolver.reset_tracking_state()
     
-    # Save final block with splitting if needed
-    if current_paragraphs:
-        # Split long blocks if needed
-        split_blocks = split_long_block(current_heading, current_paragraphs, current_parent_headings, current_heading_level, debug)
-        blocks.extend(split_blocks)
-    
+    # Save final block (respecting fixlevel mode)
+    _flush_current_block(
+        blocks, current_heading, current_paragraphs,
+        current_parent_headings, current_heading_level,
+        fixlevel, debug,
+    )
+
     # Add table_chunk_role="none" to all blocks that don't have it (non-table or unsplit table blocks)
     for block in blocks:
         if 'table_chunk_role' not in block:
             block['table_chunk_role'] = "none"
-    
+
     # Perform small block merging (unified merging after all splits)
     # Disabled in fixlevel mode
     if fixlevel is None:
         if debug:
             print(f"\n[DEBUG] Before merging: {len(blocks)} blocks", file=sys.stderr)
-        
+
         merged_blocks, merge_count = merge_small_blocks(blocks, debug)
-        
+
         if debug and merge_count > 0:
             print(f"[DEBUG] After merging: {len(merged_blocks)} blocks ({merge_count} merges performed)", file=sys.stderr)
-        
+
         return merged_blocks
-    else:
-        # Fixed level mode: skip merging
-        return blocks
+
+    # Fixed level mode: skip merging, but warn if no matching headings produced multiple blocks
+    if fixlevel > 0 and len(blocks) <= 1:
+        print(
+            f"Warning: --fixlevel={fixlevel} produced {len(blocks)} block(s). "
+            f"Document may not have heading levels <= {fixlevel}. "
+            f"Try a higher --fixlevel value or remove the flag.",
+            file=sys.stderr,
+        )
+    return blocks
 
 
 def calculate_file_hash(file_path: str) -> str:
