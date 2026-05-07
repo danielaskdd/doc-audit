@@ -214,6 +214,62 @@ def test_extract_audit_blocks_warns_when_fixlevel_misses_all_headings(capsys, tm
     assert "Try a higher --fixlevel value" in captured.err
 
 
+def test_extract_audit_blocks_does_not_warn_for_single_matching_fixlevel_block(capsys, monkeypatch):
+    """A valid one-chapter document can produce one block and should not warn."""
+    import parse_document  # type: ignore[import-not-found]
+
+    class FakeParagraph:
+        tag = 'p'
+
+        def __init__(self, text, para_id, outline_level):
+            self.text = text
+            self.para_id = para_id
+            self.outline_level = outline_level
+
+        def __iter__(self):
+            return iter([])
+
+        def get(self, name):
+            if name.endswith('}paraId'):
+                return self.para_id
+            return None
+
+        def find(self, *a, **kw):
+            return None
+
+    class FakeBody:
+        def __iter__(self):
+            return iter([
+                FakeParagraph("Chapter 1", "AAAAAAAA", 0),
+                FakeParagraph("Body text", "BBBBBBBB", None),
+            ])
+
+    class FakeElement:
+        body = FakeBody()
+
+    class FakeDoc:
+        _element = FakeElement()
+
+    class FakeResolver:
+        def __init__(self, *a, **kw): pass
+        def reset_tracking_state(self): pass
+        def get_label(self, p): return ""
+
+    monkeypatch.setattr(parse_document, 'Document', lambda path: FakeDoc())
+    monkeypatch.setattr(parse_document, 'NumberingResolver', FakeResolver)
+    monkeypatch.setattr(parse_document, 'parse_styles_outline_levels', lambda path: {})
+    monkeypatch.setattr(parse_document, 'extract_paragraph_content', lambda p, *a, **kw: p.text)
+    monkeypatch.setattr(parse_document, 'get_heading_level', lambda p, styles: p.outline_level)
+
+    blocks = parse_document.extract_audit_blocks("dummy.docx", fixlevel=1)
+    captured = capsys.readouterr()
+
+    assert len(blocks) == 1
+    assert blocks[0]['heading'] == "Chapter 1"
+    assert "produced" not in captured.err
+    assert "heading levels" not in captured.err
+
+
 def test_extract_audit_blocks_no_sanity_warning_for_fixlevel_zero(capsys, monkeypatch):
     """fixlevel=0 means 'split at all heading levels' — zero/one block result is not a misconfiguration."""
     import parse_document  # type: ignore[import-not-found]

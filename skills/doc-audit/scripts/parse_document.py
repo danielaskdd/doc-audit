@@ -1335,6 +1335,7 @@ def extract_audit_blocks(
     current_parent_headings = []  # Parent headings for current block
     current_paragraphs = []  # Track paragraphs with metadata for splitting
     has_body_content = False  # Track if current block has body content (non-heading paragraphs/tables)
+    matched_fixlevel_heading = False  # Track whether --fixlevel matched any heading
     table_split_counter = 0  # Track cumulative table split suffix numbers within current block
     
     # Iterate through document body elements (paragraphs and tables)
@@ -1393,6 +1394,9 @@ def extract_audit_blocks(
                 truncated_text = truncate_heading(full_text, heading_para_id)
                 
                 if should_split:
+                    if fixlevel is not None and fixlevel > 0:
+                        matched_fixlevel_heading = True
+
                     # This heading triggers a block split
                     # Only save previous block if it has body content
                     if has_body_content and current_paragraphs:
@@ -1622,8 +1626,8 @@ def extract_audit_blocks(
 
         return merged_blocks
 
-    # Fixed level mode: skip merging, but warn if no matching headings produced multiple blocks
-    if fixlevel > 0 and len(blocks) <= 1:
+    # Fixed level mode: skip merging, but warn if no heading matched the requested level
+    if fixlevel > 0 and not matched_fixlevel_heading:
         print(
             f"Warning: --fixlevel={fixlevel} produced {len(blocks)} block(s). "
             f"Document may not have heading levels <= {fixlevel}. "
