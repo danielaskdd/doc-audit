@@ -26,7 +26,6 @@ def _make_resolver_with_state(levels: dict, counters: dict, num_id: str = '1'):
     resolver.counters = {num_id: counters}
     resolver.start_overrides = {}
     resolver.style_numpr = {}
-    resolver.style_numpr_overrides = {}
     resolver.style_based_on = {}
     resolver.last_numId = None
     resolver.last_abstract_id = None
